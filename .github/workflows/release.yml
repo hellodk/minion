@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: MINION ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+
+  build-release:
+    name: Build (${{ matrix.target }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: minion
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: minion
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: minion
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: minion.exe
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 9
+      
+      - name: Install UI dependencies
+        run: cd ui && pnpm install
+      
+      - name: Build UI
+        run: cd ui && pnpm build
+      
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czvf minion-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
+      
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a minion-${{ github.ref_name }}-${{ matrix.target }}.zip ${{ matrix.artifact }}
+      
+      - name: Upload Release Asset (Unix)
+        if: matrix.os != 'windows-latest'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./target/${{ matrix.target }}/release/minion-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          asset_name: minion-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          asset_content_type: application/gzip
+      
+      - name: Upload Release Asset (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./target/${{ matrix.target }}/release/minion-${{ github.ref_name }}-${{ matrix.target }}.zip
+          asset_name: minion-${{ github.ref_name }}-${{ matrix.target }}.zip
+          asset_content_type: application/zip

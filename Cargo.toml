@@ -1,0 +1,125 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/minion-core",
+    "crates/minion-db",
+    "crates/minion-crypto",
+    "crates/minion-ai",
+    "crates/minion-plugins",
+    "crates/minion-search",
+    "crates/minion-media",
+    "crates/minion-files",
+    "crates/minion-blog",
+    "crates/minion-finance",
+    "crates/minion-fitness",
+    "crates/minion-reader",
+    "crates/minion-app",
+    "crates/minion-integration-tests",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["MINION Team"]
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+repository = "https://github.com/minion-app/minion"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled", "backup", "blob", "functions"] }
+libsql = "0.4"
+r2d2 = "0.8"
+r2d2_sqlite = "0.24"
+
+# Encryption (pinned to avoid edition2024 incompatibility with Rust 1.82)
+aes-gcm = "=0.10.3"
+argon2 = "=0.5.3"
+rand = "0.8"
+zeroize = { version = "=1.8.1", features = ["derive"] }
+sha2 = "=0.10.8"
+blake3 = "=1.5.4"
+hkdf = "=0.12.4"
+hmac = "=0.12.1"
+base64ct = "=1.6.0"  # Pin to avoid edition2024
+
+# Search
+tantivy = "0.22"
+
+# Vector store
+usearch = "2.9"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+
+# File system
+walkdir = "2.4"
+jwalk = "0.8"
+notify = "6.1"
+glob = "0.3"
+
+# Image processing (excluding AVIF which requires newer Rust)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+
+# Hashing
+hex = "0.4"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Tauri
+tauri = { version = "2.0", features = [] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Semver
+semver = { version = "1.0", features = ["serde"] }
+
+# Concurrency
+parking_lot = "0.12"
+crossbeam = "0.8"
+flume = "0.11"
+rayon = "1.8"
+num_cpus = "1.16"
+
+# Utilities
+dirs = "5.0"
+
+# Testing
+tempfile = "3.10"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

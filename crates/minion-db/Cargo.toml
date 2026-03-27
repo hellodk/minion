@@ -1,0 +1,21 @@
+[package]
+name = "minion-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MINION database layer - SQLite, migrations, connection pooling"
+
+[dependencies]
+rusqlite.workspace = true
+r2d2.workspace = true
+r2d2_sqlite.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

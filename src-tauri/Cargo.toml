@@ -1,0 +1,43 @@
+[package]
+name = "minion-tauri"
+version = "0.1.0"
+edition = "2021"
+description = "MINION - Unified Personal Intelligence Platform"
+license = "MIT"
+
+[lib]
+name = "minion_tauri_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = [] }
+tauri-plugin-shell = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.6", features = ["v4"] }
+tokio = { version = "1.35", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Local crates
+minion-core = { path = "../crates/minion-core" }
+minion-db = { path = "../crates/minion-db" }
+minion-crypto = { path = "../crates/minion-crypto" }
+minion-files = { path = "../crates/minion-files" }
+minion-reader = { path = "../crates/minion-reader" }
+
+# Additional deps
+html-escape = "0.2"
+epub = "2.1"
+tauri-plugin-dialog = "2.6.0"
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

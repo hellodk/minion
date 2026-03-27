@@ -1,0 +1,19 @@
+[package]
+name = "minion-integration-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Integration tests for MINION"
+
+[dependencies]
+minion-core = { path = "../minion-core" }
+minion-db = { path = "../minion-db" }
+minion-crypto = { path = "../minion-crypto" }
+minion-files = { path = "../minion-files" }
+minion-ai = { path = "../minion-ai" }
+minion-reader = { path = "../minion-reader" }
+
+rusqlite.workspace = true
+tempfile.workspace = true
+chrono.workspace = true
+hex = "0.4"

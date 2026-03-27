@@ -1,0 +1,26 @@
+[package]
+name = "minion-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MINION Application - main entry point"
+
+[dependencies]
+tokio.workspace = true
+tauri.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+minion-core = { path = "../minion-core" }
+minion-db = { path = "../minion-db" }
+minion-crypto = { path = "../minion-crypto" }
+minion-ai = { path = "../minion-ai" }
+minion-files = { path = "../minion-files" }
+minion-reader = { path = "../minion-reader" }
+minion-finance = { path = "../minion-finance" }
+minion-fitness = { path = "../minion-fitness" }
+minion-media = { path = "../minion-media" }
+minion-blog = { path = "../minion-blog" }

@@ -1,0 +1,31 @@
+[package]
+name = "minion-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MINION core engine - event bus, plugin system, configuration"
+
+[dependencies]
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+semver.workspace = true
+parking_lot.workspace = true
+flume.workspace = true
+dirs.workspace = true
+num_cpus.workspace = true
+
+# Local crates
+minion-crypto = { path = "../minion-crypto" }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

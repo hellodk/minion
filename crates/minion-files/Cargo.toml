@@ -1,0 +1,30 @@
+[package]
+name = "minion-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MINION File Intelligence - duplicate detection, storage analytics"
+
+[dependencies]
+tokio.workspace = true
+walkdir.workspace = true
+jwalk.workspace = true
+notify.workspace = true
+glob.workspace = true
+image.workspace = true
+sha2.workspace = true
+blake3.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+rayon.workspace = true
+num_cpus.workspace = true
+
+minion-db = { path = "../minion-db" }
+
+[dev-dependencies]
+tempfile.workspace = true
