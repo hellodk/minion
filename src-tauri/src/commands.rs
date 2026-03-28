@@ -1413,6 +1413,33 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
                 cover_base64: None,
             })
         }
+        BookFormat::Html => {
+            let content = std::fs::read_to_string(&book_path).map_err(|e| e.to_string())?;
+            let filename = book_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+
+            Ok(BookContentResponse {
+                metadata: BookMetadataInfo {
+                    title: filename.clone(),
+                    authors: vec![],
+                    publisher: None,
+                    language: None,
+                    description: None,
+                },
+                chapters: vec![ChapterInfo {
+                    index: 0,
+                    title: filename,
+                    content,
+                }],
+                toc: vec![],
+                file_path: Some(path.clone()),
+                format: "html".to_string(),
+                cover_base64: None,
+            })
+        }
         _ => Err(format!("Format {:?} not yet supported", format)),
     }
 }
@@ -1454,7 +1481,7 @@ pub async fn reader_list_books(directory: String) -> Result<Vec<BookInfo>, Strin
     }
 
     let mut books = Vec::new();
-    let supported_extensions = ["epub", "pdf", "txt", "md", "markdown"];
+    let supported_extensions = ["epub", "pdf", "txt", "md", "markdown", "html", "htm"];
 
     if let Ok(entries) = std::fs::read_dir(&dir_path) {
         for entry in entries.flatten() {
@@ -2702,7 +2729,7 @@ pub async fn reader_scan_directory(
         return Err(format!("Not a directory: {}", path));
     }
 
-    let book_extensions = ["epub", "pdf", "mobi", "azw3", "fb2", "djvu", "cbz", "cbr"];
+    let book_extensions = ["epub", "pdf", "mobi", "azw3", "fb2", "djvu", "cbz", "cbr", "txt", "md", "markdown", "html", "htm"];
     let mut book_paths = Vec::new();
 
     // Collect book files from the directory (non-recursive for now, then recurse)

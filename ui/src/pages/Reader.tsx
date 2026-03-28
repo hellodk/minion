@@ -228,6 +228,8 @@ const Reader: Component = () => {
   };
 
   const openBookByPath = async (path: string, cardIndex?: number) => {
+    // Prevent multiple simultaneous opens
+    if (loading() || view() === 'reader') return;
     setLoading(true);
     try {
       // Import book to DB first to get its id
@@ -571,8 +573,11 @@ const Reader: Component = () => {
     return (
       <div
         class="book-card-3d cursor-pointer relative group"
-        classList={{ 'card-opening': openingCardIndex() === index }}
-        onClick={() => openLibraryBook(book, index)}
+        classList={{
+          'card-opening': openingCardIndex() === index,
+          'pointer-events-none opacity-60': loading(),
+        }}
+        onClick={() => !loading() && openLibraryBook(book, index)}
         onMouseMove={(e) => handleCardMouseMove(e, book.id)}
         onMouseLeave={handleCardMouseLeave}
       >
@@ -728,138 +733,184 @@ const Reader: Component = () => {
   return (
     <>
       <style>{`
-        /* Book card 3D tilt effect */
+        /* ============================================================
+         * Apple Books-style CSS
+         * ============================================================ */
+
+        /* Book card - realistic 3D book with spine, shadow, hover lift */
         .book-card-3d {
-          perspective: 800px;
+          perspective: 1200px;
           transform-style: preserve-3d;
         }
 
         .book-card-inner {
-          transition: transform 0.15s ease-out, box-shadow 0.3s ease;
+          transition: transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94), box-shadow 0.4s ease;
           transform-style: preserve-3d;
           will-change: transform;
+          border-radius: 4px;
+          /* Realistic book shadow - mimics a physical book on a surface */
+          box-shadow:
+            -4px 4px 6px rgba(0,0,0,0.08),
+            0 1px 3px rgba(0,0,0,0.06);
         }
 
         .book-card-inner:hover {
+          transform: translateY(-8px) scale(1.02);
           box-shadow:
-            0 20px 40px rgba(0, 0, 0, 0.15),
-            0 8px 16px rgba(0, 0, 0, 0.1);
+            -6px 20px 40px rgba(0,0,0,0.2),
+            -3px 8px 16px rgba(0,0,0,0.12),
+            0 2px 4px rgba(0,0,0,0.06);
         }
 
+        /* Glossy shine on hover - like a book jacket */
         .book-card-3d .book-cover-shine {
           position: absolute;
           inset: 0;
-          border-radius: 0.5rem;
+          border-radius: 4px;
           background: linear-gradient(
-            105deg,
-            transparent 40%,
-            rgba(255, 255, 255, 0.12) 45%,
-            rgba(255, 255, 255, 0.18) 50%,
-            transparent 55%
+            135deg,
+            transparent 30%,
+            rgba(255, 255, 255, 0.08) 42%,
+            rgba(255, 255, 255, 0.16) 48%,
+            rgba(255, 255, 255, 0.08) 54%,
+            transparent 66%
           );
           pointer-events: none;
           opacity: 0;
-          transition: opacity 0.3s ease;
+          transition: opacity 0.5s ease;
+          z-index: 5;
         }
 
         .book-card-inner:hover .book-cover-shine {
           opacity: 1;
         }
 
-        /* Book spine effect */
+        /* Book spine - thick left edge with gradient to look 3D */
         .book-card-inner::before {
           content: '';
           position: absolute;
           left: 0;
-          top: 4%;
-          bottom: 4%;
-          width: 3px;
+          top: 0;
+          bottom: 0;
+          width: 6px;
           background: linear-gradient(
-            to bottom,
-            rgba(0,0,0,0.08),
-            rgba(0,0,0,0.2),
-            rgba(0,0,0,0.08)
+            to right,
+            rgba(0,0,0,0.25),
+            rgba(0,0,0,0.08) 40%,
+            rgba(255,255,255,0.05) 60%,
+            transparent
           );
-          border-radius: 1px;
-          z-index: 2;
-          transform: translateZ(1px);
+          border-radius: 4px 0 0 4px;
+          z-index: 3;
         }
 
-        /* Page turn animations */
+        /* Page edge effect - white lines on the right (like stacked pages) */
+        .book-card-inner::after {
+          content: '';
+          position: absolute;
+          right: 0;
+          top: 8px;
+          bottom: 8px;
+          width: 4px;
+          background: repeating-linear-gradient(
+            to bottom,
+            rgba(0,0,0,0.03) 0px,
+            rgba(0,0,0,0.03) 1px,
+            rgba(255,255,255,0.6) 1px,
+            rgba(255,255,255,0.6) 2px
+          );
+          border-radius: 0 4px 4px 0;
+          z-index: 3;
+        }
+
+        /* Page turn animations - Apple Books style smooth slide with depth */
         @keyframes pageExitLeft {
           0% {
-            transform: translateX(0) scale(1);
+            transform: perspective(1200px) translateX(0) rotateY(0deg);
             opacity: 1;
+            transform-origin: left center;
           }
           100% {
-            transform: translateX(-60px) scale(0.97);
+            transform: perspective(1200px) translateX(-30px) rotateY(15deg);
             opacity: 0;
+            transform-origin: left center;
           }
         }
 
         @keyframes pageEnterRight {
           0% {
-            transform: translateX(60px) scale(0.97);
+            transform: perspective(1200px) translateX(50px) rotateY(-10deg);
             opacity: 0;
+            transform-origin: right center;
           }
           100% {
-            transform: translateX(0) scale(1);
+            transform: perspective(1200px) translateX(0) rotateY(0deg);
             opacity: 1;
+            transform-origin: right center;
           }
         }
 
         @keyframes pageExitRight {
           0% {
-            transform: translateX(0) scale(1);
+            transform: perspective(1200px) translateX(0) rotateY(0deg);
             opacity: 1;
+            transform-origin: right center;
           }
           100% {
-            transform: translateX(60px) scale(0.97);
+            transform: perspective(1200px) translateX(30px) rotateY(-15deg);
             opacity: 0;
+            transform-origin: right center;
           }
         }
 
         @keyframes pageEnterLeft {
           0% {
-            transform: translateX(-60px) scale(0.97);
+            transform: perspective(1200px) translateX(-50px) rotateY(10deg);
             opacity: 0;
+            transform-origin: left center;
           }
           100% {
-            transform: translateX(0) scale(1);
+            transform: perspective(1200px) translateX(0) rotateY(0deg);
             opacity: 1;
+            transform-origin: left center;
           }
         }
 
         .page-exit-left {
-          animation: pageExitLeft 0.3s ease-in forwards;
+          animation: pageExitLeft 0.35s cubic-bezier(0.4, 0, 0.2, 1) forwards;
         }
 
         .page-enter-right {
-          animation: pageEnterRight 0.3s ease-out forwards;
+          animation: pageEnterRight 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
 
         .page-exit-right {
-          animation: pageExitRight 0.3s ease-in forwards;
+          animation: pageExitRight 0.35s cubic-bezier(0.4, 0, 0.2, 1) forwards;
         }
 
         .page-enter-left {
-          animation: pageEnterLeft 0.3s ease-out forwards;
+          animation: pageEnterLeft 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
 
-        /* Book open animation */
+        /* Book open - zooms from card position with a page-unfold feel */
         @keyframes bookOpen {
           0% {
-            transform: scale(0.6);
+            transform: scale(0.4) rotateY(-20deg);
             opacity: 0;
-            filter: blur(4px);
+            filter: blur(8px);
           }
-          60% {
-            transform: scale(1.02);
-            opacity: 0.9;
+          50% {
+            transform: scale(0.9) rotateY(-5deg);
+            opacity: 0.8;
+            filter: blur(1px);
+          }
+          80% {
+            transform: scale(1.01) rotateY(0deg);
+            opacity: 1;
             filter: blur(0);
           }
           100% {
-            transform: scale(1);
+            transform: scale(1) rotateY(0deg);
             opacity: 1;
             filter: blur(0);
           }
@@ -867,29 +918,52 @@ const Reader: Component = () => {
 
         @keyframes bookClose {
           0% {
-            transform: scale(1);
+            transform: scale(1) rotateY(0deg);
             opacity: 1;
             filter: blur(0);
           }
+          40% {
+            transform: scale(0.95) rotateY(5deg);
+            opacity: 0.9;
+            filter: blur(1px);
+          }
           100% {
-            transform: scale(0.7);
+            transform: scale(0.4) rotateY(20deg);
             opacity: 0;
-            filter: blur(4px);
+            filter: blur(8px);
           }
         }
 
         .book-opening {
-          animation: bookOpen 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+          animation: bookOpen 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
 
         .book-closing {
-          animation: bookClose 0.35s ease-in forwards;
+          animation: bookClose 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+        }
+
+        /* Opening card pulse - the card being opened shrinks as the reader expands */
+        @keyframes cardShrinkAway {
+          0% { transform: scale(1); opacity: 1; }
+          50% { transform: scale(0.85); opacity: 0.5; }
+          100% { transform: scale(0.7); opacity: 0; }
+        }
+
+        .card-opening {
+          animation: cardShrinkAway 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+          pointer-events: none;
         }
 
         /* Reading progress bar */
         .reading-progress-bar {
           height: 3px;
           transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        /* Loading overlay for book opening */
+        @keyframes loadingPulse {
+          0%, 100% { opacity: 0.4; }
+          50% { opacity: 1; }
         }
 
         /* Sepia mode prose styles */
@@ -1140,7 +1214,16 @@ const Reader: Component = () => {
         {/* LIBRARY VIEW                                                     */}
         {/* ================================================================ */}
         <Show when={view() === 'library'}>
-          <div class="p-6 flex-1 overflow-auto">
+          <div class="p-6 flex-1 overflow-auto relative">
+            {/* Loading overlay when opening a book */}
+            <Show when={loading()}>
+              <div class="absolute inset-0 z-50 flex items-center justify-center bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm">
+                <div class="text-center">
+                  <div class="w-12 h-12 mx-auto mb-3 rounded-full border-3 border-gray-200 dark:border-gray-700 border-t-minion-500" style={{ 'border-width': '3px', animation: 'spin 1s linear infinite' }} />
+                  <p class="text-sm font-medium text-gray-600 dark:text-gray-300" style={{ animation: 'loadingPulse 1.5s ease infinite' }}>Opening book...</p>
+                </div>
+              </div>
+            </Show>
             {/* Header */}
             <div class="flex items-center justify-between mb-6">
               <h1 class="text-2xl font-bold">Book Reader</h1>
