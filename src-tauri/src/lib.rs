@@ -77,6 +77,14 @@ pub fn run() {
             commands::finance_get_summary,
             commands::finance_import_csv,
             commands::finance_spending_by_category,
+            // Investment portfolio commands
+            commands::finance_add_investment,
+            commands::finance_list_investments,
+            commands::finance_portfolio_summary,
+            commands::finance_update_price,
+            commands::finance_delete_investment,
+            commands::finance_fetch_mf_nav,
+            commands::finance_calc_cagr,
             // Fitness commands
             commands::fitness_add_habit,
             commands::fitness_list_habits,
@@ -93,6 +101,7 @@ pub fn run() {
             // O'Reilly commands
             commands::oreilly_connect_chrome,
             commands::oreilly_connect_sso,
+            commands::oreilly_open_browser,
             commands::oreilly_connect_manual,
             commands::oreilly_logout,
             // Collection commands

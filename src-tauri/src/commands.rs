@@ -136,6 +136,38 @@ pub struct CsvImportResult {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InvestmentResponse {
+    pub id: String,
+    pub name: String,
+    pub investment_type: String,
+    pub symbol: Option<String>,
+    pub exchange: Option<String>,
+    pub purchase_price: f64,
+    pub current_price: f64,
+    pub quantity: f64,
+    pub purchase_date: String,
+    pub gain_loss: f64,
+    pub gain_loss_pct: f64,
+    pub current_value: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PortfolioSummary {
+    pub total_invested: f64,
+    pub current_value: f64,
+    pub total_gain_loss: f64,
+    pub total_gain_loss_pct: f64,
+    pub by_type: Vec<TypeAllocation>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TypeAllocation {
+    pub investment_type: String,
+    pub value: f64,
+    pub percentage: f64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CsvMappingRequest {
     pub date_column: Option<String>,
@@ -1896,6 +1928,292 @@ pub async fn finance_spending_by_category(
 }
 
 // ============================================================================
+// Investment portfolio commands
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct AddInvestmentRequest {
+    pub name: String,
+    pub investment_type: String,
+    pub symbol: Option<String>,
+    pub exchange: Option<String>,
+    pub purchase_price: f64,
+    pub current_price: f64,
+    pub quantity: f64,
+    pub purchase_date: String,
+}
+
+#[tauri::command]
+pub async fn finance_add_investment(
+    state: State<'_, AppStateHandle>,
+    req: AddInvestmentRequest,
+) -> Result<InvestmentResponse, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO finance_investments
+         (id, name, type, symbol, exchange, purchase_price, current_price, quantity,
+          purchase_date, last_price_update, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+        rusqlite::params![
+            id,
+            req.name,
+            req.investment_type,
+            req.symbol,
+            req.exchange,
+            req.purchase_price,
+            req.current_price,
+            req.quantity,
+            req.purchase_date,
+            now,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let invested = req.purchase_price * req.quantity;
+    let current_value = req.current_price * req.quantity;
+    let gain_loss = current_value - invested;
+    let gain_loss_pct = if invested > 0.0 {
+        (gain_loss / invested) * 100.0
+    } else {
+        0.0
+    };
+
+    Ok(InvestmentResponse {
+        id,
+        name: req.name,
+        investment_type: req.investment_type,
+        symbol: req.symbol,
+        exchange: req.exchange,
+        purchase_price: req.purchase_price,
+        current_price: req.current_price,
+        quantity: req.quantity,
+        purchase_date: req.purchase_date,
+        gain_loss,
+        gain_loss_pct,
+        current_value,
+    })
+}
+
+#[tauri::command]
+pub async fn finance_list_investments(
+    state: State<'_, AppStateHandle>,
+) -> Result<Vec<InvestmentResponse>, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, type, symbol, exchange, purchase_price, current_price,
+                    quantity, purchase_date
+             FROM finance_investments ORDER BY created_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let purchase_price: f64 = row.get(5)?;
+            let current_price: f64 = row.get(6)?;
+            let quantity: f64 = row.get(7)?;
+            let invested = purchase_price * quantity;
+            let current_value = current_price * quantity;
+            let gain_loss = current_value - invested;
+            let gain_loss_pct = if invested > 0.0 {
+                (gain_loss / invested) * 100.0
+            } else {
+                0.0
+            };
+
+            Ok(InvestmentResponse {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                investment_type: row.get(2)?,
+                symbol: row.get(3)?,
+                exchange: row.get(4)?,
+                purchase_price,
+                current_price,
+                quantity,
+                purchase_date: row.get(8)?,
+                gain_loss,
+                gain_loss_pct,
+                current_value,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut investments = Vec::new();
+    for row in rows {
+        investments.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(investments)
+}
+
+#[tauri::command]
+pub async fn finance_portfolio_summary(
+    state: State<'_, AppStateHandle>,
+) -> Result<PortfolioSummary, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT type, purchase_price, current_price, quantity
+             FROM finance_investments",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut total_invested = 0.0;
+    let mut current_value = 0.0;
+    let mut type_values: HashMap<String, f64> = HashMap::new();
+
+    for row in rows {
+        let (inv_type, pp, cp, qty) = row.map_err(|e| e.to_string())?;
+        let invested = pp * qty;
+        let value = cp * qty;
+        total_invested += invested;
+        current_value += value;
+        *type_values.entry(inv_type).or_insert(0.0) += value;
+    }
+
+    let total_gain_loss = current_value - total_invested;
+    let total_gain_loss_pct = if total_invested > 0.0 {
+        (total_gain_loss / total_invested) * 100.0
+    } else {
+        0.0
+    };
+
+    let by_type: Vec<TypeAllocation> = type_values
+        .into_iter()
+        .map(|(investment_type, value)| {
+            let percentage = if current_value > 0.0 {
+                (value / current_value) * 100.0
+            } else {
+                0.0
+            };
+            TypeAllocation {
+                investment_type,
+                value,
+                percentage,
+            }
+        })
+        .collect();
+
+    Ok(PortfolioSummary {
+        total_invested,
+        current_value,
+        total_gain_loss,
+        total_gain_loss_pct,
+        by_type,
+    })
+}
+
+#[tauri::command]
+pub async fn finance_update_price(
+    state: State<'_, AppStateHandle>,
+    investment_id: String,
+    new_price: f64,
+) -> Result<(), String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let rows_changed = conn
+        .execute(
+            "UPDATE finance_investments SET current_price = ?1, last_price_update = ?2
+             WHERE id = ?3",
+            rusqlite::params![new_price, now, investment_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if rows_changed == 0 {
+        return Err(format!("Investment not found: {}", investment_id));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn finance_delete_investment(
+    state: State<'_, AppStateHandle>,
+    investment_id: String,
+) -> Result<(), String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let rows_changed = conn
+        .execute(
+            "DELETE FROM finance_investments WHERE id = ?1",
+            rusqlite::params![investment_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if rows_changed == 0 {
+        return Err(format!("Investment not found: {}", investment_id));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn finance_fetch_mf_nav(scheme_code: String) -> Result<f64, String> {
+    let url = format!("https://api.mfapi.in/mf/{}/latest", scheme_code);
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch MF NAV: {}", e))?;
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse MF API response: {}", e))?;
+
+    let nav_str = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|entry| entry.get("nav"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "NAV data not found in API response".to_string())?;
+
+    nav_str
+        .parse::<f64>()
+        .map_err(|e| format!("Failed to parse NAV value '{}': {}", nav_str, e))
+}
+
+#[tauri::command]
+pub async fn finance_calc_cagr(initial: f64, current: f64, years: f64) -> Result<f64, String> {
+    if initial <= 0.0 {
+        return Err("Initial value must be greater than zero".to_string());
+    }
+    if years <= 0.0 {
+        return Err("Years must be greater than zero".to_string());
+    }
+
+    let cagr = ((current / initial).powf(1.0 / years) - 1.0) * 100.0;
+    Ok(cagr)
+}
+
+// ============================================================================
 // Fitness commands
 // ============================================================================
 
@@ -2729,7 +3047,10 @@ pub async fn reader_scan_directory(
         return Err(format!("Not a directory: {}", path));
     }
 
-    let book_extensions = ["epub", "pdf", "mobi", "azw3", "fb2", "djvu", "cbz", "cbr", "txt", "md", "markdown", "html", "htm"];
+    let book_extensions = [
+        "epub", "pdf", "mobi", "azw3", "fb2", "djvu", "cbz", "cbr", "txt", "md", "markdown",
+        "html", "htm",
+    ];
     let mut book_paths = Vec::new();
 
     // Collect book files from the directory (non-recursive for now, then recurse)
@@ -2934,8 +3255,7 @@ pub async fn oreilly_connect_chrome(
     })?;
 
     // Open the copied cookie DB
-    let conn =
-        rusqlite::Connection::open(&temp_cookie_path).map_err(|e| e.to_string())?;
+    let conn = rusqlite::Connection::open(&temp_cookie_path).map_err(|e| e.to_string())?;
 
     // Check for oreilly.com cookies
     let cookie_count: i32 = conn
@@ -2960,10 +3280,7 @@ pub async fn oreilly_connect_chrome(
             )
             .map_err(|e| e.to_string())?;
 
-        tracing::info!(
-            "Found {} O'Reilly cookies in Chrome",
-            cookie_count
-        );
+        tracing::info!("Found {} O'Reilly cookies in Chrome", cookie_count);
 
         Ok(OreillyConnectResult {
             success: true,
@@ -2997,6 +3314,24 @@ pub async fn oreilly_connect_sso() -> Result<OreillyConnectResult, String> {
 }
 
 #[tauri::command]
+pub async fn oreilly_open_browser(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    WebviewWindowBuilder::new(
+        &app,
+        "oreilly",
+        WebviewUrl::External("https://learning.oreilly.com".parse().unwrap()),
+    )
+    .title("O'Reilly Learning - MINION")
+    .inner_size(1100.0, 800.0)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn oreilly_connect_manual(
     email: String,
     password: String,
@@ -3012,9 +3347,7 @@ pub async fn oreilly_connect_manual(
 }
 
 #[tauri::command]
-pub async fn oreilly_logout(
-    state: State<'_, AppStateHandle>,
-) -> Result<(), String> {
+pub async fn oreilly_logout(state: State<'_, AppStateHandle>) -> Result<(), String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM config WHERE key LIKE 'oreilly_%'", [])

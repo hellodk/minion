@@ -166,7 +166,10 @@ fn mime_from_path(path: &str) -> &'static str {
 }
 
 /// Replace image src attributes with base64 data URIs from EPUB resources
-fn inline_epub_images(html: &str, doc: &mut epub::doc::EpubDoc<std::io::BufReader<std::fs::File>>) -> String {
+fn inline_epub_images(
+    html: &str,
+    doc: &mut epub::doc::EpubDoc<std::io::BufReader<std::fs::File>>,
+) -> String {
     use std::collections::HashMap;
 
     // Build a map of resource paths to IDs for lookup
@@ -204,10 +207,15 @@ fn inline_epub_images(html: &str, doc: &mut epub::doc::EpubDoc<std::io::BufReade
         let data_uri = if let Some(cached) = image_cache.get(&src_value) {
             cached.clone()
         } else {
-            let resource_name = src_value.rsplit('/').next().unwrap_or(&src_value).to_string();
+            let resource_name = src_value
+                .rsplit('/')
+                .next()
+                .unwrap_or(&src_value)
+                .to_string();
 
             // Find the resource ID
-            let resource_id = path_to_id.get(&src_value)
+            let resource_id = path_to_id
+                .get(&src_value)
                 .or_else(|| path_to_id.get(&resource_name))
                 .cloned();
 
@@ -273,7 +281,11 @@ pub fn parse_epub(path: &Path) -> Result<BookContent> {
     let cover_base64 = doc.get_cover().map(|(cover_data, _mime_str)| {
         let mime = doc
             .get_cover_id()
-            .and_then(|id| doc.resources.get(&id).map(|item| mime_from_path(&item.path.to_string_lossy())))
+            .and_then(|id| {
+                doc.resources
+                    .get(&id)
+                    .map(|item| mime_from_path(&item.path.to_string_lossy()))
+            })
             .unwrap_or("image/jpeg");
         format!("data:{};base64,{}", mime, base64_encode(&cover_data))
     });

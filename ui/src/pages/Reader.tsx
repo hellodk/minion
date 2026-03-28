@@ -121,6 +121,9 @@ const Reader: Component = () => {
   const [oreillyConnecting, setOreillyConnecting] = createSignal(false);
   const [oreillyStatus, setOreillyStatus] = createSignal('');
 
+  // Loading metadata (shown while full content loads)
+  const [loadingBookMeta, setLoadingBookMeta] = createSignal<{ title: string; author: string } | null>(null);
+
   // ============================================================================
   // Keyboard navigation
   // ============================================================================
@@ -228,43 +231,34 @@ const Reader: Component = () => {
   };
 
   const openBookByPath = async (path: string, cardIndex?: number) => {
-    // Prevent multiple simultaneous opens
     if (loading() || view() === 'reader') return;
     setLoading(true);
     try {
-      // Import book to DB first to get its id
+      // Phase 1: Quick import for metadata
       const imported = await invoke<LibraryBook>('reader_import_book', { path });
       setCurrentBookId(imported.id);
+      setLoadingBookMeta({ title: imported.title || 'Untitled', author: imported.authors || '' });
 
-      // Now open the book content
+      // Show reader immediately with loading state
+      setCurrentBook(null); // null = still loading content
+      setView('reader');
+      setBookOpening(true);
+      if (cardIndex !== undefined) setOpeningCardIndex(cardIndex);
+      setTimeout(() => { setBookOpening(false); setOpeningCardIndex(null); }, 500);
+
+      // Phase 2: Load content in background
       const content = await invoke<BookContent>('reader_open_book', { path });
       setCurrentBook(content);
 
-      // Restore saved position if available
-      const startChapter = imported.current_position
-        ? parseInt(imported.current_position, 10) || 0
-        : 0;
-      setCurrentChapter(
-        Math.min(startChapter, Math.max(0, content.chapters.length - 1))
-      );
+      // Restore position
+      const startChapter = imported.current_position ? parseInt(imported.current_position, 10) || 0 : 0;
+      setCurrentChapter(Math.min(startChapter, Math.max(0, content.chapters.length - 1)));
 
-      // Trigger open animation
-      if (cardIndex !== undefined) {
-        setOpeningCardIndex(cardIndex);
-      }
-      setBookOpening(true);
-      setView('reader');
-
-      setTimeout(() => {
-        setBookOpening(false);
-        setOpeningCardIndex(null);
-      }, 500);
-
-      // Refresh library in background to pick up last_read_at updates
       loadLibrary();
     } catch (e) {
       console.error('Failed to open book:', e);
       alert(`Error: ${e}`);
+      setView('library');
     } finally {
       setLoading(false);
     }
@@ -286,6 +280,7 @@ const Reader: Component = () => {
     setTimeout(() => {
       setCurrentBook(null);
       setCurrentBookId(null);
+      setLoadingBookMeta(null);
       setView('library');
       setBookClosing(false);
       setShowToc(false);
@@ -1663,37 +1658,27 @@ const Reader: Component = () => {
                         </Show>
                       </button>
 
-                      {/* Option 2: SSO login in webview */}
+                      {/* Option 2: Open O'Reilly in embedded browser */}
                       <button
                         class="btn w-full flex items-center gap-3 p-4 bg-gray-50 dark:bg-gray-800 border-2 border-gray-200 dark:border-gray-700 hover:border-minion-400 dark:hover:border-minion-500 rounded-xl transition-colors text-left"
                         disabled={oreillyConnecting()}
                         onClick={async () => {
-                          setOreillyConnecting(true);
-                          setOreillyStatus('Opening O\'Reilly login window...');
                           try {
-                            const result = await invoke<{ success: boolean; message: string }>('oreilly_connect_sso');
-                            if (result.success) {
-                              setOreillyConnected(true);
-                              setOreillyStatus('Connected via SSO!');
-                            } else {
-                              setOreillyStatus(result.message);
-                            }
+                            await invoke('oreilly_open_browser');
                           } catch (e) {
                             setOreillyStatus(`${e}`);
-                          } finally {
-                            setOreillyConnecting(false);
                           }
                         }}
                       >
                         <div class="w-10 h-10 rounded-lg bg-red-100 dark:bg-red-900/30 flex items-center justify-center flex-shrink-0">
                           <svg class="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
                           </svg>
                         </div>
                         <div class="flex-1">
-                          <p class="font-medium text-sm">Sign in with SSO</p>
+                          <p class="font-medium text-sm">Open O'Reilly Library</p>
                           <p class="text-xs text-gray-500 dark:text-gray-400">
-                            Opens O'Reilly login page. Follows ACM/institutional SSO redirects.
+                            Browse and download books from O'Reilly Learning in MINION.
                           </p>
                         </div>
                       </button>
@@ -1795,13 +1780,28 @@ const Reader: Component = () => {
                       />
                       <button class="btn btn-primary">Search</button>
                     </div>
+                    <button
+                      class="btn w-full flex items-center justify-center gap-2 p-3 bg-red-600 hover:bg-red-700 text-white rounded-xl transition-colors font-medium mb-2"
+                      onClick={async () => {
+                        try {
+                          await invoke('oreilly_open_browser');
+                        } catch (e) {
+                          setOreillyStatus(`${e}`);
+                        }
+                      }}
+                    >
+                      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                      </svg>
+                      Browse O'Reilly Library
+                    </button>
                   </Show>
 
                   <div class="mt-4 p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
                     <p class="text-xs text-gray-500 dark:text-gray-400">
                       <strong>How it works:</strong> "Use Chrome Session" reads your existing O'Reilly login
-                      from Chrome (works with ACM SSO, institutional logins, etc). "Sign in with SSO" opens
-                      the full O'Reilly login flow including any redirects to your institution.
+                      from Chrome (works with ACM SSO, institutional logins, etc). "Open O'Reilly Library" opens
+                      an embedded browser where you can browse and read O'Reilly content directly in MINION.
                     </p>
                   </div>
                 </div>
@@ -1836,7 +1836,7 @@ const Reader: Component = () => {
         {/* ================================================================ */}
         {/* READER VIEW                                                      */}
         {/* ================================================================ */}
-        <Show when={view() === 'reader' && currentBook()}>
+        <Show when={view() === 'reader'}>
           <div
             class="flex flex-col h-full"
             classList={{
@@ -1908,13 +1908,17 @@ const Reader: Component = () => {
                 </button>
                 <div>
                   <h2 class="font-medium truncate max-w-md">
-                    {currentBook()!.metadata.title}
+                    {currentBook()?.metadata.title || loadingBookMeta()?.title || 'Loading...'}
                   </h2>
                   <p class="text-xs" style={{ color: modeStyles().mutedText }}>
-                    {currentBook()!.metadata.authors?.length > 0
-                      ? currentBook()!.metadata.authors.join(', ') + ' \u00B7 '
-                      : ''}
-                    Chapter {currentChapter() + 1} of {currentBook()!.chapters.length}
+                    {currentBook()
+                      ? <>
+                          {currentBook()!.metadata.authors?.length > 0
+                            ? currentBook()!.metadata.authors.join(', ') + ' \u00B7 '
+                            : ''}
+                          Chapter {currentChapter() + 1} of {currentBook()!.chapters.length}
+                        </>
+                      : loadingBookMeta()?.author || 'Loading book content...'}
                   </p>
                 </div>
               </div>
@@ -2010,7 +2014,7 @@ const Reader: Component = () => {
             {/* Content area */}
             <div class="flex-1 flex overflow-hidden" style={{ 'min-height': '0' }}>
               {/* TOC Sidebar */}
-              <Show when={showToc()}>
+              <Show when={showToc() && currentBook()}>
                 <div
                   class="toc-sidebar w-64 border-r overflow-y-auto flex-shrink-0"
                   style={{
@@ -2079,114 +2083,140 @@ const Reader: Component = () => {
                     'page-enter-left': !pageTransitioning() && pageDirection() === 'right',
                   }}
                 >
-                  <Show when={false}>
-                    {/* PDF embed placeholder - convertFileSrc kept for future use */}
-                    <iframe src={convertFileSrc('')} title="pdf" />
-                  </Show>
-                  <Show
-                    when={
-                      currentBook()!.format !== 'pdf' &&
-                      currentBook()!.chapters[currentChapter()]
-                    }
-                  >
-                    <h1
-                      class="text-2xl font-bold mb-8"
-                      style={{
-                        color: modeStyles().chapterTitle,
-                        'letter-spacing': '-0.02em',
-                      }}
+                  <Show when={currentBook()} fallback={
+                    /* Loading skeleton while book content loads */
+                    <div class="animate-pulse space-y-6 py-4">
+                      <div class="h-8 rounded-md w-3/5" style={{ background: modeStyles().hoverBg }} />
+                      <div class="space-y-3">
+                        <div class="h-4 rounded w-full" style={{ background: modeStyles().hoverBg }} />
+                        <div class="h-4 rounded w-11/12" style={{ background: modeStyles().hoverBg }} />
+                        <div class="h-4 rounded w-4/5" style={{ background: modeStyles().hoverBg }} />
+                        <div class="h-4 rounded w-full" style={{ background: modeStyles().hoverBg }} />
+                        <div class="h-4 rounded w-3/4" style={{ background: modeStyles().hoverBg }} />
+                        <div class="h-4 rounded w-5/6" style={{ background: modeStyles().hoverBg }} />
+                      </div>
+                      <div class="space-y-3 pt-2">
+                        <div class="h-4 rounded w-full" style={{ background: modeStyles().hoverBg }} />
+                        <div class="h-4 rounded w-10/12" style={{ background: modeStyles().hoverBg }} />
+                        <div class="h-4 rounded w-4/5" style={{ background: modeStyles().hoverBg }} />
+                        <div class="h-4 rounded w-2/3" style={{ background: modeStyles().hoverBg }} />
+                      </div>
+                      <p class="text-sm text-center pt-4" style={{ color: modeStyles().mutedText }}>
+                        Loading book content...
+                      </p>
+                    </div>
+                  }>
+                    <Show when={false}>
+                      {/* PDF embed placeholder - convertFileSrc kept for future use */}
+                      <iframe src={convertFileSrc('')} title="pdf" />
+                    </Show>
+                    <Show
+                      when={
+                        currentBook()!.format !== 'pdf' &&
+                        currentBook()!.chapters[currentChapter()]
+                      }
                     >
-                      {currentBook()!.chapters[currentChapter()].title ||
-                        `Chapter ${currentChapter() + 1}`}
-                    </h1>
-                    <div
-                      class={`prose max-w-none ${modeStyles().prose}`}
-                      innerHTML={currentBook()!.chapters[currentChapter()].content}
-                    />
+                      <h1
+                        class="text-2xl font-bold mb-8"
+                        style={{
+                          color: modeStyles().chapterTitle,
+                          'letter-spacing': '-0.02em',
+                        }}
+                      >
+                        {currentBook()!.chapters[currentChapter()].title ||
+                          `Chapter ${currentChapter() + 1}`}
+                      </h1>
+                      <div
+                        class={`prose max-w-none ${modeStyles().prose}`}
+                        innerHTML={currentBook()!.chapters[currentChapter()].content}
+                      />
+                    </Show>
                   </Show>
                 </div>
               </div>
             </div>
 
             {/* Navigation footer */}
-            <div
-              class="flex items-center justify-between px-4 py-3 border-t"
-              style={{
-                background: modeStyles().navBg,
-                'border-color': modeStyles().navBorder,
-                color: modeStyles().text,
-                'flex-shrink': '0',
-              }}
-            >
-              <button
-                class="btn nav-btn"
-                style={
-                  {
-                    background: modeStyles().hoverBg,
-                    color: modeStyles().text,
-                    '--nav-hover-x': '-3px',
-                    opacity: currentChapter() === 0 ? '0.35' : '1',
-                    cursor: currentChapter() === 0 ? 'not-allowed' : 'pointer',
-                  } as any
-                }
-                onClick={prevChapter}
-                disabled={currentChapter() === 0 || pageTransitioning()}
+            <Show when={currentBook()}>
+              <div
+                class="flex items-center justify-between px-4 py-3 border-t"
+                style={{
+                  background: modeStyles().navBg,
+                  'border-color': modeStyles().navBorder,
+                  color: modeStyles().text,
+                  'flex-shrink': '0',
+                }}
               >
-                <span class="flex items-center gap-1.5">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M15 19l-7-7 7-7"
-                    />
-                  </svg>
-                  Previous
-                </span>
-              </button>
+                <button
+                  class="btn nav-btn"
+                  style={
+                    {
+                      background: modeStyles().hoverBg,
+                      color: modeStyles().text,
+                      '--nav-hover-x': '-3px',
+                      opacity: currentChapter() === 0 ? '0.35' : '1',
+                      cursor: currentChapter() === 0 ? 'not-allowed' : 'pointer',
+                    } as any
+                  }
+                  onClick={prevChapter}
+                  disabled={currentChapter() === 0 || pageTransitioning()}
+                >
+                  <span class="flex items-center gap-1.5">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M15 19l-7-7 7-7"
+                      />
+                    </svg>
+                    Previous
+                  </span>
+                </button>
 
-              <div class="flex items-center gap-3">
-                <span class="text-sm" style={{ color: modeStyles().mutedText }}>
-                  {currentChapter() + 1} / {currentBook()!.chapters.length}
-                </span>
-                <span class="text-xs" style={{ color: modeStyles().mutedText }}>
-                  ({Math.round(progressPercent())}%)
-                </span>
+                <div class="flex items-center gap-3">
+                  <span class="text-sm" style={{ color: modeStyles().mutedText }}>
+                    {currentChapter() + 1} / {currentBook()!.chapters.length}
+                  </span>
+                  <span class="text-xs" style={{ color: modeStyles().mutedText }}>
+                    ({Math.round(progressPercent())}%)
+                  </span>
+                </div>
+
+                <button
+                  class="btn nav-btn"
+                  style={
+                    {
+                      background: modeStyles().hoverBg,
+                      color: modeStyles().text,
+                      '--nav-hover-x': '3px',
+                      opacity:
+                        currentChapter() >= currentBook()!.chapters.length - 1 ? '0.35' : '1',
+                      cursor:
+                        currentChapter() >= currentBook()!.chapters.length - 1
+                          ? 'not-allowed'
+                          : 'pointer',
+                    } as any
+                  }
+                  onClick={nextChapter}
+                  disabled={
+                    currentChapter() >= currentBook()!.chapters.length - 1 || pageTransitioning()
+                  }
+                >
+                  <span class="flex items-center gap-1.5">
+                    Next
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M9 5l7 7-7 7"
+                      />
+                    </svg>
+                  </span>
+                </button>
               </div>
-
-              <button
-                class="btn nav-btn"
-                style={
-                  {
-                    background: modeStyles().hoverBg,
-                    color: modeStyles().text,
-                    '--nav-hover-x': '3px',
-                    opacity:
-                      currentChapter() >= currentBook()!.chapters.length - 1 ? '0.35' : '1',
-                    cursor:
-                      currentChapter() >= currentBook()!.chapters.length - 1
-                        ? 'not-allowed'
-                        : 'pointer',
-                  } as any
-                }
-                onClick={nextChapter}
-                disabled={
-                  currentChapter() >= currentBook()!.chapters.length - 1 || pageTransitioning()
-                }
-              >
-                <span class="flex items-center gap-1.5">
-                  Next
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M9 5l7 7-7 7"
-                    />
-                  </svg>
-                </span>
-              </button>
-            </div>
+            </Show>
           </div>
         </Show>
       </div>
