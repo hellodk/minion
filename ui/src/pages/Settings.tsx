@@ -12,6 +12,19 @@ const Settings: Component = () => {
   const [aiTestMessage, setAiTestMessage] = createSignal('');
   const [aiSaving, setAiSaving] = createSignal(false);
 
+  // Google Fit state
+  const [gfitConnected, setGfitConnected] = createSignal(false);
+  const [gfitToken, setGfitToken] = createSignal('');
+  const [gfitStatus, setGfitStatus] = createSignal<'idle' | 'saving' | 'syncing' | 'success' | 'error'>('idle');
+  const [gfitMessage, setGfitMessage] = createSignal('');
+
+  // Zerodha Kite state
+  const [zdApiKey, setZdApiKey] = createSignal('');
+  const [zdApiSecret, setZdApiSecret] = createSignal('');
+  const [zdAccessToken, setZdAccessToken] = createSignal('');
+  const [zdStatus, setZdStatus] = createSignal<'idle' | 'saving' | 'syncing' | 'success' | 'error'>('idle');
+  const [zdMessage, setZdMessage] = createSignal('');
+
   onMount(async () => {
     try {
       const info = await invoke<SystemInfo>('get_system_info');
@@ -24,6 +37,14 @@ const Settings: Component = () => {
       }
       if (config.ai_ollama_url) setOllamaUrl(config.ai_ollama_url);
       if (config.ai_model) setAiModel(config.ai_model);
+
+      // Check Google Fit connection
+      try {
+        const connected = await invoke<boolean>('gfit_check_connected');
+        setGfitConnected(connected);
+      } catch (_) {
+        // ignore
+      }
     } catch (e) {
       console.error('Failed to load settings:', e);
     }
@@ -202,6 +223,283 @@ const Settings: Component = () => {
               }}
             >
               {aiTestMessage()}
+            </p>
+          </Show>
+        </div>
+      </section>
+
+      {/* Google Fit */}
+      <section class="card p-4 mb-6">
+        <h2 class="text-lg font-medium mb-4">Google Fit</h2>
+
+        <div class="space-y-4">
+          {/* Connection status */}
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="font-medium">Connection Status</p>
+              <p class="text-sm text-gray-500 dark:text-gray-400">
+                {gfitConnected() ? 'Connected to Google Fit' : 'Not connected'}
+              </p>
+            </div>
+            <span
+              class="px-2 py-1 text-xs rounded"
+              classList={{
+                'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300': gfitConnected(),
+                'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400': !gfitConnected(),
+              }}
+            >
+              {gfitConnected() ? 'Connected' : 'Disconnected'}
+            </span>
+          </div>
+
+          {/* Connect button */}
+          <Show when={!gfitConnected()}>
+            <button
+              class="btn btn-primary w-full"
+              onClick={async () => {
+                try {
+                  await invoke('gfit_open_auth');
+                } catch (e: any) {
+                  setGfitMessage('Failed to open auth: ' + String(e));
+                  setGfitStatus('error');
+                }
+              }}
+            >
+              Connect Google Fit
+            </button>
+          </Show>
+
+          {/* Token input */}
+          <Show when={!gfitConnected()}>
+            <div>
+              <label class="block text-sm font-medium mb-2">OAuth Token / Auth Code</label>
+              <input
+                type="text"
+                class="input w-full"
+                value={gfitToken()}
+                onInput={(e) => setGfitToken(e.currentTarget.value)}
+                placeholder="Paste the authorization code here"
+              />
+            </div>
+            <button
+              class="btn btn-secondary"
+              disabled={gfitStatus() === 'saving' || !gfitToken()}
+              onClick={async () => {
+                setGfitStatus('saving');
+                setGfitMessage('');
+                try {
+                  await invoke('gfit_save_token', { token: gfitToken() });
+                  setGfitConnected(true);
+                  setGfitToken('');
+                  setGfitMessage('Token saved successfully.');
+                  setGfitStatus('success');
+                } catch (e: any) {
+                  setGfitMessage('Failed to save token: ' + String(e));
+                  setGfitStatus('error');
+                }
+              }}
+            >
+              {gfitStatus() === 'saving' ? 'Saving...' : 'Save Token'}
+            </button>
+          </Show>
+
+          {/* Sync & Disconnect */}
+          <Show when={gfitConnected()}>
+            <div class="flex items-center gap-3">
+              <button
+                class="btn btn-primary"
+                disabled={gfitStatus() === 'syncing'}
+                onClick={async () => {
+                  setGfitStatus('syncing');
+                  setGfitMessage('');
+                  try {
+                    const result = await invoke<string>('gfit_sync');
+                    setGfitMessage(result);
+                    setGfitStatus('success');
+                  } catch (e: any) {
+                    setGfitMessage(String(e));
+                    setGfitStatus('error');
+                  }
+                }}
+              >
+                {gfitStatus() === 'syncing' ? 'Syncing...' : 'Sync Now'}
+              </button>
+              <button
+                class="btn btn-secondary text-red-600 dark:text-red-400"
+                onClick={async () => {
+                  try {
+                    await invoke('gfit_disconnect');
+                    setGfitConnected(false);
+                    setGfitMessage('Disconnected from Google Fit.');
+                    setGfitStatus('idle');
+                  } catch (e: any) {
+                    setGfitMessage('Failed to disconnect: ' + String(e));
+                    setGfitStatus('error');
+                  }
+                }}
+              >
+                Disconnect
+              </button>
+            </div>
+          </Show>
+
+          {/* Status message */}
+          <Show when={gfitMessage()}>
+            <p
+              class="text-sm"
+              classList={{
+                'text-green-500': gfitStatus() === 'success',
+                'text-red-500': gfitStatus() === 'error',
+                'text-gray-500': gfitStatus() === 'syncing' || gfitStatus() === 'saving',
+              }}
+            >
+              {gfitMessage()}
+            </p>
+          </Show>
+        </div>
+      </section>
+
+      {/* Zerodha Kite Connect */}
+      <section class="card p-4 mb-6">
+        <h2 class="text-lg font-medium mb-4">Zerodha Kite Connect</h2>
+
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500 dark:text-gray-400">
+            Connect your Zerodha Demat account to sync holdings into your MINION portfolio.
+            You need a <a href="https://kite.trade" target="_blank" rel="noopener noreferrer" class="text-minion-600 dark:text-minion-400 underline">Kite Connect</a> API key.
+          </p>
+
+          {/* API Key */}
+          <div>
+            <label class="block text-sm font-medium mb-2">API Key</label>
+            <input
+              type="text"
+              class="input w-full"
+              value={zdApiKey()}
+              onInput={(e) => setZdApiKey(e.currentTarget.value)}
+              placeholder="Your Kite Connect API key"
+            />
+          </div>
+
+          {/* API Secret */}
+          <div>
+            <label class="block text-sm font-medium mb-2">API Secret</label>
+            <input
+              type="password"
+              class="input w-full"
+              value={zdApiSecret()}
+              onInput={(e) => setZdApiSecret(e.currentTarget.value)}
+              placeholder="Your Kite Connect API secret"
+            />
+          </div>
+
+          {/* Save config */}
+          <button
+            class="btn btn-primary"
+            disabled={zdStatus() === 'saving' || !zdApiKey() || !zdApiSecret()}
+            onClick={async () => {
+              setZdStatus('saving');
+              setZdMessage('');
+              try {
+                await invoke('zerodha_save_config', {
+                  apiKey: zdApiKey(),
+                  apiSecret: zdApiSecret(),
+                });
+                setZdMessage('API credentials saved.');
+                setZdStatus('success');
+              } catch (e: any) {
+                setZdMessage('Failed to save: ' + String(e));
+                setZdStatus('error');
+              }
+            }}
+          >
+            {zdStatus() === 'saving' ? 'Saving...' : 'Save Credentials'}
+          </button>
+
+          {/* Login button */}
+          <div>
+            <label class="block text-sm font-medium mb-2">Login</label>
+            <button
+              class="btn btn-secondary w-full"
+              onClick={async () => {
+                setZdMessage('');
+                try {
+                  await invoke('zerodha_open_login');
+                } catch (e: any) {
+                  setZdMessage(String(e));
+                  setZdStatus('error');
+                }
+              }}
+            >
+              Login to Zerodha
+            </button>
+            <p class="text-xs text-gray-400 dark:text-gray-500 mt-1">
+              Opens a Kite login window. After login, copy the access token below.
+            </p>
+          </div>
+
+          {/* Access token input */}
+          <div>
+            <label class="block text-sm font-medium mb-2">Access Token</label>
+            <input
+              type="text"
+              class="input w-full"
+              value={zdAccessToken()}
+              onInput={(e) => setZdAccessToken(e.currentTarget.value)}
+              placeholder="Paste your Kite access token"
+            />
+          </div>
+          <button
+            class="btn btn-secondary"
+            disabled={zdStatus() === 'saving' || !zdAccessToken()}
+            onClick={async () => {
+              setZdStatus('saving');
+              setZdMessage('');
+              try {
+                await invoke('zerodha_save_token', { accessToken: zdAccessToken() });
+                setZdAccessToken('');
+                setZdMessage('Access token saved.');
+                setZdStatus('success');
+              } catch (e: any) {
+                setZdMessage('Failed to save token: ' + String(e));
+                setZdStatus('error');
+              }
+            }}
+          >
+            Save Token
+          </button>
+
+          {/* Sync holdings */}
+          <button
+            class="btn btn-secondary w-full"
+            disabled={zdStatus() === 'syncing'}
+            onClick={async () => {
+              setZdStatus('syncing');
+              setZdMessage('');
+              try {
+                const result = await invoke<string>('zerodha_sync_to_portfolio');
+                setZdMessage(result);
+                setZdStatus('success');
+              } catch (e: any) {
+                setZdMessage(String(e));
+                setZdStatus('error');
+              }
+            }}
+          >
+            {zdStatus() === 'syncing' ? 'Syncing...' : 'Sync Holdings'}
+          </button>
+
+          {/* Status message */}
+          <Show when={zdMessage()}>
+            <p
+              class="text-sm"
+              classList={{
+                'text-green-500': zdStatus() === 'success',
+                'text-red-500': zdStatus() === 'error',
+                'text-gray-500': zdStatus() === 'syncing' || zdStatus() === 'saving',
+              }}
+            >
+              {zdMessage()}
             </p>
           </Show>
         </div>

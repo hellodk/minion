@@ -85,6 +85,15 @@ pub fn run() {
             commands::finance_delete_investment,
             commands::finance_fetch_mf_nav,
             commands::finance_calc_cagr,
+            // CIBIL score commands
+            commands::finance_save_cibil,
+            commands::finance_get_cibil,
+            // Zerodha Kite Connect commands
+            commands::zerodha_save_config,
+            commands::zerodha_open_login,
+            commands::zerodha_save_token,
+            commands::zerodha_fetch_holdings,
+            commands::zerodha_sync_to_portfolio,
             // Fitness commands
             commands::fitness_add_habit,
             commands::fitness_list_habits,
@@ -115,6 +124,12 @@ pub fn run() {
             // AI commands
             commands::ai_test_connection,
             commands::ai_analyze_health,
+            // Google Fit commands
+            commands::gfit_open_auth,
+            commands::gfit_sync,
+            commands::gfit_save_token,
+            commands::gfit_check_connected,
+            commands::gfit_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

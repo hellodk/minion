@@ -168,6 +168,12 @@ pub struct TypeAllocation {
     pub percentage: f64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct CibilResponse {
+    pub score: i32,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CsvMappingRequest {
     pub date_column: Option<String>,
@@ -1554,18 +1560,21 @@ pub async fn finance_add_account(
     name: String,
     account_type: String,
     currency: Option<String>,
+    institution: Option<String>,
+    balance: Option<f64>,
 ) -> Result<FinanceAccountResponse, String> {
     let state = state.read().await;
     let conn = state.db.get().map_err(|e| e.to_string())?;
 
     let id = uuid::Uuid::new_v4().to_string();
     let currency = currency.unwrap_or_else(|| "INR".to_string());
+    let initial_balance = balance.unwrap_or(0.0);
     let now = chrono::Utc::now().to_rfc3339();
 
     conn.execute(
-        "INSERT INTO finance_accounts (id, name, account_type, balance, currency, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 0, ?4, ?5, ?5)",
-        rusqlite::params![id, name, account_type, currency, now],
+        "INSERT INTO finance_accounts (id, name, account_type, institution, balance, currency, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+        rusqlite::params![id, name, account_type, institution, initial_balance, currency, now],
     )
     .map_err(|e| e.to_string())?;
 
@@ -1573,8 +1582,8 @@ pub async fn finance_add_account(
         id,
         name,
         account_type,
-        institution: None,
-        balance: 0.0,
+        institution: institution.clone(),
+        balance: initial_balance,
         currency,
         created_at: now.clone(),
         updated_at: now,
@@ -1901,20 +1910,56 @@ pub async fn finance_import_csv(
 #[tauri::command]
 pub async fn finance_spending_by_category(
     state: State<'_, AppStateHandle>,
+    month: Option<String>,
 ) -> Result<HashMap<String, f64>, String> {
     let state = state.read().await;
     let conn = state.db.get().map_err(|e| e.to_string())?;
 
-    let mut stmt = conn
-        .prepare(
+    // month is "YYYY-MM" e.g. "2026-03". If None, return all-time.
+    let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match &month {
+        Some(m) => {
+            let start = format!("{}-01", m);
+            // Calculate end of month by adding 1 month
+            let end = format!("{}-01", {
+                let parts: Vec<&str> = m.split('-').collect();
+                if parts.len() == 2 {
+                    let y: i32 = parts[0].parse().unwrap_or(2026);
+                    let mo: i32 = parts[1].parse().unwrap_or(1);
+                    if mo >= 12 {
+                        format!("{:04}-{:02}", y + 1, 1)
+                    } else {
+                        format!("{:04}-{:02}", y, mo + 1)
+                    }
+                } else {
+                    m.clone()
+                }
+            });
+            (
+                "SELECT COALESCE(category, 'Uncategorized'), SUM(amount)
+                 FROM finance_transactions WHERE type = 'debit'
+                 AND date >= ?1 AND date < ?2
+                 GROUP BY category ORDER BY SUM(amount) DESC"
+                    .to_string(),
+                vec![
+                    Box::new(start) as Box<dyn rusqlite::types::ToSql>,
+                    Box::new(end),
+                ],
+            )
+        }
+        None => (
             "SELECT COALESCE(category, 'Uncategorized'), SUM(amount)
              FROM finance_transactions WHERE type = 'debit'
-             GROUP BY category ORDER BY SUM(amount) DESC",
-        )
-        .map_err(|e| e.to_string())?;
+             GROUP BY category ORDER BY SUM(amount) DESC"
+                .to_string(),
+            vec![],
+        ),
+    };
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
     let rows = stmt
-        .query_map([], |row| {
+        .query_map(param_refs.as_slice(), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
         })
         .map_err(|e| e.to_string())?;
@@ -2211,6 +2256,296 @@ pub async fn finance_calc_cagr(initial: f64, current: f64, years: f64) -> Result
 
     let cagr = ((current / initial).powf(1.0 / years) - 1.0) * 100.0;
     Ok(cagr)
+}
+
+// ============================================================================
+// Zerodha Kite Connect types & helpers
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ZerodhaHolding {
+    pub tradingsymbol: String,
+    pub exchange: String,
+    pub quantity: i64,
+    pub average_price: f64,
+    pub last_price: f64,
+    pub pnl: f64,
+    pub day_change_percentage: f64,
+}
+
+/// Fetch holdings from Kite Connect API (non-command helper).
+async fn fetch_zerodha_holdings(
+    api_key: &str,
+    access_token: &str,
+) -> Result<Vec<ZerodhaHolding>, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.kite.trade/portfolio/holdings")
+        .header("X-Kite-Version", "3")
+        .header(
+            "Authorization",
+            format!("token {}:{}", api_key, access_token),
+        )
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Kite API error: {}", e))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Kite API returned error: {}", body));
+    }
+
+    // Kite returns { "status": "success", "data": [...] }
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+
+    let holdings = body["data"]
+        .as_array()
+        .ok_or("Invalid Kite API response")?
+        .iter()
+        .map(|h| ZerodhaHolding {
+            tradingsymbol: h["tradingsymbol"].as_str().unwrap_or("").to_string(),
+            exchange: h["exchange"].as_str().unwrap_or("").to_string(),
+            quantity: h["quantity"].as_i64().unwrap_or(0),
+            average_price: h["average_price"].as_f64().unwrap_or(0.0),
+            last_price: h["last_price"].as_f64().unwrap_or(0.0),
+            pnl: h["pnl"].as_f64().unwrap_or(0.0),
+            day_change_percentage: h["day_change_percentage"].as_f64().unwrap_or(0.0),
+        })
+        .collect();
+
+    Ok(holdings)
+}
+
+/// Read Zerodha credentials from the config table.
+fn read_zerodha_creds(conn: &rusqlite::Connection) -> Result<(String, String), String> {
+    let api_key: String = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'zerodha_api_key'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Zerodha API key not configured".to_string())?;
+    let access_token: String = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'zerodha_access_token'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Not logged into Zerodha. Please login first.".to_string())?;
+    Ok((api_key, access_token))
+}
+
+// ============================================================================
+// Zerodha Kite Connect commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn zerodha_save_config(
+    state: State<'_, AppStateHandle>,
+    api_key: String,
+    api_secret: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('zerodha_api_key', ?1)",
+        rusqlite::params![api_key],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('zerodha_api_secret', ?1)",
+        rusqlite::params![api_secret],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn zerodha_open_login(
+    app: tauri::AppHandle,
+    state: State<'_, AppStateHandle>,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let api_key: String = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'zerodha_api_key'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            "Zerodha API key not configured. Go to Settings > Zerodha to add it.".to_string()
+        })?;
+    drop(st); // release lock before opening window
+
+    let login_url = format!(
+        "https://kite.zerodha.com/connect/login?v=3&api_key={}",
+        api_key
+    );
+
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    WebviewWindowBuilder::new(
+        &app,
+        "zerodha-login",
+        WebviewUrl::External(login_url.parse().unwrap()),
+    )
+    .title("Zerodha Kite - Login")
+    .inner_size(600.0, 700.0)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn zerodha_save_token(
+    state: State<'_, AppStateHandle>,
+    access_token: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('zerodha_access_token', ?1)",
+        rusqlite::params![access_token],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn zerodha_fetch_holdings(
+    state: State<'_, AppStateHandle>,
+) -> Result<Vec<ZerodhaHolding>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let (api_key, access_token) = read_zerodha_creds(&conn)?;
+    drop(st);
+
+    fetch_zerodha_holdings(&api_key, &access_token).await
+}
+
+#[tauri::command]
+pub async fn zerodha_sync_to_portfolio(state: State<'_, AppStateHandle>) -> Result<String, String> {
+    // Read creds and fetch holdings
+    let (api_key, access_token) = {
+        let st = state.read().await;
+        let conn = st.db.get().map_err(|e| e.to_string())?;
+        read_zerodha_creds(&conn)?
+    };
+    let holdings = fetch_zerodha_holdings(&api_key, &access_token).await?;
+
+    // Upsert into finance_investments
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let mut synced = 0u32;
+    for h in &holdings {
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM finance_investments WHERE symbol = ?1 AND exchange = ?2",
+                rusqlite::params![h.tradingsymbol, h.exchange],
+                |row| row.get(0),
+            )
+            .ok();
+
+        if let Some(id) = existing {
+            conn.execute(
+                "UPDATE finance_investments SET current_price = ?1, \
+                 last_price_update = ?2 WHERE id = ?3",
+                rusqlite::params![h.last_price, now, id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            let id = uuid::Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO finance_investments \
+                 (id, name, type, symbol, exchange, purchase_price, current_price, \
+                  quantity, last_price_update, created_at) \
+                 VALUES (?1, ?2, 'stock', ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                rusqlite::params![
+                    id,
+                    h.tradingsymbol,
+                    h.tradingsymbol,
+                    h.exchange,
+                    h.average_price,
+                    h.last_price,
+                    h.quantity as f64,
+                    now
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        synced += 1;
+    }
+
+    Ok(format!("Synced {} holdings from Zerodha", synced))
+}
+
+// ============================================================================
+// CIBIL score commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn finance_save_cibil(
+    state: State<'_, AppStateHandle>,
+    score: i32,
+) -> Result<(), String> {
+    if !(300..=900).contains(&score) {
+        return Err("CIBIL score must be between 300 and 900".to_string());
+    }
+
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let value = format!("{}|{}", score, now);
+
+    conn.execute(
+        "INSERT INTO config (key, value, updated_at)
+         VALUES ('cibil_score', ?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = ?2",
+        rusqlite::params![value, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn finance_get_cibil(
+    state: State<'_, AppStateHandle>,
+) -> Result<Option<CibilResponse>, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let result: Option<String> = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'cibil_score'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    match result {
+        Some(val) => {
+            let parts: Vec<&str> = val.splitn(2, '|').collect();
+            if parts.len() == 2 {
+                let score: i32 = parts[0]
+                    .parse()
+                    .map_err(|_| "Invalid CIBIL score in database".to_string())?;
+                Ok(Some(CibilResponse {
+                    score,
+                    updated_at: parts[1].to_string(),
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        None => Ok(None),
+    }
 }
 
 // ============================================================================
@@ -3435,4 +3770,120 @@ pub async fn ai_analyze_health(
         .to_string();
 
     Ok(response)
+}
+
+// ============================================================================
+// Google Fit integration
+// ============================================================================
+
+#[tauri::command]
+pub async fn gfit_open_auth(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    let auth_url = "https://accounts.google.com/o/oauth2/v2/auth?\
+        scope=https://www.googleapis.com/auth/fitness.activity.read+\
+        https://www.googleapis.com/auth/fitness.body.read+\
+        https://www.googleapis.com/auth/fitness.sleep.read+\
+        https://www.googleapis.com/auth/fitness.heart_rate.read&\
+        response_type=code&\
+        access_type=offline&\
+        redirect_uri=urn:ietf:wg:oauth:2.0:oob";
+
+    WebviewWindowBuilder::new(
+        &app,
+        "google-fit-auth",
+        WebviewUrl::External(auth_url.parse().unwrap()),
+    )
+    .title("Google Fit - Sign In")
+    .inner_size(500.0, 700.0)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn gfit_sync(state: State<'_, AppStateHandle>) -> Result<String, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let token: Option<String> = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'gfit_access_token'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let token = token.ok_or("Not connected to Google Fit. Please connect first in Settings.")?;
+
+    let client = reqwest::Client::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let day_ago_ms = now_ms - 86_400_000;
+
+    let steps_body = serde_json::json!({
+        "aggregateBy": [{"dataTypeName": "com.google.step_count.delta"}],
+        "bucketByTime": {"durationMillis": 86400000},
+        "startTimeMillis": day_ago_ms,
+        "endTimeMillis": now_ms
+    });
+
+    let resp = client
+        .post("https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate")
+        .bearer_auth(&token)
+        .json(&steps_body)
+        .send()
+        .await
+        .map_err(|e| format!("Google Fit API error: {}", e))?;
+
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+
+    if !status.is_success() {
+        return Err(format!("Google Fit API returned {}: {}", status, body));
+    }
+
+    Ok(format!(
+        "Synced successfully. Raw: {}",
+        &body[..body.len().min(500)]
+    ))
+}
+
+#[tauri::command]
+pub async fn gfit_save_token(
+    state: State<'_, AppStateHandle>,
+    token: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_access_token', ?1)",
+        rusqlite::params![token],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn gfit_check_connected(state: State<'_, AppStateHandle>) -> Result<bool, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM config WHERE key = 'gfit_access_token')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    Ok(exists)
+}
+
+#[tauri::command]
+pub async fn gfit_disconnect(state: State<'_, AppStateHandle>) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM config WHERE key LIKE 'gfit_%'", [])
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }

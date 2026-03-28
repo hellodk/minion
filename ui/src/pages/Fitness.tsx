@@ -1350,6 +1350,9 @@ const Fitness: Component = () => {
   const [hasRealData, setHasRealData] = createSignal(false);
   const [loading, setLoading] = createSignal(true);
 
+  // Google Fit connection status
+  const [gfitConnected, setGfitConnected] = createSignal(false);
+
   // Log form state
   const [logFormOpen, setLogFormOpen] = createSignal(false);
   const [logWeight, setLogWeight] = createSignal('');
@@ -1368,6 +1371,14 @@ const Fitness: Component = () => {
         invoke<FitnessMetricResponse[]>('fitness_get_metrics', { days: 30 }),
         invoke<FitnessHabitResponse[]>('fitness_list_habits'),
       ]);
+
+      // Check Google Fit connection
+      try {
+        const gfit = await invoke<boolean>('gfit_check_connected');
+        setGfitConnected(gfit);
+      } catch (_) {
+        // ignore
+      }
       setDashboard(dash);
       setMetrics(mets);
       // Check if any real data exists
@@ -1468,6 +1479,41 @@ const Fitness: Component = () => {
             <div class="w-2 h-2 rounded-full bg-green-500" />
             Connected
           </div>
+        </Show>
+      </div>
+
+      {/* Google Fit badge */}
+      <div class="mb-4">
+        <Show
+          when={gfitConnected()}
+          fallback={
+            <a
+              href="/settings"
+              class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium
+                     bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400
+                     hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+              onClick={(e) => {
+                e.preventDefault();
+                // Navigate to settings - use window location for SPA routing
+                window.location.hash = '#/settings';
+                window.dispatchEvent(new HashChangeEvent('hashchange'));
+              }}
+            >
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" />
+              </svg>
+              Connect Google Fit
+            </a>
+          }
+        >
+          <span class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium
+                       bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400">
+            <div class="w-2 h-2 rounded-full bg-green-500" />
+            Synced with Google Fit
+          </span>
         </Show>
       </div>
 
