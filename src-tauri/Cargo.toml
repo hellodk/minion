@@ -29,6 +29,11 @@ minion-db = { path = "../crates/minion-db" }
 minion-crypto = { path = "../crates/minion-crypto" }
 minion-files = { path = "../crates/minion-files" }
 minion-reader = { path = "../crates/minion-reader" }
+minion-finance = { path = "../crates/minion-finance" }
+
+# SQLite (re-exported for direct use in commands)
+rusqlite = { version = "0.31", features = ["bundled"] }
+csv = "1.3"
 
 # Additional deps
 html-escape = "0.2"

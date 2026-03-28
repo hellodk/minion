@@ -68,6 +68,27 @@ pub fn run() {
             // Book Reader commands
             commands::reader_open_book,
             commands::reader_list_books,
+            // Finance commands
+            commands::finance_add_account,
+            commands::finance_list_accounts,
+            commands::finance_add_transaction,
+            commands::finance_list_transactions,
+            commands::finance_get_summary,
+            commands::finance_import_csv,
+            commands::finance_spending_by_category,
+            // Fitness commands
+            commands::fitness_add_habit,
+            commands::fitness_list_habits,
+            commands::fitness_toggle_habit,
+            commands::fitness_log_metric,
+            commands::fitness_get_metrics,
+            commands::fitness_get_dashboard,
+            // Reader persistence commands
+            commands::reader_import_book,
+            commands::reader_get_library,
+            commands::reader_update_progress,
+            commands::reader_add_annotation,
+            commands::reader_get_annotations,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

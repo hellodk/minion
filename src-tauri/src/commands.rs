@@ -6,6 +6,7 @@ use minion_files::{AnalyticsCalculator, DuplicateFinder, ScanConfig, Scanner};
 use minion_reader::formats::{parse_epub, parse_pdf};
 use minion_reader::BookFormat;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
@@ -84,6 +85,145 @@ pub struct ExtensionStats {
     pub extension: String,
     pub count: u64,
     pub size: u64,
+}
+
+// ============================================================================
+// Finance response types
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FinanceAccountResponse {
+    pub id: String,
+    pub name: String,
+    pub account_type: String,
+    pub institution: Option<String>,
+    pub balance: f64,
+    pub currency: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FinanceTransactionResponse {
+    pub id: String,
+    pub account_id: String,
+    pub transaction_type: String,
+    pub amount: f64,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub tags: Option<String>,
+    pub date: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FinancialSummaryResponse {
+    pub net_worth: f64,
+    pub total_assets: f64,
+    pub total_liabilities: f64,
+    pub monthly_income: f64,
+    pub monthly_expenses: f64,
+    pub savings_rate: f64,
+    pub account_count: u64,
+    pub transaction_count: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CsvImportResult {
+    pub total_rows: usize,
+    pub imported: usize,
+    pub skipped: usize,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CsvMappingRequest {
+    pub date_column: Option<String>,
+    pub description_column: Option<String>,
+    pub amount_column: Option<String>,
+    pub debit_column: Option<String>,
+    pub credit_column: Option<String>,
+    pub balance_column: Option<String>,
+    pub date_format: Option<String>,
+}
+
+// ============================================================================
+// Fitness response types
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FitnessHabitResponse {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub frequency: String,
+    pub created_at: String,
+    pub completed_today: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FitnessMetricResponse {
+    pub id: String,
+    pub date: String,
+    pub weight_kg: Option<f64>,
+    pub body_fat_pct: Option<f64>,
+    pub steps: Option<i64>,
+    pub heart_rate_avg: Option<i64>,
+    pub sleep_hours: Option<f64>,
+    pub sleep_quality: Option<i64>,
+    pub water_ml: Option<i64>,
+    pub calories_in: Option<i64>,
+    pub notes: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FitnessDashboard {
+    pub total_habits: u64,
+    pub habits_completed_today: u64,
+    pub current_streak: u64,
+    pub latest_weight_kg: Option<f64>,
+    pub avg_steps_7d: Option<f64>,
+    pub avg_sleep_7d: Option<f64>,
+    pub total_water_today: Option<i64>,
+    pub workouts_this_week: u64,
+}
+
+// ============================================================================
+// Reader (enhanced) response types
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReaderBookResponse {
+    pub id: String,
+    pub title: Option<String>,
+    pub authors: Option<String>,
+    pub file_path: String,
+    pub format: Option<String>,
+    pub cover_path: Option<String>,
+    pub pages: Option<i64>,
+    pub current_position: Option<String>,
+    pub progress: f64,
+    pub rating: Option<i64>,
+    pub favorite: bool,
+    pub tags: Option<String>,
+    pub added_at: String,
+    pub last_read_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReaderAnnotationResponse {
+    pub id: String,
+    pub book_id: String,
+    pub annotation_type: String,
+    pub chapter_index: Option<i64>,
+    pub start_pos: Option<i64>,
+    pub end_pos: Option<i64>,
+    pub text: Option<String>,
+    pub note: Option<String>,
+    pub color: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 // ============================================================================
@@ -317,7 +457,8 @@ pub async fn files_start_scan(
                 }
                 let found = progress_files_found.load(std::sync::atomic::Ordering::Relaxed);
                 let processed = progress_files_processed.load(std::sync::atomic::Ordering::Relaxed);
-                let bytes = progress_bytes_processed.load(std::sync::atomic::Ordering::Relaxed) as u64;
+                let bytes =
+                    progress_bytes_processed.load(std::sync::atomic::Ordering::Relaxed) as u64;
 
                 let mut guard = progress_state.write().await;
                 if let Some(task) = guard.scan_tasks.get_mut(&progress_task_id) {
@@ -335,11 +476,14 @@ pub async fn files_start_scan(
         // Run the blocking scan on a dedicated thread pool - this is the key fix!
         // spawn_blocking moves the CPU-heavy work off the tokio runtime so the
         // progress updater above can keep running.
-        let scan_result = tokio::task::spawn_blocking(move || {
-            scanner.scan()
-        })
-        .await
-        .unwrap_or_else(|e| Err(minion_files::Error::Scan(format!("Scan task panicked: {}", e))));
+        let scan_result = tokio::task::spawn_blocking(move || scanner.scan())
+            .await
+            .unwrap_or_else(|e| {
+                Err(minion_files::Error::Scan(format!(
+                    "Scan task panicked: {}",
+                    e
+                )))
+            });
 
         scan_done_writer.store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -369,19 +513,25 @@ pub async fn files_start_scan(
 
                     // Only hash files that share a size with another file
                     let mut needs_hash = 0usize;
-                    for (_, indices) in &size_groups {
+                    for indices in size_groups.values() {
                         if indices.len() > 1 {
                             needs_hash += indices.len();
                             for &idx in indices {
                                 if files_result[idx].sha256.is_none() {
-                                    if let Ok(hash) = minion_files::hash::compute_sha256(&files_result[idx].path) {
+                                    if let Ok(hash) =
+                                        minion_files::hash::compute_sha256(&files_result[idx].path)
+                                    {
                                         files_result[idx].sha256 = Some(hash);
                                     }
                                 }
                             }
                         }
                     }
-                    tracing::info!("Hashed {} of {} files (size-candidate optimization)", needs_hash, files_result.len());
+                    tracing::info!(
+                        "Hashed {} of {} files (size-candidate optimization)",
+                        needs_hash,
+                        files_result.len()
+                    );
 
                     let finder = DuplicateFinder::default();
                     let dupes = finder.find(&files_result);
@@ -625,19 +775,25 @@ pub async fn files_start_multi_scan(
                         }
                     }
                     let mut needs_hash = 0usize;
-                    for (_, indices) in &size_groups {
+                    for indices in size_groups.values() {
                         if indices.len() > 1 {
                             needs_hash += indices.len();
                             for &idx in indices {
                                 if files_result[idx].sha256.is_none() {
-                                    if let Ok(hash) = minion_files::hash::compute_sha256(&files_result[idx].path) {
+                                    if let Ok(hash) =
+                                        minion_files::hash::compute_sha256(&files_result[idx].path)
+                                    {
                                         files_result[idx].sha256 = Some(hash);
                                     }
                                 }
                             }
                         }
                     }
-                    tracing::info!("Hashed {} of {} files (size-candidate optimization)", needs_hash, files_result.len());
+                    tracing::info!(
+                        "Hashed {} of {} files (size-candidate optimization)",
+                        needs_hash,
+                        files_result.len()
+                    );
                     let finder = DuplicateFinder::default();
                     let dupes = finder.find(&files_result);
                     (files_result, dupes)
@@ -647,7 +803,10 @@ pub async fn files_start_multi_scan(
 
                 let (files_final, duplicates) = dupes_result;
                 let duplicates_count = duplicates.len();
-                tracing::info!("Found {} duplicate groups across directories", duplicates_count);
+                tracing::info!(
+                    "Found {} duplicate groups across directories",
+                    duplicates_count
+                );
 
                 let mut state_guard = state_clone.write().await;
                 if let Some(task) = state_guard.scan_tasks.get_mut(&task_id_clone) {
@@ -927,7 +1086,10 @@ pub async fn files_bulk_move(
             .map_err(|e| format!("Failed to create destination: {}", e))?;
     }
     if !dest.is_dir() {
-        return Err(format!("Destination is not a directory: {}", request.destination));
+        return Err(format!(
+            "Destination is not a directory: {}",
+            request.destination
+        ));
     }
 
     let mut succeeded = 0;
@@ -952,8 +1114,14 @@ pub async fn files_bulk_move(
 
         // Handle name conflicts by appending a number
         if dest_path.exists() {
-            let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            let ext = src.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+            let stem = src
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let ext = src
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_default();
             let mut counter = 1;
             loop {
                 dest_path = dest.join(format!("{}_{}{}", stem, counter, ext));
@@ -1271,4 +1439,1006 @@ pub async fn reader_list_books(directory: String) -> Result<Vec<BookInfo>, Strin
     }
 
     Ok(books)
+}
+
+// ============================================================================
+// Finance commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn finance_add_account(
+    state: State<'_, AppStateHandle>,
+    name: String,
+    account_type: String,
+    currency: Option<String>,
+) -> Result<FinanceAccountResponse, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let currency = currency.unwrap_or_else(|| "INR".to_string());
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO finance_accounts (id, name, account_type, balance, currency, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 0, ?4, ?5, ?5)",
+        rusqlite::params![id, name, account_type, currency, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(FinanceAccountResponse {
+        id,
+        name,
+        account_type,
+        institution: None,
+        balance: 0.0,
+        currency,
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+#[tauri::command]
+pub async fn finance_list_accounts(
+    state: State<'_, AppStateHandle>,
+) -> Result<Vec<FinanceAccountResponse>, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, account_type, institution, balance, currency, created_at, updated_at
+             FROM finance_accounts ORDER BY created_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(FinanceAccountResponse {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                account_type: row.get(2)?,
+                institution: row.get(3)?,
+                balance: row.get(4)?,
+                currency: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut accounts = Vec::new();
+    for row in rows {
+        accounts.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(accounts)
+}
+
+#[tauri::command]
+pub async fn finance_add_transaction(
+    state: State<'_, AppStateHandle>,
+    account_id: String,
+    transaction_type: String,
+    amount: f64,
+    description: Option<String>,
+    category: Option<String>,
+    date: Option<String>,
+) -> Result<FinanceTransactionResponse, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let date = date.unwrap_or_else(|| now.clone());
+
+    conn.execute(
+        "INSERT INTO finance_transactions (id, account_id, type, amount, description, category, date, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![id, account_id, transaction_type, amount, description, category, date, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Update account balance
+    let balance_delta = if transaction_type == "credit" {
+        amount
+    } else {
+        -amount
+    };
+    conn.execute(
+        "UPDATE finance_accounts SET balance = balance + ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![balance_delta, now, account_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(FinanceTransactionResponse {
+        id,
+        account_id,
+        transaction_type,
+        amount,
+        description,
+        category,
+        tags: None,
+        date,
+        created_at: now,
+    })
+}
+
+#[tauri::command]
+pub async fn finance_list_transactions(
+    state: State<'_, AppStateHandle>,
+    account_id: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<FinanceTransactionResponse>, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let limit = limit.unwrap_or(100);
+
+    let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match &account_id {
+        Some(aid) => (
+            "SELECT id, account_id, type, amount, description, category, tags, date, created_at
+             FROM finance_transactions WHERE account_id = ?1 ORDER BY date DESC LIMIT ?2"
+                .to_string(),
+            vec![
+                Box::new(aid.clone()) as Box<dyn rusqlite::types::ToSql>,
+                Box::new(limit),
+            ],
+        ),
+        None => (
+            "SELECT id, account_id, type, amount, description, category, tags, date, created_at
+             FROM finance_transactions ORDER BY date DESC LIMIT ?1"
+                .to_string(),
+            vec![Box::new(limit) as Box<dyn rusqlite::types::ToSql>],
+        ),
+    };
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(FinanceTransactionResponse {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                transaction_type: row.get(2)?,
+                amount: row.get(3)?,
+                description: row.get(4)?,
+                category: row.get(5)?,
+                tags: row.get(6)?,
+                date: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut transactions = Vec::new();
+    for row in rows {
+        transactions.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(transactions)
+}
+
+#[tauri::command]
+pub async fn finance_get_summary(
+    state: State<'_, AppStateHandle>,
+) -> Result<FinancialSummaryResponse, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    // Total assets (positive-balance accounts: bank, investment, wallet)
+    let total_assets: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(balance), 0) FROM finance_accounts
+             WHERE account_type IN ('bank', 'investment', 'wallet')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Total liabilities (credit_card, loan balances)
+    let total_liabilities: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(ABS(balance)), 0) FROM finance_accounts
+             WHERE account_type IN ('credit_card', 'loan')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Monthly income (credits in the last 30 days)
+    let monthly_income: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount), 0) FROM finance_transactions
+             WHERE type = 'credit' AND date >= date('now', '-30 days')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Monthly expenses (debits in the last 30 days)
+    let monthly_expenses: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount), 0) FROM finance_transactions
+             WHERE type = 'debit' AND date >= date('now', '-30 days')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let savings_rate = if monthly_income > 0.0 {
+        ((monthly_income - monthly_expenses) / monthly_income) * 100.0
+    } else {
+        0.0
+    };
+
+    let account_count: u64 = conn
+        .query_row("SELECT COUNT(*) FROM finance_accounts", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| e.to_string())?;
+
+    let transaction_count: u64 = conn
+        .query_row("SELECT COUNT(*) FROM finance_transactions", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| e.to_string())?;
+
+    Ok(FinancialSummaryResponse {
+        net_worth: total_assets - total_liabilities,
+        total_assets,
+        total_liabilities,
+        monthly_income,
+        monthly_expenses,
+        savings_rate,
+        account_count,
+        transaction_count,
+    })
+}
+
+#[tauri::command]
+pub async fn finance_import_csv(
+    state: State<'_, AppStateHandle>,
+    path: String,
+    account_id: String,
+    mapping: Option<CsvMappingRequest>,
+) -> Result<CsvImportResult, String> {
+    let csv_path = PathBuf::from(&path);
+    if !csv_path.exists() {
+        return Err(format!("File not found: {}", path));
+    }
+
+    // Build column mapping
+    let col_mapping = match mapping {
+        Some(m) => minion_finance::import::CsvColumnMapping {
+            date_column: m.date_column.unwrap_or_else(|| "Date".to_string()),
+            description_column: m
+                .description_column
+                .unwrap_or_else(|| "Description".to_string()),
+            amount_column: m.amount_column.unwrap_or_else(|| "Amount".to_string()),
+            debit_column: m.debit_column,
+            credit_column: m.credit_column,
+            balance_column: m.balance_column,
+            date_format: m.date_format.unwrap_or_else(|| "%d/%m/%Y".to_string()),
+        },
+        None => {
+            // Try auto-detect from CSV headers
+            let mut reader = csv::ReaderBuilder::new()
+                .flexible(true)
+                .trim(csv::Trim::All)
+                .from_path(&csv_path)
+                .map_err(|e| format!("Failed to open CSV: {}", e))?;
+            let headers: Vec<String> = reader
+                .headers()
+                .map_err(|e| format!("Failed to read headers: {}", e))?
+                .iter()
+                .map(|h: &str| h.to_string())
+                .collect();
+            minion_finance::import::auto_detect_columns(&headers)
+        }
+    };
+
+    let import_result =
+        minion_finance::import::import_csv(&csv_path, &col_mapping).map_err(|e| e.to_string())?;
+
+    // Persist imported transactions to database
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let mut insert_stmt = conn
+        .prepare(
+            "INSERT INTO finance_transactions
+             (id, account_id, type, amount, description, category, date, imported_from, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .map_err(|e| e.to_string())?;
+
+    for tx in &import_result.transactions {
+        let id = uuid::Uuid::new_v4().to_string();
+        insert_stmt
+            .execute(rusqlite::params![
+                id,
+                account_id,
+                tx.transaction_type,
+                tx.amount,
+                tx.description,
+                tx.category,
+                tx.date,
+                path,
+                now,
+            ])
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Recalculate account balance from all transactions
+    let new_balance: f64 = conn
+        .query_row(
+            "SELECT COALESCE(
+                SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END), 0
+             ) FROM finance_transactions WHERE account_id = ?1",
+            rusqlite::params![account_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "UPDATE finance_accounts SET balance = ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![new_balance, now, account_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(CsvImportResult {
+        total_rows: import_result.total_rows,
+        imported: import_result.imported,
+        skipped: import_result.skipped,
+        errors: import_result.errors,
+    })
+}
+
+#[tauri::command]
+pub async fn finance_spending_by_category(
+    state: State<'_, AppStateHandle>,
+) -> Result<HashMap<String, f64>, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(category, 'Uncategorized'), SUM(amount)
+             FROM finance_transactions WHERE type = 'debit'
+             GROUP BY category ORDER BY SUM(amount) DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut result = HashMap::new();
+    for row in rows {
+        let (cat, amount) = row.map_err(|e| e.to_string())?;
+        result.insert(cat, amount);
+    }
+    Ok(result)
+}
+
+// ============================================================================
+// Fitness commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn fitness_add_habit(
+    state: State<'_, AppStateHandle>,
+    name: String,
+    frequency: Option<String>,
+    description: Option<String>,
+) -> Result<FitnessHabitResponse, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let frequency = frequency.unwrap_or_else(|| "daily".to_string());
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO fitness_habits (id, name, description, frequency, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![id, name, description, frequency, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(FitnessHabitResponse {
+        id,
+        name,
+        description,
+        frequency,
+        created_at: now,
+        completed_today: false,
+    })
+}
+
+#[tauri::command]
+pub async fn fitness_list_habits(
+    state: State<'_, AppStateHandle>,
+) -> Result<Vec<FitnessHabitResponse>, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT h.id, h.name, h.description, h.frequency, h.created_at,
+                    EXISTS(
+                        SELECT 1 FROM fitness_habit_completions c
+                        WHERE c.habit_id = h.id AND date(c.completed_at) = date(?1)
+                    ) as completed_today
+             FROM fitness_habits h ORDER BY h.created_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![today], |row| {
+            Ok(FitnessHabitResponse {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                frequency: row.get(3)?,
+                created_at: row.get(4)?,
+                completed_today: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut habits = Vec::new();
+    for row in rows {
+        habits.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(habits)
+}
+
+#[tauri::command]
+pub async fn fitness_toggle_habit(
+    state: State<'_, AppStateHandle>,
+    habit_id: String,
+) -> Result<bool, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    // Check if already completed today
+    let already_completed: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM fitness_habit_completions
+                WHERE habit_id = ?1 AND date(completed_at) = date(?2)
+            )",
+            rusqlite::params![habit_id, today],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    if already_completed {
+        // Un-complete: remove today's completion
+        conn.execute(
+            "DELETE FROM fitness_habit_completions
+             WHERE habit_id = ?1 AND date(completed_at) = date(?2)",
+            rusqlite::params![habit_id, today],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(false) // now uncompleted
+    } else {
+        // Complete: add a completion record
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO fitness_habit_completions (id, habit_id, completed_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, habit_id, now],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(true) // now completed
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LogMetricRequest {
+    pub weight_kg: Option<f64>,
+    pub body_fat_pct: Option<f64>,
+    pub steps: Option<i64>,
+    pub heart_rate_avg: Option<i64>,
+    pub sleep_hours: Option<f64>,
+    pub sleep_quality: Option<i64>,
+    pub water_ml: Option<i64>,
+    pub calories_in: Option<i64>,
+    pub notes: Option<String>,
+}
+
+#[tauri::command]
+pub async fn fitness_log_metric(
+    state: State<'_, AppStateHandle>,
+    metric: LogMetricRequest,
+) -> Result<FitnessMetricResponse, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO fitness_metrics
+         (id, date, weight_kg, body_fat_pct, steps, heart_rate_avg, sleep_hours,
+          sleep_quality, water_ml, calories_in, notes, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        rusqlite::params![
+            id,
+            today,
+            metric.weight_kg,
+            metric.body_fat_pct,
+            metric.steps,
+            metric.heart_rate_avg,
+            metric.sleep_hours,
+            metric.sleep_quality,
+            metric.water_ml,
+            metric.calories_in,
+            metric.notes,
+            now,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(FitnessMetricResponse {
+        id,
+        date: today,
+        weight_kg: metric.weight_kg,
+        body_fat_pct: metric.body_fat_pct,
+        steps: metric.steps,
+        heart_rate_avg: metric.heart_rate_avg,
+        sleep_hours: metric.sleep_hours,
+        sleep_quality: metric.sleep_quality,
+        water_ml: metric.water_ml,
+        calories_in: metric.calories_in,
+        notes: metric.notes,
+        created_at: now,
+    })
+}
+
+#[tauri::command]
+pub async fn fitness_get_metrics(
+    state: State<'_, AppStateHandle>,
+    days: Option<u32>,
+) -> Result<Vec<FitnessMetricResponse>, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let days = days.unwrap_or(30);
+    let since = format!("-{} days", days);
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, date, weight_kg, body_fat_pct, steps, heart_rate_avg, sleep_hours,
+                    sleep_quality, water_ml, calories_in, notes, created_at
+             FROM fitness_metrics WHERE date >= date('now', ?1)
+             ORDER BY date DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![since], |row| {
+            Ok(FitnessMetricResponse {
+                id: row.get(0)?,
+                date: row.get(1)?,
+                weight_kg: row.get(2)?,
+                body_fat_pct: row.get(3)?,
+                steps: row.get(4)?,
+                heart_rate_avg: row.get(5)?,
+                sleep_hours: row.get(6)?,
+                sleep_quality: row.get(7)?,
+                water_ml: row.get(8)?,
+                calories_in: row.get(9)?,
+                notes: row.get(10)?,
+                created_at: row.get(11)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut metrics = Vec::new();
+    for row in rows {
+        metrics.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(metrics)
+}
+
+#[tauri::command]
+pub async fn fitness_get_dashboard(
+    state: State<'_, AppStateHandle>,
+) -> Result<FitnessDashboard, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    let total_habits: u64 = conn
+        .query_row("SELECT COUNT(*) FROM fitness_habits", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+
+    let habits_completed_today: u64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT habit_id) FROM fitness_habit_completions
+             WHERE date(completed_at) = date(?1)",
+            rusqlite::params![today],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Simple streak: count consecutive days with at least one habit completed
+    // going backwards from today
+    let current_streak: u64 = conn
+        .query_row(
+            "WITH RECURSIVE dates(d, streak) AS (
+                SELECT date('now'), 0
+                UNION ALL
+                SELECT date(d, '-1 day'), streak + 1 FROM dates
+                WHERE EXISTS(
+                    SELECT 1 FROM fitness_habit_completions
+                    WHERE date(completed_at) = dates.d
+                )
+                AND streak < 365
+             )
+             SELECT MAX(streak) FROM dates",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    let latest_weight_kg: Option<f64> = conn
+        .query_row(
+            "SELECT weight_kg FROM fitness_metrics WHERE weight_kg IS NOT NULL
+             ORDER BY date DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let avg_steps_7d: Option<f64> = conn
+        .query_row(
+            "SELECT AVG(steps) FROM fitness_metrics
+             WHERE steps IS NOT NULL AND date >= date('now', '-7 days')",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let avg_sleep_7d: Option<f64> = conn
+        .query_row(
+            "SELECT AVG(sleep_hours) FROM fitness_metrics
+             WHERE sleep_hours IS NOT NULL AND date >= date('now', '-7 days')",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let total_water_today: Option<i64> = conn
+        .query_row(
+            "SELECT SUM(water_ml) FROM fitness_metrics WHERE date = ?1 AND water_ml IS NOT NULL",
+            rusqlite::params![today],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let workouts_this_week: u64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM fitness_workouts WHERE date >= date('now', '-7 days')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    Ok(FitnessDashboard {
+        total_habits,
+        habits_completed_today,
+        current_streak,
+        latest_weight_kg,
+        avg_steps_7d,
+        avg_sleep_7d,
+        total_water_today,
+        workouts_this_week,
+    })
+}
+
+// ============================================================================
+// Reader persistence commands (DB-backed)
+// ============================================================================
+
+#[tauri::command]
+pub async fn reader_import_book(
+    state: State<'_, AppStateHandle>,
+    path: String,
+) -> Result<ReaderBookResponse, String> {
+    let book_path = PathBuf::from(&path);
+    if !book_path.exists() {
+        return Err(format!("File not found: {}", path));
+    }
+
+    let ext = book_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // Extract metadata for epub files
+    let (title, authors) = if ext == "epub" {
+        match epub::doc::EpubDoc::new(&book_path) {
+            Ok(doc) => {
+                let title = doc
+                    .mdata("title")
+                    .map(|m| m.value.clone())
+                    .unwrap_or_else(|| {
+                        book_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Unknown")
+                            .to_string()
+                    });
+                let authors = doc
+                    .mdata("creator")
+                    .map(|m| m.value.clone())
+                    .unwrap_or_default();
+                (title, authors)
+            }
+            Err(_) => (
+                book_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown")
+                    .to_string(),
+                String::new(),
+            ),
+        }
+    } else {
+        (
+            book_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown")
+                .to_string(),
+            String::new(),
+        )
+    };
+
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    // Check if book with this path already exists
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM reader_books WHERE file_path = ?1",
+            rusqlite::params![path],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(existing_id) = existing {
+        // Return existing book
+        return conn
+            .query_row(
+                "SELECT id, title, authors, file_path, format, cover_path, pages,
+                        current_position, progress, rating, favorite, tags, added_at, last_read_at
+                 FROM reader_books WHERE id = ?1",
+                rusqlite::params![existing_id],
+                |row| {
+                    Ok(ReaderBookResponse {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        authors: row.get(2)?,
+                        file_path: row.get(3)?,
+                        format: row.get(4)?,
+                        cover_path: row.get(5)?,
+                        pages: row.get(6)?,
+                        current_position: row.get(7)?,
+                        progress: row.get::<_, f64>(8).unwrap_or(0.0),
+                        rating: row.get(9)?,
+                        favorite: row.get::<_, bool>(10).unwrap_or(false),
+                        tags: row.get(11)?,
+                        added_at: row.get(12)?,
+                        last_read_at: row.get(13)?,
+                    })
+                },
+            )
+            .map_err(|e| e.to_string());
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO reader_books (id, title, authors, file_path, format, progress, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+        rusqlite::params![id, title, authors, path, ext, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(ReaderBookResponse {
+        id,
+        title: Some(title),
+        authors: if authors.is_empty() {
+            None
+        } else {
+            Some(authors)
+        },
+        file_path: path,
+        format: Some(ext),
+        cover_path: None,
+        pages: None,
+        current_position: None,
+        progress: 0.0,
+        rating: None,
+        favorite: false,
+        tags: None,
+        added_at: now,
+        last_read_at: None,
+    })
+}
+
+#[tauri::command]
+pub async fn reader_get_library(
+    state: State<'_, AppStateHandle>,
+) -> Result<Vec<ReaderBookResponse>, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title, authors, file_path, format, cover_path, pages,
+                    current_position, progress, rating, favorite, tags, added_at, last_read_at
+             FROM reader_books ORDER BY added_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ReaderBookResponse {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                authors: row.get(2)?,
+                file_path: row.get(3)?,
+                format: row.get(4)?,
+                cover_path: row.get(5)?,
+                pages: row.get(6)?,
+                current_position: row.get(7)?,
+                progress: row.get::<_, f64>(8).unwrap_or(0.0),
+                rating: row.get(9)?,
+                favorite: row.get::<_, bool>(10).unwrap_or(false),
+                tags: row.get(11)?,
+                added_at: row.get(12)?,
+                last_read_at: row.get(13)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut books = Vec::new();
+    for row in rows {
+        books.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(books)
+}
+
+#[tauri::command]
+pub async fn reader_update_progress(
+    state: State<'_, AppStateHandle>,
+    book_id: String,
+    progress: f64,
+    position: Option<String>,
+) -> Result<(), String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "UPDATE reader_books SET progress = ?1, current_position = ?2, last_read_at = ?3
+         WHERE id = ?4",
+        rusqlite::params![progress, position, now, book_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reader_add_annotation(
+    state: State<'_, AppStateHandle>,
+    book_id: String,
+    annotation_type: String,
+    chapter_index: Option<i64>,
+    text: Option<String>,
+    note: Option<String>,
+    color: Option<String>,
+) -> Result<ReaderAnnotationResponse, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let color = color.unwrap_or_else(|| "yellow".to_string());
+
+    conn.execute(
+        "INSERT INTO reader_annotations
+         (id, book_id, type, chapter_index, text, note, color, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+        rusqlite::params![
+            id,
+            book_id,
+            annotation_type,
+            chapter_index,
+            text,
+            note,
+            color,
+            now
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(ReaderAnnotationResponse {
+        id,
+        book_id,
+        annotation_type,
+        chapter_index,
+        start_pos: None,
+        end_pos: None,
+        text,
+        note,
+        color,
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+#[tauri::command]
+pub async fn reader_get_annotations(
+    state: State<'_, AppStateHandle>,
+    book_id: String,
+) -> Result<Vec<ReaderAnnotationResponse>, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, book_id, type, chapter_index, start_pos, end_pos,
+                    text, note, color, created_at, updated_at
+             FROM reader_annotations WHERE book_id = ?1
+             ORDER BY chapter_index ASC, created_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![book_id], |row| {
+            Ok(ReaderAnnotationResponse {
+                id: row.get(0)?,
+                book_id: row.get(1)?,
+                annotation_type: row.get(2)?,
+                chapter_index: row.get(3)?,
+                start_pos: row.get(4)?,
+                end_pos: row.get(5)?,
+                text: row.get(6)?,
+                note: row.get(7)?,
+                color: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut annotations = Vec::new();
+    for row in rows {
+        annotations.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(annotations)
 }

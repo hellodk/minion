@@ -1,5 +1,7 @@
 import { Component, createSignal, onMount, ParentProps } from 'solid-js';
+import { useNavigate } from '@solidjs/router';
 import Layout from './components/Layout';
+import CommandPalette from './components/CommandPalette';
 import { invoke } from '@tauri-apps/api/core';
 
 export interface SystemInfo {
@@ -10,6 +12,7 @@ export interface SystemInfo {
 }
 
 const App: Component<ParentProps> = (props) => {
+  const navigate = useNavigate();
   const [systemInfo, setSystemInfo] = createSignal<SystemInfo | null>(null);
   const [darkMode, setDarkMode] = createSignal(false);
 
@@ -35,9 +38,12 @@ const App: Component<ParentProps> = (props) => {
   };
 
   return (
-    <Layout systemInfo={systemInfo()} darkMode={darkMode()} toggleDarkMode={toggleDarkMode}>
-      {props.children}
-    </Layout>
+    <>
+      <CommandPalette navigate={navigate} toggleDarkMode={toggleDarkMode} />
+      <Layout systemInfo={systemInfo()} darkMode={darkMode()} toggleDarkMode={toggleDarkMode}>
+        {props.children}
+      </Layout>
+    </>
   );
 };
 

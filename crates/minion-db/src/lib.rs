@@ -179,13 +179,13 @@ mod tests {
 
         let conn = db.get().expect("Failed to get connection");
 
-        // Should still have exactly one migration recorded
+        // Should still have the same number of migrations
         let count: i32 = conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
     }
 
     #[test]

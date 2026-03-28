@@ -5,6 +5,7 @@
 pub mod accounts;
 pub mod analytics;
 pub mod goals;
+pub mod import;
 pub mod investments;
 pub mod transactions;
 
