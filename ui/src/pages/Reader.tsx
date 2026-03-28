@@ -114,9 +114,12 @@ const Reader: Component = () => {
   // "Add to Collection" dropdown
   const [addToCollectionBookId, setAddToCollectionBookId] = createSignal<string | null>(null);
 
-  // O'Reilly form
+  // O'Reilly state
   const [oreillyEmail, setOreillyEmail] = createSignal('');
   const [oreillyPassword, setOreillyPassword] = createSignal('');
+  const [oreillyConnected, setOreillyConnected] = createSignal(false);
+  const [oreillyConnecting, setOreillyConnecting] = createSignal(false);
+  const [oreillyStatus, setOreillyStatus] = createSignal('');
 
   // ============================================================================
   // Keyboard navigation
@@ -1511,8 +1514,8 @@ const Reader: Component = () => {
                     <div class="flex-1">
                       <div class="flex items-center gap-2 mb-1">
                         <h3 class="font-semibold text-lg">O'Reilly Learning</h3>
-                        <span class="px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 text-xs font-medium">
-                          Coming Soon
+                        <span class="px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 text-xs font-medium">
+                          Beta
                         </span>
                       </div>
                       <p class="text-sm text-gray-500 dark:text-gray-400">
@@ -1522,42 +1525,191 @@ const Reader: Component = () => {
                     </div>
                   </div>
 
-                  <div class="space-y-3 mb-5">
-                    <div>
-                      <label class="block text-sm font-medium mb-1">Email</label>
-                      <input
-                        type="email"
-                        class="input w-full"
-                        placeholder="your-email@example.com"
-                        value={oreillyEmail()}
-                        onInput={(e) => setOreillyEmail(e.currentTarget.value)}
-                        disabled
-                      />
-                    </div>
-                    <div>
-                      <label class="block text-sm font-medium mb-1">Password</label>
-                      <input
-                        type="password"
-                        class="input w-full"
-                        placeholder="Your O'Reilly password"
-                        value={oreillyPassword()}
-                        onInput={(e) => setOreillyPassword(e.currentTarget.value)}
-                        disabled
-                      />
-                    </div>
-                  </div>
+                  <Show when={!oreillyConnected()}>
+                    {/* Login options */}
+                    <div class="space-y-3 mb-5">
+                      <p class="text-sm text-gray-600 dark:text-gray-300 mb-3">
+                        Choose how to connect to your O'Reilly account:
+                      </p>
 
-                  <button class="btn btn-primary w-full opacity-50 cursor-not-allowed" disabled>
-                    Connect Account
-                  </button>
+                      {/* Option 1: Use Chrome session */}
+                      <button
+                        class="btn w-full flex items-center gap-3 p-4 bg-gray-50 dark:bg-gray-800 border-2 border-gray-200 dark:border-gray-700 hover:border-minion-400 dark:hover:border-minion-500 rounded-xl transition-colors text-left"
+                        disabled={oreillyConnecting()}
+                        onClick={async () => {
+                          setOreillyConnecting(true);
+                          setOreillyStatus('Reading Chrome cookies for oreilly.com...');
+                          try {
+                            const result = await invoke<{ success: boolean; message: string }>('oreilly_connect_chrome');
+                            if (result.success) {
+                              setOreillyConnected(true);
+                              setOreillyStatus('Connected via Chrome session!');
+                            } else {
+                              setOreillyStatus(result.message);
+                            }
+                          } catch (e) {
+                            setOreillyStatus(`Failed: ${e}. Make sure you're logged into O'Reilly in Chrome.`);
+                          } finally {
+                            setOreillyConnecting(false);
+                          }
+                        }}
+                      >
+                        <div class="w-10 h-10 rounded-lg bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center flex-shrink-0">
+                          <svg class="w-6 h-6 text-blue-600" viewBox="0 0 24 24" fill="currentColor">
+                            <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.5"/>
+                            <circle cx="12" cy="12" r="4" fill="currentColor" opacity="0.6"/>
+                          </svg>
+                        </div>
+                        <div class="flex-1">
+                          <p class="font-medium text-sm">Use Chrome Session</p>
+                          <p class="text-xs text-gray-500 dark:text-gray-400">
+                            Recommended. Uses your existing Chrome login (ACM SSO supported).
+                          </p>
+                        </div>
+                        <Show when={oreillyConnecting()}>
+                          <div class="w-5 h-5 rounded-full border-2 border-minion-200 border-t-minion-500" style={{ animation: 'spin 1s linear infinite' }} />
+                        </Show>
+                      </button>
+
+                      {/* Option 2: SSO login in webview */}
+                      <button
+                        class="btn w-full flex items-center gap-3 p-4 bg-gray-50 dark:bg-gray-800 border-2 border-gray-200 dark:border-gray-700 hover:border-minion-400 dark:hover:border-minion-500 rounded-xl transition-colors text-left"
+                        disabled={oreillyConnecting()}
+                        onClick={async () => {
+                          setOreillyConnecting(true);
+                          setOreillyStatus('Opening O\'Reilly login window...');
+                          try {
+                            const result = await invoke<{ success: boolean; message: string }>('oreilly_connect_sso');
+                            if (result.success) {
+                              setOreillyConnected(true);
+                              setOreillyStatus('Connected via SSO!');
+                            } else {
+                              setOreillyStatus(result.message);
+                            }
+                          } catch (e) {
+                            setOreillyStatus(`${e}`);
+                          } finally {
+                            setOreillyConnecting(false);
+                          }
+                        }}
+                      >
+                        <div class="w-10 h-10 rounded-lg bg-red-100 dark:bg-red-900/30 flex items-center justify-center flex-shrink-0">
+                          <svg class="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                          </svg>
+                        </div>
+                        <div class="flex-1">
+                          <p class="font-medium text-sm">Sign in with SSO</p>
+                          <p class="text-xs text-gray-500 dark:text-gray-400">
+                            Opens O'Reilly login page. Follows ACM/institutional SSO redirects.
+                          </p>
+                        </div>
+                      </button>
+
+                      {/* Option 3: Manual email/password */}
+                      <details class="mt-2">
+                        <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-600">
+                          Manual login (email + password, no SSO)
+                        </summary>
+                        <div class="mt-3 space-y-2">
+                          <input
+                            type="email"
+                            class="input w-full text-sm"
+                            placeholder="your-email@example.com"
+                            value={oreillyEmail()}
+                            onInput={(e) => setOreillyEmail(e.currentTarget.value)}
+                          />
+                          <input
+                            type="password"
+                            class="input w-full text-sm"
+                            placeholder="Password"
+                            value={oreillyPassword()}
+                            onInput={(e) => setOreillyPassword(e.currentTarget.value)}
+                          />
+                          <button
+                            class="btn btn-secondary w-full text-sm"
+                            disabled={!oreillyEmail().trim() || !oreillyPassword().trim() || oreillyConnecting()}
+                            onClick={async () => {
+                              setOreillyConnecting(true);
+                              setOreillyStatus('Logging in...');
+                              try {
+                                const result = await invoke<{ success: boolean; message: string }>('oreilly_connect_manual', {
+                                  email: oreillyEmail(),
+                                  password: oreillyPassword(),
+                                });
+                                if (result.success) {
+                                  setOreillyConnected(true);
+                                  setOreillyStatus('Connected!');
+                                } else {
+                                  setOreillyStatus(result.message);
+                                }
+                              } catch (e) {
+                                setOreillyStatus(`${e}`);
+                              } finally {
+                                setOreillyConnecting(false);
+                              }
+                            }}
+                          >
+                            Sign In
+                          </button>
+                        </div>
+                      </details>
+                    </div>
+
+                    {/* Status message */}
+                    <Show when={oreillyStatus()}>
+                      <div class={`mt-3 p-3 rounded-lg text-sm ${
+                        oreillyStatus().includes('Failed') || oreillyStatus().includes('failed')
+                          ? 'bg-red-50 dark:bg-red-900/10 text-red-700 dark:text-red-300'
+                          : 'bg-minion-50 dark:bg-minion-900/10 text-minion-700 dark:text-minion-300'
+                      }`}>
+                        {oreillyStatus()}
+                      </div>
+                    </Show>
+                  </Show>
+
+                  <Show when={oreillyConnected()}>
+                    <div class="p-4 bg-green-50 dark:bg-green-900/10 rounded-lg border border-green-200 dark:border-green-800 mb-4">
+                      <div class="flex items-center gap-2">
+                        <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                        </svg>
+                        <span class="font-medium text-green-700 dark:text-green-300">Connected to O'Reilly</span>
+                        <button
+                          class="ml-auto text-xs px-2 py-1 rounded bg-red-100 dark:bg-red-900/20 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/40 transition-colors"
+                          onClick={async () => {
+                            try {
+                              await invoke('oreilly_logout');
+                            } catch (_) { /* ignore */ }
+                            setOreillyConnected(false);
+                            setOreillyStatus('Logged out. You can sign in with a different account.');
+                            setOreillyEmail('');
+                            setOreillyPassword('');
+                          }}
+                        >
+                          Logout / Switch Account
+                        </button>
+                      </div>
+                    </div>
+                    <p class="text-sm text-gray-500 mb-3">
+                      Search and download books from O'Reilly Learning. Books are saved to{' '}
+                      <code class="px-1 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-xs">~/minion/books/oreilly/</code>
+                    </p>
+                    <div class="flex gap-2 mb-4">
+                      <input
+                        type="text"
+                        class="input flex-1"
+                        placeholder="Search O'Reilly books..."
+                      />
+                      <button class="btn btn-primary">Search</button>
+                    </div>
+                  </Show>
 
                   <div class="mt-4 p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
                     <p class="text-xs text-gray-500 dark:text-gray-400">
-                      <strong>Note:</strong> Credentials will be stored securely in Minion's
-                      encrypted credential vault. Downloaded books will be saved to{' '}
-                      <code class="px-1 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-xs">
-                        ~/minion/books/oreilly/
-                      </code>
+                      <strong>How it works:</strong> "Use Chrome Session" reads your existing O'Reilly login
+                      from Chrome (works with ACM SSO, institutional logins, etc). "Sign in with SSO" opens
+                      the full O'Reilly login flow including any redirects to your institution.
                     </p>
                   </div>
                 </div>

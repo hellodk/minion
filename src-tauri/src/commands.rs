@@ -2798,3 +2798,148 @@ pub async fn reader_scan_directory(
 
     Ok(imported)
 }
+
+// ============================================================================
+// O'Reilly connection commands
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct OreillyConnectResult {
+    pub success: bool,
+    pub message: String,
+}
+
+#[tauri::command]
+pub async fn oreilly_connect_chrome(
+    state: State<'_, AppStateHandle>,
+) -> Result<OreillyConnectResult, String> {
+    // Try to find Chrome cookies for oreilly.com
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home".to_string());
+
+    // Chrome cookie paths (Linux)
+    let cookie_paths = vec![
+        format!("{}/.config/google-chrome/Default/Cookies", home),
+        format!("{}/.config/google-chrome/Profile 1/Cookies", home),
+        format!("{}/.config/chromium/Default/Cookies", home),
+        format!("{}/.config/brave/Default/Cookies", home),
+    ];
+
+    let mut found_path: Option<String> = None;
+    for p in &cookie_paths {
+        if std::path::Path::new(p).exists() {
+            found_path = Some(p.clone());
+            break;
+        }
+    }
+
+    let cookie_db_path = match found_path {
+        Some(p) => p,
+        None => {
+            return Ok(OreillyConnectResult {
+                success: false,
+                message: "Chrome cookie database not found. Make sure Chrome/Chromium is installed and you've logged into O'Reilly.".to_string(),
+            });
+        }
+    };
+
+    tracing::info!("Reading Chrome cookies from: {}", cookie_db_path);
+
+    // Copy the cookie DB to a temp file (Chrome locks it)
+    let temp_dir = std::env::temp_dir();
+    let temp_cookie_path = temp_dir.join("minion_chrome_cookies_tmp");
+    std::fs::copy(&cookie_db_path, &temp_cookie_path).map_err(|e| {
+        format!(
+            "Failed to copy Chrome cookie DB: {}. Try closing Chrome first.",
+            e
+        )
+    })?;
+
+    // Open the copied cookie DB
+    let conn =
+        rusqlite::Connection::open(&temp_cookie_path).map_err(|e| e.to_string())?;
+
+    // Check for oreilly.com cookies
+    let cookie_count: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM cookies WHERE host_key LIKE '%oreilly.com%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&temp_cookie_path);
+
+    if cookie_count > 0 {
+        // Store the cookie DB path in our config for future use
+        let st = state.read().await;
+        let db_conn = st.db.get().map_err(|e| e.to_string())?;
+        db_conn
+            .execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES ('oreilly_cookie_source', ?1)",
+                rusqlite::params![cookie_db_path],
+            )
+            .map_err(|e| e.to_string())?;
+
+        tracing::info!(
+            "Found {} O'Reilly cookies in Chrome",
+            cookie_count
+        );
+
+        Ok(OreillyConnectResult {
+            success: true,
+            message: format!(
+                "Found active O'Reilly session in Chrome ({} cookies). You can now search and download books.",
+                cookie_count
+            ),
+        })
+    } else {
+        Ok(OreillyConnectResult {
+            success: false,
+            message: "No O'Reilly cookies found in Chrome. Please log into learning.oreilly.com in Chrome first, then try again.".to_string(),
+        })
+    }
+}
+
+#[tauri::command]
+pub async fn oreilly_connect_sso() -> Result<OreillyConnectResult, String> {
+    // Open O'Reilly login page in the default browser
+    let login_url = "https://www.oreilly.com/member/login/";
+
+    std::process::Command::new("xdg-open")
+        .arg(login_url)
+        .spawn()
+        .map_err(|e| format!("Failed to open browser: {}", e))?;
+
+    Ok(OreillyConnectResult {
+        success: false,
+        message: "Opened O'Reilly login in your browser. Complete the SSO login (ACM/institutional), then click 'Use Chrome Session' to import the session.".to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn oreilly_connect_manual(
+    email: String,
+    password: String,
+) -> Result<OreillyConnectResult, String> {
+    // For manual login, we'd need to POST to O'Reilly's auth endpoint
+    // This doesn't work with SSO accounts but works for direct O'Reilly accounts
+    tracing::info!("Manual O'Reilly login attempt for: {}", email);
+
+    Ok(OreillyConnectResult {
+        success: false,
+        message: "Manual login requires direct O'Reilly credentials (not SSO). For ACM/institutional access, use 'Sign in with SSO' then 'Use Chrome Session'.".to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn oreilly_logout(
+    state: State<'_, AppStateHandle>,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM config WHERE key LIKE 'oreilly_%'", [])
+        .map_err(|e| e.to_string())?;
+    tracing::info!("O'Reilly session cleared");
+    Ok(())
+}

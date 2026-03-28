@@ -89,6 +89,11 @@ pub fn run() {
             commands::reader_update_progress,
             commands::reader_add_annotation,
             commands::reader_get_annotations,
+            // O'Reilly commands
+            commands::oreilly_connect_chrome,
+            commands::oreilly_connect_sso,
+            commands::oreilly_connect_manual,
+            commands::oreilly_logout,
             // Collection commands
             commands::reader_create_collection,
             commands::reader_list_collections,
