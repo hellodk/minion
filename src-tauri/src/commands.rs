@@ -1225,6 +1225,7 @@ pub struct BookContentResponse {
     pub toc: Vec<TocEntryInfo>,
     pub file_path: Option<String>,
     pub format: String,
+    pub cover_base64: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1291,6 +1292,7 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
                 toc,
                 file_path: Some(path.clone()),
                 format: "epub".to_string(),
+                cover_base64: content.cover_base64,
             })
         }
         BookFormat::Pdf => {
@@ -1323,6 +1325,7 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
                 toc: vec![],
                 file_path: Some(path.clone()),
                 format: "pdf".to_string(),
+                cover_base64: None,
             })
         }
         BookFormat::Txt => {
@@ -1352,6 +1355,7 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
                 toc: vec![],
                 file_path: Some(path.clone()),
                 format: "txt".to_string(),
+                cover_base64: None,
             })
         }
         BookFormat::Markdown => {
@@ -1381,6 +1385,7 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
                 toc: vec![],
                 file_path: Some(path.clone()),
                 format: "md".to_string(),
+                cover_base64: None,
             })
         }
         _ => Err(format!("Format {:?} not yet supported", format)),
@@ -2272,10 +2277,32 @@ pub async fn reader_import_book(
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Extract cover image for EPUB files and save to data dir
+    let cover_path: Option<String> = if ext == "epub" {
+        if let Ok(mut doc) = epub::doc::EpubDoc::new(&book_path) {
+            if let Some((cover_data, _mime)) = doc.get_cover() {
+                let covers_dir = st.data_dir.join("covers");
+                let _ = std::fs::create_dir_all(&covers_dir);
+                let cover_file = covers_dir.join(format!("{}.jpg", id));
+                if std::fs::write(&cover_file, &cover_data).is_ok() {
+                    Some(cover_file.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     conn.execute(
-        "INSERT INTO reader_books (id, title, authors, file_path, format, progress, added_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-        rusqlite::params![id, title, authors, path, ext, now],
+        "INSERT INTO reader_books (id, title, authors, file_path, format, cover_path, progress, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+        rusqlite::params![id, title, authors, path, ext, cover_path, now],
     )
     .map_err(|e| e.to_string())?;
 
@@ -2289,7 +2316,7 @@ pub async fn reader_import_book(
         },
         file_path: path,
         format: Some(ext),
-        cover_path: None,
+        cover_path,
         pages: None,
         current_position: None,
         progress: 0.0,
