@@ -20,6 +20,7 @@ pub fn run(conn: &Connection) -> Result<()> {
     let migrations: &[(&str, MigrationFn)] = &[
         ("001_initial", migrate_001_initial),
         ("002_modules", migrate_002_modules),
+        ("003_collections", migrate_003_collections),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -99,6 +100,45 @@ fn migrate_001_initial(conn: &Connection) -> Result<()> {
     ",
     )?;
 
+    Ok(())
+}
+
+fn migrate_003_collections(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS reader_collections (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            color TEXT DEFAULT '#0ea5e9',
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS reader_collection_books (
+            collection_id TEXT NOT NULL REFERENCES reader_collections(id) ON DELETE CASCADE,
+            book_id TEXT NOT NULL REFERENCES reader_books(id) ON DELETE CASCADE,
+            added_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (collection_id, book_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_coll_books ON reader_collection_books(collection_id);
+
+        -- O'Reilly/Safari downloaded books tracking
+        CREATE TABLE IF NOT EXISTS reader_downloads (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL DEFAULT 'oreilly',
+            remote_id TEXT,
+            title TEXT NOT NULL,
+            authors TEXT,
+            cover_url TEXT,
+            download_path TEXT,
+            status TEXT DEFAULT 'pending',
+            progress REAL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT
+        );
+    ",
+    )?;
     Ok(())
 }
 
@@ -474,7 +514,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 2);
+        assert_eq!(count, 3);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn

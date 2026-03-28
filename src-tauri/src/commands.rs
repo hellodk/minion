@@ -190,6 +190,20 @@ pub struct FitnessDashboard {
 }
 
 // ============================================================================
+// Collection response types
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CollectionResponse {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub color: String,
+    pub book_count: i64,
+    pub created_at: String,
+}
+
+// ============================================================================
 // Reader (enhanced) response types
 // ============================================================================
 
@@ -2441,4 +2455,346 @@ pub async fn reader_get_annotations(
         annotations.push(row.map_err(|e| e.to_string())?);
     }
     Ok(annotations)
+}
+
+// ============================================================================
+// Collection commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn reader_create_collection(
+    state: State<'_, AppStateHandle>,
+    name: String,
+    description: Option<String>,
+    color: Option<String>,
+) -> Result<CollectionResponse, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let color = color.unwrap_or_else(|| "#0ea5e9".to_string());
+
+    conn.execute(
+        "INSERT INTO reader_collections (id, name, description, color, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![id, name, description, color, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(CollectionResponse {
+        id,
+        name,
+        description,
+        color,
+        book_count: 0,
+        created_at: now,
+    })
+}
+
+#[tauri::command]
+pub async fn reader_list_collections(
+    state: State<'_, AppStateHandle>,
+) -> Result<Vec<CollectionResponse>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.id, c.name, c.description, c.color, c.created_at,
+                    COUNT(cb.book_id) as book_count
+             FROM reader_collections c
+             LEFT JOIN reader_collection_books cb ON c.id = cb.collection_id
+             GROUP BY c.id
+             ORDER BY c.sort_order ASC, c.created_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CollectionResponse {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                color: row.get(3)?,
+                created_at: row.get(4)?,
+                book_count: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut collections = Vec::new();
+    for row in rows {
+        collections.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(collections)
+}
+
+#[tauri::command]
+pub async fn reader_add_to_collection(
+    state: State<'_, AppStateHandle>,
+    collection_id: String,
+    book_id: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO reader_collection_books (collection_id, book_id)
+         VALUES (?1, ?2)",
+        rusqlite::params![collection_id, book_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reader_remove_from_collection(
+    state: State<'_, AppStateHandle>,
+    collection_id: String,
+    book_id: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "DELETE FROM reader_collection_books
+         WHERE collection_id = ?1 AND book_id = ?2",
+        rusqlite::params![collection_id, book_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reader_get_collection_books(
+    state: State<'_, AppStateHandle>,
+    collection_id: String,
+) -> Result<Vec<ReaderBookResponse>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT b.id, b.title, b.authors, b.file_path, b.format, b.cover_path, b.pages,
+                    b.current_position, b.progress, b.rating, b.favorite, b.tags,
+                    b.added_at, b.last_read_at
+             FROM reader_books b
+             INNER JOIN reader_collection_books cb ON b.id = cb.book_id
+             WHERE cb.collection_id = ?1
+             ORDER BY cb.added_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![collection_id], |row| {
+            Ok(ReaderBookResponse {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                authors: row.get(2)?,
+                file_path: row.get(3)?,
+                format: row.get(4)?,
+                cover_path: row.get(5)?,
+                pages: row.get(6)?,
+                current_position: row.get(7)?,
+                progress: row.get::<_, f64>(8).unwrap_or(0.0),
+                rating: row.get(9)?,
+                favorite: row.get::<_, bool>(10).unwrap_or(false),
+                tags: row.get(11)?,
+                added_at: row.get(12)?,
+                last_read_at: row.get(13)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut books = Vec::new();
+    for row in rows {
+        books.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(books)
+}
+
+#[tauri::command]
+pub async fn reader_delete_collection(
+    state: State<'_, AppStateHandle>,
+    collection_id: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    // Delete association rows first (in case FK cascade isn't enforced)
+    conn.execute(
+        "DELETE FROM reader_collection_books WHERE collection_id = ?1",
+        rusqlite::params![collection_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "DELETE FROM reader_collections WHERE id = ?1",
+        rusqlite::params![collection_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reader_scan_directory(
+    state: State<'_, AppStateHandle>,
+    path: String,
+) -> Result<Vec<ReaderBookResponse>, String> {
+    let dir = PathBuf::from(&path);
+    if !dir.is_dir() {
+        return Err(format!("Not a directory: {}", path));
+    }
+
+    let book_extensions = ["epub", "pdf", "mobi", "azw3", "fb2", "djvu", "cbz", "cbr"];
+    let mut book_paths = Vec::new();
+
+    // Collect book files from the directory (non-recursive for now, then recurse)
+    fn collect_books(dir: &PathBuf, exts: &[&str], out: &mut Vec<PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_books(&path, exts, out);
+                } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if exts.contains(&ext.to_lowercase().as_str()) {
+                        out.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    collect_books(&dir, &book_extensions, &mut book_paths);
+
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let mut imported = Vec::new();
+    for book_path in book_paths {
+        let path_str = book_path.to_string_lossy().to_string();
+        let ext = book_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        // Check if already imported
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM reader_books WHERE file_path = ?1",
+                rusqlite::params![path_str],
+                |row| row.get(0),
+            )
+            .ok();
+
+        if let Some(existing_id) = existing {
+            if let Ok(book) = conn.query_row(
+                "SELECT id, title, authors, file_path, format, cover_path, pages,
+                        current_position, progress, rating, favorite, tags, added_at, last_read_at
+                 FROM reader_books WHERE id = ?1",
+                rusqlite::params![existing_id],
+                |row| {
+                    Ok(ReaderBookResponse {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        authors: row.get(2)?,
+                        file_path: row.get(3)?,
+                        format: row.get(4)?,
+                        cover_path: row.get(5)?,
+                        pages: row.get(6)?,
+                        current_position: row.get(7)?,
+                        progress: row.get::<_, f64>(8).unwrap_or(0.0),
+                        rating: row.get(9)?,
+                        favorite: row.get::<_, bool>(10).unwrap_or(false),
+                        tags: row.get(11)?,
+                        added_at: row.get(12)?,
+                        last_read_at: row.get(13)?,
+                    })
+                },
+            ) {
+                imported.push(book);
+            }
+            continue;
+        }
+
+        // Extract metadata for epub
+        let (title, authors) = if ext == "epub" {
+            match epub::doc::EpubDoc::new(&book_path) {
+                Ok(doc) => {
+                    let title = doc
+                        .mdata("title")
+                        .map(|m| m.value.clone())
+                        .unwrap_or_else(|| {
+                            book_path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("Unknown")
+                                .to_string()
+                        });
+                    let authors = doc
+                        .mdata("creator")
+                        .map(|m| m.value.clone())
+                        .unwrap_or_default();
+                    (title, authors)
+                }
+                Err(_) => (
+                    book_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Unknown")
+                        .to_string(),
+                    String::new(),
+                ),
+            }
+        } else {
+            (
+                book_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown")
+                    .to_string(),
+                String::new(),
+            )
+        };
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        if conn
+            .execute(
+                "INSERT INTO reader_books (id, title, authors, file_path, format, progress, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                rusqlite::params![id, title, authors, path_str, ext, now],
+            )
+            .is_ok()
+        {
+            imported.push(ReaderBookResponse {
+                id,
+                title: Some(title),
+                authors: if authors.is_empty() {
+                    None
+                } else {
+                    Some(authors)
+                },
+                file_path: path_str,
+                format: Some(ext),
+                cover_path: None,
+                pages: None,
+                current_position: None,
+                progress: 0.0,
+                rating: None,
+                favorite: false,
+                tags: None,
+                added_at: now,
+                last_read_at: None,
+            });
+        }
+    }
+
+    Ok(imported)
 }

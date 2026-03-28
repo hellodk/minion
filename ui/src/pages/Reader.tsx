@@ -2,13 +2,34 @@ import { Component, createSignal, onMount, onCleanup, For, Show } from 'solid-js
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 
-interface Book {
+// ============================================================================
+// Types
+// ============================================================================
+
+interface LibraryBook {
   id: string;
-  title: string;
-  authors: string[];
-  path: string;
-  format: string;
-  cover_url?: string;
+  title?: string;
+  authors?: string;
+  file_path: string;
+  format?: string;
+  cover_path?: string;
+  pages?: number;
+  current_position?: string;
+  progress: number;
+  rating?: number;
+  favorite: boolean;
+  tags?: string;
+  added_at: string;
+  last_read_at?: string;
+}
+
+interface Collection {
+  id: string;
+  name: string;
+  description?: string;
+  color: string;
+  book_count: number;
+  created_at: string;
 }
 
 interface ChapterInfo {
@@ -37,14 +58,31 @@ interface BookContent {
 }
 
 type ReadingMode = 'light' | 'dark' | 'sepia';
+type LibraryTab = 'all' | 'collections' | 'oreilly';
+
+const PRESET_COLORS = [
+  '#0ea5e9', '#8b5cf6', '#ec4899', '#f97316', '#22c55e',
+  '#ef4444', '#14b8a6', '#f59e0b', '#6366f1', '#64748b',
+];
+
+// ============================================================================
+// Component
+// ============================================================================
 
 const Reader: Component = () => {
-  const [books, setBooks] = createSignal<Book[]>([]);
+  // Library state
+  const [libraryBooks, setLibraryBooks] = createSignal<LibraryBook[]>([]);
+  const [collections, setCollections] = createSignal<Collection[]>([]);
+  const [libraryTab, setLibraryTab] = createSignal<LibraryTab>('all');
+
+  // Old-style file browsing (kept for "Open a Book" and "Browse Folder")
+  const [bookPath, setBookPath] = createSignal('');
+
+  // Reader state
   const [currentBook, setCurrentBook] = createSignal<BookContent | null>(null);
+  const [currentBookId, setCurrentBookId] = createSignal<string | null>(null);
   const [currentChapter, setCurrentChapter] = createSignal(0);
   const [view, setView] = createSignal<'library' | 'reader'>('library');
-  const [bookPath, setBookPath] = createSignal('');
-  const [libraryPath, setLibraryPath] = createSignal('');
   const [loading, setLoading] = createSignal(false);
   const [showToc, setShowToc] = createSignal(false);
   const [fontSize, setFontSize] = createSignal(16);
@@ -62,7 +100,28 @@ const Reader: Component = () => {
   const [tiltX, setTiltX] = createSignal(0);
   const [tiltY, setTiltY] = createSignal(0);
 
+  // Collection creation form
+  const [showNewCollection, setShowNewCollection] = createSignal(false);
+  const [newCollectionName, setNewCollectionName] = createSignal('');
+  const [newCollectionColor, setNewCollectionColor] = createSignal('#0ea5e9');
+  const [creatingCollection, setCreatingCollection] = createSignal(false);
+
+  // Collection detail view
+  const [expandedCollection, setExpandedCollection] = createSignal<string | null>(null);
+  const [collectionBooks, setCollectionBooks] = createSignal<LibraryBook[]>([]);
+  const [loadingCollectionBooks, setLoadingCollectionBooks] = createSignal(false);
+
+  // "Add to Collection" dropdown
+  const [addToCollectionBookId, setAddToCollectionBookId] = createSignal<string | null>(null);
+
+  // O'Reilly form
+  const [oreillyEmail, setOreillyEmail] = createSignal('');
+  const [oreillyPassword, setOreillyPassword] = createSignal('');
+
+  // ============================================================================
   // Keyboard navigation
+  // ============================================================================
+
   const handleKeyDown = (e: KeyboardEvent) => {
     if (view() !== 'reader' || !currentBook()) return;
     if (pageTransitioning()) return;
@@ -79,39 +138,55 @@ const Reader: Component = () => {
     }
   };
 
-  onMount(() => {
+  // ============================================================================
+  // Lifecycle
+  // ============================================================================
+
+  onMount(async () => {
     document.addEventListener('keydown', handleKeyDown);
+    // Load persistent library and collections from DB
+    await Promise.all([loadLibrary(), loadCollections()]);
   });
 
   onCleanup(() => {
     document.removeEventListener('keydown', handleKeyDown);
   });
 
-  const loadBooksFromDirectory = async () => {
-    const path = libraryPath().trim();
-    if (!path) return;
+  // ============================================================================
+  // Library persistence
+  // ============================================================================
 
-    setLoading(true);
+  const loadLibrary = async () => {
     try {
-      const bookList = await invoke<Book[]>('reader_list_books', { directory: path });
-      setBooks(bookList);
+      const books = await invoke<LibraryBook[]>('reader_get_library');
+      setLibraryBooks(books);
     } catch (e) {
-      console.error('Failed to load books:', e);
-      alert(`Error: ${e}`);
-    } finally {
-      setLoading(false);
+      console.error('Failed to load library:', e);
     }
   };
+
+  const loadCollections = async () => {
+    try {
+      const cols = await invoke<Collection[]>('reader_list_collections');
+      setCollections(cols);
+    } catch (e) {
+      console.error('Failed to load collections:', e);
+    }
+  };
+
+  // ============================================================================
+  // Book opening / importing
+  // ============================================================================
 
   const browseForBook = async () => {
     try {
       const selected = await open({
         multiple: false,
-        filters: [{ name: 'Books', extensions: ['epub', 'pdf', 'txt', 'md', 'markdown'] }]
+        filters: [{ name: 'Books', extensions: ['epub', 'pdf', 'txt', 'md', 'markdown'] }],
       });
       if (selected && typeof selected === 'string') {
         setBookPath(selected);
-        await openBook(selected);
+        await openBookByPath(selected);
       }
     } catch (e) {
       console.error('Failed to open file dialog:', e);
@@ -119,41 +194,54 @@ const Reader: Component = () => {
     }
   };
 
-  const browseForLibrary = async () => {
+  const browseForLibraryFolder = async () => {
     try {
       const selected = await open({
         directory: true,
-        multiple: false
+        multiple: false,
       });
       if (selected && typeof selected === 'string') {
-        setLibraryPath(selected);
-        await loadBooksFromPath(selected);
+        setLoading(true);
+        try {
+          const imported = await invoke<LibraryBook[]>('reader_scan_directory', {
+            path: selected,
+          });
+          // Refresh full library after scan
+          await loadLibrary();
+          if (imported.length === 0) {
+            alert('No supported book files found in that directory.');
+          }
+        } catch (e) {
+          console.error('Failed to scan directory:', e);
+          alert(`Error scanning directory: ${e}`);
+        } finally {
+          setLoading(false);
+        }
       }
     } catch (e) {
       console.error('Failed to open folder dialog:', e);
-      alert(`Error opening folder dialog: ${e}`);
-    }
-  };
-
-  const loadBooksFromPath = async (path: string) => {
-    setLoading(true);
-    try {
-      const bookList = await invoke<Book[]>('reader_list_books', { directory: path });
-      setBooks(bookList);
-    } catch (e) {
-      console.error('Failed to load books:', e);
       alert(`Error: ${e}`);
-    } finally {
-      setLoading(false);
     }
   };
 
-  const openBook = async (path: string, cardIndex?: number) => {
+  const openBookByPath = async (path: string, cardIndex?: number) => {
     setLoading(true);
     try {
+      // Import book to DB first to get its id
+      const imported = await invoke<LibraryBook>('reader_import_book', { path });
+      setCurrentBookId(imported.id);
+
+      // Now open the book content
       const content = await invoke<BookContent>('reader_open_book', { path });
       setCurrentBook(content);
-      setCurrentChapter(0);
+
+      // Restore saved position if available
+      const startChapter = imported.current_position
+        ? parseInt(imported.current_position, 10) || 0
+        : 0;
+      setCurrentChapter(
+        Math.min(startChapter, Math.max(0, content.chapters.length - 1))
+      );
 
       // Trigger open animation
       if (cardIndex !== undefined) {
@@ -162,11 +250,13 @@ const Reader: Component = () => {
       setBookOpening(true);
       setView('reader');
 
-      // Clear animation state after it completes
       setTimeout(() => {
         setBookOpening(false);
         setOpeningCardIndex(null);
       }, 500);
+
+      // Refresh library in background to pick up last_read_at updates
+      loadLibrary();
     } catch (e) {
       console.error('Failed to open book:', e);
       alert(`Error: ${e}`);
@@ -178,7 +268,11 @@ const Reader: Component = () => {
   const openBookDirect = async () => {
     const path = bookPath().trim();
     if (!path) return;
-    await openBook(path);
+    await openBookByPath(path);
+  };
+
+  const openLibraryBook = async (book: LibraryBook, cardIndex?: number) => {
+    await openBookByPath(book.file_path, cardIndex);
   };
 
   const closeBook = () => {
@@ -186,10 +280,36 @@ const Reader: Component = () => {
     setBookClosing(true);
     setTimeout(() => {
       setCurrentBook(null);
+      setCurrentBookId(null);
       setView('library');
       setBookClosing(false);
       setShowToc(false);
+      // Refresh library to show updated progress
+      loadLibrary();
     }, 350);
+  };
+
+  // ============================================================================
+  // Chapter navigation with progress persistence
+  // ============================================================================
+
+  const saveProgress = async (chapterIdx: number) => {
+    const bookId = currentBookId();
+    const book = currentBook();
+    if (!bookId || !book) return;
+
+    const progress = ((chapterIdx + 1) / book.chapters.length) * 100;
+    const position = String(chapterIdx);
+
+    try {
+      await invoke('reader_update_progress', {
+        bookId,
+        progress,
+        position,
+      });
+    } catch (e) {
+      console.error('Failed to save progress:', e);
+    }
   };
 
   const nextChapter = () => {
@@ -200,11 +320,13 @@ const Reader: Component = () => {
     setPageDirection('left');
     setPageTransitioning(true);
 
+    const newChapter = currentChapter() + 1;
+
     setTimeout(() => {
-      setCurrentChapter(currentChapter() + 1);
-      // Scroll reading area back to top
+      setCurrentChapter(newChapter);
       const contentEl = document.getElementById('reader-content-scroll');
       if (contentEl) contentEl.scrollTop = 0;
+      saveProgress(newChapter);
     }, 300);
 
     setTimeout(() => {
@@ -219,10 +341,13 @@ const Reader: Component = () => {
     setPageDirection('right');
     setPageTransitioning(true);
 
+    const newChapter = currentChapter() - 1;
+
     setTimeout(() => {
-      setCurrentChapter(currentChapter() - 1);
+      setCurrentChapter(newChapter);
       const contentEl = document.getElementById('reader-content-scroll');
       if (contentEl) contentEl.scrollTop = 0;
+      saveProgress(newChapter);
     }, 300);
 
     setTimeout(() => {
@@ -241,12 +366,17 @@ const Reader: Component = () => {
       setShowToc(false);
       const contentEl = document.getElementById('reader-content-scroll');
       if (contentEl) contentEl.scrollTop = 0;
+      saveProgress(index);
     }, 300);
 
     setTimeout(() => {
       setPageTransitioning(false);
     }, 600);
   };
+
+  // ============================================================================
+  // Card 3D tilt
+  // ============================================================================
 
   const handleCardMouseMove = (e: MouseEvent, bookId: string) => {
     const card = e.currentTarget as HTMLElement;
@@ -256,7 +386,6 @@ const Reader: Component = () => {
     const centerX = rect.width / 2;
     const centerY = rect.height / 2;
 
-    // Calculate tilt (-12 to 12 degrees)
     const rotateX = ((y - centerY) / centerY) * -12;
     const rotateY = ((x - centerX) / centerX) * 12;
 
@@ -270,6 +399,97 @@ const Reader: Component = () => {
     setTiltX(0);
     setTiltY(0);
   };
+
+  // ============================================================================
+  // Collections
+  // ============================================================================
+
+  const createCollection = async () => {
+    const name = newCollectionName().trim();
+    if (!name) return;
+    setCreatingCollection(true);
+    try {
+      await invoke<Collection>('reader_create_collection', {
+        name,
+        color: newCollectionColor(),
+        description: null,
+      });
+      setNewCollectionName('');
+      setNewCollectionColor('#0ea5e9');
+      setShowNewCollection(false);
+      await loadCollections();
+    } catch (e) {
+      console.error('Failed to create collection:', e);
+      alert(`Error: ${e}`);
+    } finally {
+      setCreatingCollection(false);
+    }
+  };
+
+  const deleteCollection = async (collectionId: string) => {
+    if (!confirm('Delete this collection? Books will not be removed from your library.')) return;
+    try {
+      await invoke('reader_delete_collection', { collectionId });
+      if (expandedCollection() === collectionId) {
+        setExpandedCollection(null);
+        setCollectionBooks([]);
+      }
+      await loadCollections();
+    } catch (e) {
+      console.error('Failed to delete collection:', e);
+    }
+  };
+
+  const expandCollection = async (collectionId: string) => {
+    if (expandedCollection() === collectionId) {
+      setExpandedCollection(null);
+      setCollectionBooks([]);
+      return;
+    }
+    setExpandedCollection(collectionId);
+    setLoadingCollectionBooks(true);
+    try {
+      const books = await invoke<LibraryBook[]>('reader_get_collection_books', { collectionId });
+      setCollectionBooks(books);
+    } catch (e) {
+      console.error('Failed to load collection books:', e);
+      setCollectionBooks([]);
+    } finally {
+      setLoadingCollectionBooks(false);
+    }
+  };
+
+  const addBookToCollection = async (collectionId: string, bookId: string) => {
+    try {
+      await invoke('reader_add_to_collection', { collectionId, bookId });
+      setAddToCollectionBookId(null);
+      await loadCollections();
+      // Refresh expanded collection if it matches
+      if (expandedCollection() === collectionId) {
+        const books = await invoke<LibraryBook[]>('reader_get_collection_books', { collectionId });
+        setCollectionBooks(books);
+      }
+    } catch (e) {
+      console.error('Failed to add book to collection:', e);
+    }
+  };
+
+  const removeBookFromCollection = async (collectionId: string, bookId: string) => {
+    try {
+      await invoke('reader_remove_from_collection', { collectionId, bookId });
+      await loadCollections();
+      if (expandedCollection() === collectionId) {
+        const books = await invoke<LibraryBook[]>('reader_get_collection_books', { collectionId });
+        setCollectionBooks(books);
+      }
+    } catch (e) {
+      console.error('Failed to remove book from collection:', e);
+    }
+  };
+
+  // ============================================================================
+  // Derived values
+  // ============================================================================
 
   const progressPercent = () => {
     const book = currentBook();
@@ -313,7 +533,7 @@ const Reader: Component = () => {
           chapterTitle: '#e4e4f4',
           prose: 'dark-prose',
         };
-      default: // light
+      default:
         return {
           bg: '#ffffff',
           text: '#1f2937',
@@ -332,6 +552,166 @@ const Reader: Component = () => {
         };
     }
   };
+
+  // ============================================================================
+  // Render helpers for book cards
+  // ============================================================================
+
+  const renderBookCard = (
+    book: LibraryBook,
+    index: number,
+    options?: { showRemoveFromCollection?: string }
+  ) => {
+    const displayTitle = book.title || book.file_path.split('/').pop() || 'Untitled';
+    const displayAuthors = book.authors || book.format?.toUpperCase() || '';
+
+    return (
+      <div
+        class="book-card-3d cursor-pointer relative group"
+        classList={{ 'card-opening': openingCardIndex() === index }}
+        onClick={() => openLibraryBook(book, index)}
+        onMouseMove={(e) => handleCardMouseMove(e, book.id)}
+        onMouseLeave={handleCardMouseLeave}
+      >
+        <div
+          class="book-card-inner card p-3 relative overflow-hidden"
+          style={{
+            transform:
+              hoveredCard() === book.id
+                ? `rotateX(${tiltX()}deg) rotateY(${tiltY()}deg) translateZ(8px)`
+                : 'rotateX(0deg) rotateY(0deg) translateZ(0px)',
+          }}
+        >
+          <div class="book-cover-shine" />
+          <div class="aspect-[2/3] bg-gradient-to-br from-minion-100 to-minion-200 dark:from-minion-900 dark:to-minion-800 rounded-lg mb-2 flex items-center justify-center relative overflow-hidden">
+            <svg
+              class="w-12 h-12 text-minion-500"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="1.5"
+                d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"
+              />
+            </svg>
+            {/* Progress indicator overlay */}
+            <Show when={book.progress > 0}>
+              <div
+                class="absolute bottom-0 left-0 right-0 h-1 bg-black/10"
+                style={{ 'border-radius': '0 0 0.5rem 0.5rem' }}
+              >
+                <div
+                  class="h-full bg-sky-500 rounded-bl-lg"
+                  style={{
+                    width: `${Math.min(book.progress, 100)}%`,
+                    'border-radius':
+                      book.progress >= 100 ? '0 0 0.5rem 0.5rem' : '0 0 0 0.5rem',
+                  }}
+                />
+              </div>
+            </Show>
+          </div>
+          <p class="font-medium text-sm truncate" title={displayTitle}>
+            {displayTitle}
+          </p>
+          <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{displayAuthors}</p>
+          {/* Progress text */}
+          <Show when={book.progress > 0}>
+            <p class="text-xs text-sky-600 dark:text-sky-400 mt-0.5">
+              {Math.round(book.progress)}% read
+            </p>
+          </Show>
+        </div>
+
+        {/* Add to Collection button */}
+        <div
+          class="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Show
+            when={!options?.showRemoveFromCollection}
+            fallback={
+              <button
+                class="w-6 h-6 rounded-full bg-red-500 text-white flex items-center justify-center text-xs shadow hover:bg-red-600 transition-colors"
+                title="Remove from collection"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeBookFromCollection(options!.showRemoveFromCollection!, book.id);
+                }}
+              >
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M6 18L18 6M6 6l12 12"
+                  />
+                </svg>
+              </button>
+            }
+          >
+            <button
+              class="w-6 h-6 rounded-full bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300 flex items-center justify-center text-xs shadow hover:bg-sky-50 dark:hover:bg-sky-900 hover:border-sky-300 transition-colors"
+              title="Add to collection"
+              onClick={(e) => {
+                e.stopPropagation();
+                setAddToCollectionBookId(
+                  addToCollectionBookId() === book.id ? null : book.id
+                );
+              }}
+            >
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M12 4v16m8-8H4"
+                />
+              </svg>
+            </button>
+            {/* Collection dropdown */}
+            <Show when={addToCollectionBookId() === book.id}>
+              <div class="absolute right-0 top-8 w-48 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-lg shadow-lg py-1 z-20">
+                <Show
+                  when={collections().length > 0}
+                  fallback={
+                    <p class="px-3 py-2 text-xs text-gray-500">
+                      No collections yet. Create one first.
+                    </p>
+                  }
+                >
+                  <For each={collections()}>
+                    {(col) => (
+                      <button
+                        class="w-full text-left px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 transition-colors"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          addBookToCollection(col.id, book.id);
+                        }}
+                      >
+                        <span
+                          class="w-3 h-3 rounded-full flex-shrink-0"
+                          style={{ background: col.color }}
+                        />
+                        <span class="truncate">{col.name}</span>
+                      </button>
+                    )}
+                  </For>
+                </Show>
+              </div>
+            </Show>
+          </Show>
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================================================
+  // Render
+  // ============================================================================
 
   return (
     <>
@@ -708,149 +1088,510 @@ const Reader: Component = () => {
           opacity: 0.35;
           cursor: not-allowed;
         }
+
+        /* Library tab styles */
+        .lib-tab {
+          padding: 0.5rem 1rem;
+          border-radius: 0.5rem;
+          font-size: 0.875rem;
+          font-weight: 500;
+          cursor: pointer;
+          transition: background 0.15s, color 0.15s;
+          border: none;
+          background: transparent;
+          color: #6b7280;
+        }
+
+        .lib-tab:hover {
+          background: #f3f4f6;
+          color: #374151;
+        }
+
+        .lib-tab.active {
+          background: #0ea5e9;
+          color: white;
+        }
+
+        .dark .lib-tab:hover {
+          background: #374151;
+          color: #d1d5db;
+        }
+
+        .dark .lib-tab.active {
+          background: #0ea5e9;
+          color: white;
+        }
       `}</style>
 
       <div class="h-full flex flex-col">
+        {/* ================================================================ */}
+        {/* LIBRARY VIEW                                                     */}
+        {/* ================================================================ */}
         <Show when={view() === 'library'}>
           <div class="p-6 flex-1 overflow-auto">
+            {/* Header */}
             <div class="flex items-center justify-between mb-6">
               <h1 class="text-2xl font-bold">Book Reader</h1>
+              <div class="flex gap-2">
+                <button
+                  class="btn btn-secondary text-sm"
+                  onClick={browseForLibraryFolder}
+                  disabled={loading()}
+                  title="Scan a folder for books and import them"
+                >
+                  <svg
+                    class="w-4 h-4 mr-1.5 inline-block"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
+                    />
+                  </svg>
+                  Import Folder
+                </button>
+                <button
+                  class="btn btn-primary text-sm"
+                  onClick={browseForBook}
+                  disabled={loading()}
+                  title="Open a single book file"
+                >
+                  <svg
+                    class="w-4 h-4 mr-1.5 inline-block"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M12 6v6m0 0v6m0-6h6m-6 0H6"
+                    />
+                  </svg>
+                  Open Book
+                </button>
+              </div>
             </div>
 
-            {/* Open single book */}
-            <div class="card p-4 mb-6">
-              <h3 class="font-medium mb-3">Open a Book</h3>
+            {/* Open a book by path (compact) */}
+            <div class="card p-3 mb-5">
               <div class="flex gap-2">
                 <input
                   type="text"
-                  class="input flex-1"
+                  class="input flex-1 text-sm"
                   placeholder="Enter path to book file (e.g., /path/to/book.epub)"
                   value={bookPath()}
                   onInput={(e) => setBookPath(e.currentTarget.value)}
                   onKeyPress={(e) => e.key === 'Enter' && openBookDirect()}
                 />
                 <button
-                  class="btn btn-secondary"
-                  onClick={browseForBook}
-                  disabled={loading()}
-                  title="Browse for a book file"
-                >
-                  <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                  </svg>
-                </button>
-                <button
-                  class="btn btn-primary"
+                  class="btn btn-primary text-sm"
                   onClick={openBookDirect}
                   disabled={loading() || !bookPath().trim()}
                 >
                   {loading() ? 'Opening...' : 'Open'}
                 </button>
               </div>
-              <p class="text-xs text-gray-500 mt-2">
+              <p class="text-xs text-gray-500 mt-1.5">
                 Supported formats: EPUB, PDF, TXT, Markdown
               </p>
             </div>
 
-            {/* Browse library */}
-            <div class="card p-4 mb-6">
-              <h3 class="font-medium mb-3">Browse Library Folder</h3>
-              <div class="flex gap-2">
-                <input
-                  type="text"
-                  class="input flex-1"
-                  placeholder="Enter path to folder containing books"
-                  value={libraryPath()}
-                  onInput={(e) => setLibraryPath(e.currentTarget.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && loadBooksFromDirectory()}
-                />
-                <button
-                  class="btn btn-secondary"
-                  onClick={browseForLibrary}
-                  disabled={loading()}
-                  title="Browse for a folder"
-                >
-                  <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                  </svg>
-                </button>
-                <button
-                  class="btn btn-primary"
-                  onClick={loadBooksFromDirectory}
-                  disabled={loading() || !libraryPath().trim()}
-                >
-                  {loading() ? 'Loading...' : 'Load'}
-                </button>
-              </div>
+            {/* Library tabs */}
+            <div class="flex items-center gap-1 mb-5">
+              <button
+                class={`lib-tab ${libraryTab() === 'all' ? 'active' : ''}`}
+                onClick={() => setLibraryTab('all')}
+              >
+                All Books
+                <Show when={libraryBooks().length > 0}>
+                  <span class="ml-1.5 text-xs opacity-75">({libraryBooks().length})</span>
+                </Show>
+              </button>
+              <button
+                class={`lib-tab ${libraryTab() === 'collections' ? 'active' : ''}`}
+                onClick={() => setLibraryTab('collections')}
+              >
+                Collections
+                <Show when={collections().length > 0}>
+                  <span class="ml-1.5 text-xs opacity-75">({collections().length})</span>
+                </Show>
+              </button>
+              <button
+                class={`lib-tab ${libraryTab() === 'oreilly' ? 'active' : ''}`}
+                onClick={() => setLibraryTab('oreilly')}
+              >
+                O'Reilly
+              </button>
             </div>
 
-            {/* Book grid with 3D hover cards */}
-            <Show when={books().length > 0}>
-              <h3 class="font-medium mb-4">Books Found ({books().length})</h3>
-              <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-5">
-                <For each={books()}>
-                  {(book, index) => (
-                    <div
-                      class="book-card-3d cursor-pointer"
-                      classList={{
-                        'card-opening': openingCardIndex() === index(),
-                      }}
-                      onClick={() => openBook(book.path, index())}
-                      onMouseMove={(e) => handleCardMouseMove(e, book.id)}
-                      onMouseLeave={handleCardMouseLeave}
+            {/* ============================================================ */}
+            {/* TAB: All Books                                               */}
+            {/* ============================================================ */}
+            <Show when={libraryTab() === 'all'}>
+              <Show
+                when={libraryBooks().length > 0}
+                fallback={
+                  <div class="card p-12 text-center">
+                    <svg
+                      class="w-16 h-16 mx-auto mb-4 text-gray-300 dark:text-gray-600"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
                     >
-                      <div
-                        class="book-card-inner card p-3 relative overflow-hidden"
-                        style={{
-                          transform: hoveredCard() === book.id
-                            ? `rotateX(${tiltX()}deg) rotateY(${tiltY()}deg) translateZ(8px)`
-                            : 'rotateX(0deg) rotateY(0deg) translateZ(0px)',
-                        }}
-                      >
-                        <div class="book-cover-shine" />
-                        <div class="aspect-[2/3] bg-gradient-to-br from-minion-100 to-minion-200 dark:from-minion-900 dark:to-minion-800 rounded-lg mb-2 flex items-center justify-center relative overflow-hidden">
-                          <Show
-                            when={book.cover_url}
-                            fallback={
-                              <svg class="w-12 h-12 text-minion-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                              </svg>
-                            }
-                          >
-                            <img
-                              src={book.cover_url}
-                              alt={book.title}
-                              class="w-full h-full object-cover rounded-lg"
-                            />
-                          </Show>
-                        </div>
-                        <p class="font-medium text-sm truncate" title={book.title}>{book.title}</p>
-                        <p class="text-xs text-gray-500 dark:text-gray-400 truncate">
-                          {book.authors?.length > 0 ? book.authors.join(', ') : book.format}
-                        </p>
-                      </div>
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="1.5"
+                        d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"
+                      />
+                    </svg>
+                    <h3 class="text-lg font-medium mb-2">Your Library is Empty</h3>
+                    <p class="text-gray-500 dark:text-gray-400 mb-4">
+                      Open a book file or import a folder to get started.
+                    </p>
+                    <div class="flex gap-3 justify-center">
+                      <button class="btn btn-primary" onClick={browseForBook}>
+                        Open a Book
+                      </button>
+                      <button class="btn btn-secondary" onClick={browseForLibraryFolder}>
+                        Import Folder
+                      </button>
                     </div>
-                  )}
-                </For>
-              </div>
+                  </div>
+                }
+              >
+                <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-5">
+                  <For each={libraryBooks()}>
+                    {(book, index) => renderBookCard(book, index())}
+                  </For>
+                </div>
+              </Show>
             </Show>
 
-            {/* Empty state */}
-            <Show when={books().length === 0 && !loading()}>
-              <div class="card p-12 text-center">
-                <svg class="w-16 h-16 mx-auto mb-4 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                </svg>
-                <h3 class="text-lg font-medium mb-2">Start Reading</h3>
-                <p class="text-gray-500 dark:text-gray-400">
-                  Open a book file directly or browse a folder to discover books
-                </p>
+            {/* ============================================================ */}
+            {/* TAB: Collections                                             */}
+            {/* ============================================================ */}
+            <Show when={libraryTab() === 'collections'}>
+              {/* New Collection button / form */}
+              <div class="mb-5">
+                <Show
+                  when={showNewCollection()}
+                  fallback={
+                    <button
+                      class="btn btn-secondary text-sm"
+                      onClick={() => setShowNewCollection(true)}
+                    >
+                      <svg
+                        class="w-4 h-4 mr-1.5 inline-block"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M12 4v16m8-8H4"
+                        />
+                      </svg>
+                      New Collection
+                    </button>
+                  }
+                >
+                  <div class="card p-4">
+                    <h4 class="font-medium mb-3">Create Collection</h4>
+                    <div class="flex gap-3 items-end">
+                      <div class="flex-1">
+                        <label class="block text-xs text-gray-500 mb-1">Name</label>
+                        <input
+                          type="text"
+                          class="input w-full text-sm"
+                          placeholder="e.g., Computer Science, Fiction..."
+                          value={newCollectionName()}
+                          onInput={(e) => setNewCollectionName(e.currentTarget.value)}
+                          onKeyPress={(e) => e.key === 'Enter' && createCollection()}
+                        />
+                      </div>
+                      <div>
+                        <label class="block text-xs text-gray-500 mb-1">Color</label>
+                        <div class="flex gap-1.5">
+                          <For each={PRESET_COLORS}>
+                            {(color) => (
+                              <button
+                                class="w-6 h-6 rounded-full border-2 transition-transform hover:scale-110"
+                                style={{
+                                  background: color,
+                                  'border-color':
+                                    newCollectionColor() === color
+                                      ? '#1f2937'
+                                      : 'transparent',
+                                }}
+                                onClick={() => setNewCollectionColor(color)}
+                              />
+                            )}
+                          </For>
+                        </div>
+                      </div>
+                      <button
+                        class="btn btn-primary text-sm"
+                        onClick={createCollection}
+                        disabled={!newCollectionName().trim() || creatingCollection()}
+                      >
+                        {creatingCollection() ? 'Creating...' : 'Create'}
+                      </button>
+                      <button
+                        class="btn btn-secondary text-sm"
+                        onClick={() => {
+                          setShowNewCollection(false);
+                          setNewCollectionName('');
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </Show>
+              </div>
+
+              {/* Collection cards */}
+              <Show
+                when={collections().length > 0}
+                fallback={
+                  <div class="card p-12 text-center">
+                    <svg
+                      class="w-12 h-12 mx-auto mb-3 text-gray-300 dark:text-gray-600"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="1.5"
+                        d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"
+                      />
+                    </svg>
+                    <h3 class="text-lg font-medium mb-1">No Collections Yet</h3>
+                    <p class="text-gray-500 dark:text-gray-400">
+                      Create a collection to organize your books.
+                    </p>
+                  </div>
+                }
+              >
+                <div class="space-y-3">
+                  <For each={collections()}>
+                    {(col) => (
+                      <div class="card overflow-hidden">
+                        {/* Collection header */}
+                        <div
+                          class="flex items-center gap-3 p-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
+                          onClick={() => expandCollection(col.id)}
+                        >
+                          <div
+                            class="w-1.5 self-stretch rounded-full flex-shrink-0"
+                            style={{ background: col.color }}
+                          />
+                          <div class="flex-1 min-w-0">
+                            <h3 class="font-medium">{col.name}</h3>
+                            <p class="text-sm text-gray-500 dark:text-gray-400">
+                              {col.book_count} {col.book_count === 1 ? 'book' : 'books'}
+                            </p>
+                          </div>
+                          <button
+                            class="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                            title="Delete collection"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteCollection(col.id);
+                            }}
+                          >
+                            <svg
+                              class="w-4 h-4"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2"
+                                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                              />
+                            </svg>
+                          </button>
+                          <svg
+                            class="w-5 h-5 text-gray-400 transition-transform"
+                            classList={{
+                              'rotate-180': expandedCollection() === col.id,
+                            }}
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                              stroke-width="2"
+                              d="M19 9l-7 7-7-7"
+                            />
+                          </svg>
+                        </div>
+
+                        {/* Expanded collection books */}
+                        <Show when={expandedCollection() === col.id}>
+                          <div
+                            class="border-t border-gray-100 dark:border-gray-700 p-4"
+                            style={{ 'border-top-color': col.color + '30' }}
+                          >
+                            <Show
+                              when={!loadingCollectionBooks()}
+                              fallback={
+                                <p class="text-sm text-gray-500 py-4 text-center">
+                                  Loading books...
+                                </p>
+                              }
+                            >
+                              <Show
+                                when={collectionBooks().length > 0}
+                                fallback={
+                                  <p class="text-sm text-gray-500 py-4 text-center">
+                                    No books in this collection yet. Use the "+" button on book
+                                    cards to add them.
+                                  </p>
+                                }
+                              >
+                                <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                                  <For each={collectionBooks()}>
+                                    {(book, index) =>
+                                      renderBookCard(book, index(), {
+                                        showRemoveFromCollection: col.id,
+                                      })
+                                    }
+                                  </For>
+                                </div>
+                              </Show>
+                            </Show>
+                          </div>
+                        </Show>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </Show>
+
+            {/* ============================================================ */}
+            {/* TAB: O'Reilly                                                */}
+            {/* ============================================================ */}
+            <Show when={libraryTab() === 'oreilly'}>
+              <div class="max-w-lg mx-auto">
+                <div class="card p-6">
+                  <div class="flex items-start gap-4 mb-5">
+                    <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-red-500 to-red-700 flex items-center justify-center flex-shrink-0">
+                      <svg
+                        class="w-7 h-7 text-white"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="1.5"
+                          d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"
+                        />
+                      </svg>
+                    </div>
+                    <div class="flex-1">
+                      <div class="flex items-center gap-2 mb-1">
+                        <h3 class="font-semibold text-lg">O'Reilly Learning</h3>
+                        <span class="px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 text-xs font-medium">
+                          Coming Soon
+                        </span>
+                      </div>
+                      <p class="text-sm text-gray-500 dark:text-gray-400">
+                        Connect to O'Reilly Learning (Safari Books Online) to browse and download
+                        books directly to your library.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div class="space-y-3 mb-5">
+                    <div>
+                      <label class="block text-sm font-medium mb-1">Email</label>
+                      <input
+                        type="email"
+                        class="input w-full"
+                        placeholder="your-email@example.com"
+                        value={oreillyEmail()}
+                        onInput={(e) => setOreillyEmail(e.currentTarget.value)}
+                        disabled
+                      />
+                    </div>
+                    <div>
+                      <label class="block text-sm font-medium mb-1">Password</label>
+                      <input
+                        type="password"
+                        class="input w-full"
+                        placeholder="Your O'Reilly password"
+                        value={oreillyPassword()}
+                        onInput={(e) => setOreillyPassword(e.currentTarget.value)}
+                        disabled
+                      />
+                    </div>
+                  </div>
+
+                  <button class="btn btn-primary w-full opacity-50 cursor-not-allowed" disabled>
+                    Connect Account
+                  </button>
+
+                  <div class="mt-4 p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                      <strong>Note:</strong> Credentials will be stored securely in Minion's
+                      encrypted credential vault. Downloaded books will be saved to{' '}
+                      <code class="px-1 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-xs">
+                        ~/minion/books/oreilly/
+                      </code>
+                    </p>
+                  </div>
+                </div>
+
+                {/* Downloaded books placeholder */}
+                <div class="card p-6 mt-4">
+                  <h4 class="font-medium mb-3">Downloaded Books</h4>
+                  <div class="text-center py-8">
+                    <svg
+                      class="w-10 h-10 mx-auto mb-2 text-gray-300 dark:text-gray-600"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="1.5"
+                        d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10"
+                      />
+                    </svg>
+                    <p class="text-sm text-gray-500 dark:text-gray-400">
+                      No downloaded books yet. Connect your account to get started.
+                    </p>
+                  </div>
+                </div>
               </div>
             </Show>
           </div>
         </Show>
 
-        {/* Reader View */}
+        {/* ================================================================ */}
+        {/* READER VIEW                                                      */}
+        {/* ================================================================ */}
         <Show when={view() === 'reader' && currentBook()}>
           <div
             class="flex flex-col h-full"
@@ -862,11 +1603,12 @@ const Reader: Component = () => {
             {/* Reading progress bar at very top */}
             <div
               style={{
-                background: readingMode() === 'sepia'
-                  ? '#ede0c8'
-                  : readingMode() === 'dark'
-                    ? '#16213e'
-                    : '#f3f4f6',
+                background:
+                  readingMode() === 'sepia'
+                    ? '#ede0c8'
+                    : readingMode() === 'dark'
+                      ? '#16213e'
+                      : '#f3f4f6',
                 height: '3px',
                 position: 'relative',
                 'flex-shrink': '0',
@@ -912,11 +1654,18 @@ const Reader: Component = () => {
                   title="Back to library (Esc)"
                 >
                   <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M15 19l-7-7 7-7"
+                    />
                   </svg>
                 </button>
                 <div>
-                  <h2 class="font-medium truncate max-w-md">{currentBook()!.metadata.title}</h2>
+                  <h2 class="font-medium truncate max-w-md">
+                    {currentBook()!.metadata.title}
+                  </h2>
                   <p class="text-xs" style={{ color: modeStyles().mutedText }}>
                     {currentBook()!.metadata.authors?.length > 0
                       ? currentBook()!.metadata.authors.join(', ') + ' \u00B7 '
@@ -1003,7 +1752,12 @@ const Reader: Component = () => {
                   title="Table of contents"
                 >
                   <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h7" />
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M4 6h16M4 12h16M4 18h7"
+                    />
                   </svg>
                 </button>
               </div>
@@ -1029,12 +1783,14 @@ const Reader: Component = () => {
                           <button
                             class="w-full text-left px-3 py-2 rounded-lg text-sm transition-colors"
                             style={{
-                              background: index() === currentChapter()
-                                ? modeStyles().activeBg
-                                : 'transparent',
-                              color: index() === currentChapter()
-                                ? modeStyles().text
-                                : modeStyles().mutedText,
+                              background:
+                                index() === currentChapter()
+                                  ? modeStyles().activeBg
+                                  : 'transparent',
+                              color:
+                                index() === currentChapter()
+                                  ? modeStyles().text
+                                  : modeStyles().mutedText,
                             }}
                             onMouseEnter={(e) => {
                               if (index() !== currentChapter()) {
@@ -1083,7 +1839,12 @@ const Reader: Component = () => {
                     {/* PDF embed placeholder - convertFileSrc kept for future use */}
                     <iframe src={convertFileSrc('')} title="pdf" />
                   </Show>
-                  <Show when={currentBook()!.format !== 'pdf' && currentBook()!.chapters[currentChapter()]}>
+                  <Show
+                    when={
+                      currentBook()!.format !== 'pdf' &&
+                      currentBook()!.chapters[currentChapter()]
+                    }
+                  >
                     <h1
                       class="text-2xl font-bold mb-8"
                       style={{
@@ -1115,19 +1876,26 @@ const Reader: Component = () => {
             >
               <button
                 class="btn nav-btn"
-                style={{
-                  background: modeStyles().hoverBg,
-                  color: modeStyles().text,
-                  '--nav-hover-x': '-3px',
-                  opacity: currentChapter() === 0 ? '0.35' : '1',
-                  cursor: currentChapter() === 0 ? 'not-allowed' : 'pointer',
-                } as any}
+                style={
+                  {
+                    background: modeStyles().hoverBg,
+                    color: modeStyles().text,
+                    '--nav-hover-x': '-3px',
+                    opacity: currentChapter() === 0 ? '0.35' : '1',
+                    cursor: currentChapter() === 0 ? 'not-allowed' : 'pointer',
+                  } as any
+                }
                 onClick={prevChapter}
                 disabled={currentChapter() === 0 || pageTransitioning()}
               >
                 <span class="flex items-center gap-1.5">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M15 19l-7-7 7-7"
+                    />
                   </svg>
                   Previous
                 </span>
@@ -1144,17 +1912,19 @@ const Reader: Component = () => {
 
               <button
                 class="btn nav-btn"
-                style={{
-                  background: modeStyles().hoverBg,
-                  color: modeStyles().text,
-                  '--nav-hover-x': '3px',
-                  opacity:
-                    currentChapter() >= currentBook()!.chapters.length - 1 ? '0.35' : '1',
-                  cursor:
-                    currentChapter() >= currentBook()!.chapters.length - 1
-                      ? 'not-allowed'
-                      : 'pointer',
-                } as any}
+                style={
+                  {
+                    background: modeStyles().hoverBg,
+                    color: modeStyles().text,
+                    '--nav-hover-x': '3px',
+                    opacity:
+                      currentChapter() >= currentBook()!.chapters.length - 1 ? '0.35' : '1',
+                    cursor:
+                      currentChapter() >= currentBook()!.chapters.length - 1
+                        ? 'not-allowed'
+                        : 'pointer',
+                  } as any
+                }
                 onClick={nextChapter}
                 disabled={
                   currentChapter() >= currentBook()!.chapters.length - 1 || pageTransitioning()
@@ -1163,7 +1933,12 @@ const Reader: Component = () => {
                 <span class="flex items-center gap-1.5">
                   Next
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M9 5l7 7-7 7"
+                    />
                   </svg>
                 </span>
               </button>

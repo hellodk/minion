@@ -89,6 +89,14 @@ pub fn run() {
             commands::reader_update_progress,
             commands::reader_add_annotation,
             commands::reader_get_annotations,
+            // Collection commands
+            commands::reader_create_collection,
+            commands::reader_list_collections,
+            commands::reader_add_to_collection,
+            commands::reader_remove_from_collection,
+            commands::reader_get_collection_books,
+            commands::reader_delete_collection,
+            commands::reader_scan_directory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
