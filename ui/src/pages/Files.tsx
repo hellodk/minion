@@ -1,6 +1,9 @@
-import { Component, createSignal, For, Show, onCleanup } from 'solid-js';
+import { Component, createSignal, For, Show, onCleanup, onMount } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
+
+// Module-level variable to persist active scan task ID across page navigations
+let activeScanTaskId: string | null = null;
 
 interface FileInfo {
   path: string;
@@ -52,6 +55,8 @@ const Files: Component = () => {
   const [scanElapsed, setScanElapsed] = createSignal(0);
   const [bulkOperating, setBulkOperating] = createSignal(false);
   const [operationResult, setOperationResult] = createSignal<{ succeeded: number; failed: number; freed_bytes: number; action: string } | null>(null);
+  const [excludePatterns, setExcludePatterns] = createSignal<string[]>(['node_modules', '.git', 'target']);
+  const [newExcludePattern, setNewExcludePattern] = createSignal('');
 
   const openFile = async (path: string) => {
     try {
@@ -60,6 +65,32 @@ const Files: Component = () => {
       console.error('Failed to open file:', e);
       alert(`Failed to open: ${e}`);
     }
+  };
+
+  const cancelScan = async () => {
+    const progress = scanProgress();
+    if (!progress) return;
+    try {
+      await invoke('files_cancel_scan', { taskId: progress.task_id });
+    } catch (e) {
+      console.error('Failed to cancel scan:', e);
+    }
+    if (pollInterval) clearInterval(pollInterval);
+    if (timerInterval) clearInterval(timerInterval);
+    setScanning(false);
+    activeScanTaskId = null;
+  };
+
+  const addExcludePattern = () => {
+    const pattern = newExcludePattern().trim();
+    if (!pattern) return;
+    if (excludePatterns().includes(pattern)) return;
+    setExcludePatterns([...excludePatterns(), pattern]);
+    setNewExcludePattern('');
+  };
+
+  const removeExcludePattern = (pattern: string) => {
+    setExcludePatterns(excludePatterns().filter((p) => p !== pattern));
   };
 
   const getAllCopyPaths = () => {
@@ -169,6 +200,41 @@ const Files: Component = () => {
     if (timerInterval) clearInterval(timerInterval);
   });
 
+  // Resume polling if there's an active scan task (e.g., after navigating away and back)
+  onMount(() => {
+    if (activeScanTaskId) {
+      setScanning(true);
+      setScanElapsed(0);
+      timerInterval = setInterval(() => setScanElapsed((p) => p + 1), 1000);
+
+      const taskId = activeScanTaskId;
+      pollInterval = setInterval(async () => {
+        try {
+          const updated = await invoke<ScanProgress>('files_get_scan_progress', { taskId });
+          setScanProgress(updated);
+
+          if (updated.status === 'completed' || updated.status.startsWith('failed')) {
+            clearInterval(pollInterval);
+            if (timerInterval) clearInterval(timerInterval);
+            setScanning(false);
+            activeScanTaskId = null;
+
+            if (updated.status === 'completed') {
+              await loadDuplicates();
+              await loadAnalytics();
+            }
+          }
+        } catch (e) {
+          console.error('Failed to resume scan progress:', e);
+          clearInterval(pollInterval);
+          if (timerInterval) clearInterval(timerInterval);
+          setScanning(false);
+          activeScanTaskId = null;
+        }
+      }, 500);
+    }
+  });
+
   const browseForDirectory = async () => {
     try {
       const selected = await open({ directory: true, multiple: false });
@@ -227,15 +293,18 @@ const Files: Component = () => {
     if (timerInterval) clearInterval(timerInterval);
     timerInterval = setInterval(() => setScanElapsed((p) => p + 1), 1000);
 
+    const excludePats = excludePatterns().length > 0 ? excludePatterns() : undefined;
+
     try {
       let progress: ScanProgress;
 
       if (paths.length === 1) {
-        progress = await invoke<ScanProgress>('files_start_scan', { path: paths[0] });
+        progress = await invoke<ScanProgress>('files_start_scan', { path: paths[0], excludePatterns: excludePats });
       } else {
-        progress = await invoke<ScanProgress>('files_start_multi_scan', { paths });
+        progress = await invoke<ScanProgress>('files_start_multi_scan', { paths, excludePatterns: excludePats });
       }
       setScanProgress(progress);
+      activeScanTaskId = progress.task_id;
 
       // Poll for progress
       if (pollInterval) clearInterval(pollInterval);
@@ -250,6 +319,7 @@ const Files: Component = () => {
             clearInterval(pollInterval);
             if (timerInterval) clearInterval(timerInterval);
             setScanning(false);
+            activeScanTaskId = null;
 
             if (updated.status === 'completed') {
               await loadDuplicates();
@@ -264,6 +334,7 @@ const Files: Component = () => {
       console.error('Failed to start scan:', e);
       alert(`Error: ${e}`);
       setScanning(false);
+      activeScanTaskId = null;
       if (timerInterval) clearInterval(timerInterval);
     }
   };
@@ -432,6 +503,55 @@ const Files: Component = () => {
             </div>
           </Show>
 
+          {/* Exclusion Patterns */}
+          <div class="mb-4">
+            <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Exclusion Patterns</h4>
+            <p class="text-xs text-gray-400 mb-2">
+              Directories matching these patterns will be skipped during scanning.
+            </p>
+            <div class="flex gap-2 mb-2">
+              <input
+                type="text"
+                class="input flex-1 text-sm"
+                placeholder="e.g., __pycache__"
+                value={newExcludePattern()}
+                onInput={(e) => setNewExcludePattern(e.currentTarget.value)}
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter') addExcludePattern();
+                }}
+                disabled={scanning()}
+              />
+              <button
+                class="btn btn-secondary text-sm"
+                onClick={addExcludePattern}
+                disabled={scanning() || !newExcludePattern().trim()}
+              >
+                Add
+              </button>
+            </div>
+            <Show when={excludePatterns().length > 0}>
+              <div class="flex flex-wrap gap-2">
+                <For each={excludePatterns()}>
+                  {(pattern) => (
+                    <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">
+                      {pattern}
+                      <button
+                        class="ml-0.5 text-gray-400 hover:text-red-500 transition-colors"
+                        onClick={() => removeExcludePattern(pattern)}
+                        disabled={scanning()}
+                        title="Remove pattern"
+                      >
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </span>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </div>
+
           {/* Scan button */}
           <button
             class="btn btn-primary w-full py-3 text-base"
@@ -479,6 +599,12 @@ const Files: Component = () => {
                 </p>
                 <p class="text-xs text-gray-500">files found</p>
               </div>
+              <button
+                class="px-3 py-1.5 text-sm font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors flex-shrink-0"
+                onClick={cancelScan}
+              >
+                Cancel
+              </button>
             </div>
 
             {/* Progress bar */}

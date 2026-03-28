@@ -1,10 +1,46 @@
-import { Component, createSignal, For, Show, Switch, Match } from 'solid-js';
+import { Component, createSignal, For, Show, Switch, Match, onMount } from 'solid-js';
+import { invoke } from '@tauri-apps/api/core';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 type TabId = 'dashboard' | 'sleep' | 'heart' | 'activity' | 'ai' | 'habits';
+
+interface FitnessDashboard {
+  total_habits: number;
+  habits_completed_today: number;
+  current_streak: number;
+  latest_weight_kg: number | null;
+  avg_steps_7d: number | null;
+  avg_sleep_7d: number | null;
+  total_water_today: number | null;
+  workouts_this_week: number;
+}
+
+interface FitnessMetricResponse {
+  id: string;
+  date: string;
+  weight_kg: number | null;
+  body_fat_pct: number | null;
+  steps: number | null;
+  heart_rate_avg: number | null;
+  sleep_hours: number | null;
+  sleep_quality: number | null;
+  water_ml: number | null;
+  calories_in: number | null;
+  notes: string | null;
+  created_at: string;
+}
+
+interface FitnessHabitResponse {
+  id: string;
+  name: string;
+  description: string | null;
+  frequency: string;
+  created_at: string;
+  completed_today: boolean;
+}
 
 interface Habit {
   id: string;
@@ -359,8 +395,65 @@ const Icon: Component<{ name: string; class?: string }> = (props) => {
 // Tab content components
 // ---------------------------------------------------------------------------
 
-const DashboardTab: Component = () => {
-  const maxSteps = Math.max(...WEEKLY_STEPS.map((d) => d.steps));
+const DashboardTab: Component<{
+  dashboard: () => FitnessDashboard | null;
+  metrics: () => FitnessMetricResponse[];
+  hasRealData: () => boolean;
+}> = (props) => {
+  // Derive values from real data or fall back to mock
+  const stepsToday = () => {
+    if (!props.hasRealData()) return 8432;
+    const todayMetric = props.metrics().find(
+      (m) => m.date === new Date().toISOString().slice(0, 10)
+    );
+    return todayMetric?.steps ?? props.dashboard()?.avg_steps_7d ?? 0;
+  };
+
+  const heartRate = () => {
+    if (!props.hasRealData()) return 72;
+    const todayMetric = props.metrics().find(
+      (m) => m.date === new Date().toISOString().slice(0, 10)
+    );
+    return todayMetric?.heart_rate_avg ?? 0;
+  };
+
+  const sleepHours = () => {
+    if (!props.hasRealData()) return 7.38;
+    return props.dashboard()?.avg_sleep_7d ?? 0;
+  };
+
+  const waterToday = () => {
+    if (!props.hasRealData()) return 1847;
+    return props.dashboard()?.total_water_today ?? 0;
+  };
+
+  const latestWeight = () => {
+    if (!props.hasRealData()) return null;
+    return props.dashboard()?.latest_weight_kg ?? null;
+  };
+
+  const currentStreak = () => props.dashboard()?.current_streak ?? 0;
+
+  // Build weekly steps from recent metrics
+  const weeklyStepsData = () => {
+    if (!props.hasRealData()) return WEEKLY_STEPS;
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const last7 = props.metrics().slice(0, 7).reverse();
+    if (last7.length === 0) return WEEKLY_STEPS;
+    return last7.map((m) => {
+      const d = new Date(m.date);
+      return { day: days[d.getDay()], steps: m.steps ?? 0 };
+    });
+  };
+
+  const maxSteps = () => Math.max(...weeklyStepsData().map((d) => d.steps), 1);
+
+  const sleepLabel = () => {
+    const h = sleepHours();
+    const hrs = Math.floor(h);
+    const mins = Math.round((h - hrs) * 60);
+    return `${hrs}h ${mins.toString().padStart(2, '0')}m`;
+  };
 
   return (
     <div class="space-y-6">
@@ -371,8 +464,10 @@ const DashboardTab: Component = () => {
           <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">
             Health Score
           </h3>
-          <CircularProgress value={72} max={100} size="w-40 h-40" sublabel="/ 100" />
-          <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">Good - Keep it up!</p>
+          <CircularProgress value={props.hasRealData() ? Math.min(Math.round((stepsToday() / 10000) * 50 + (sleepHours() / 8) * 50), 100) : 72} max={100} size="w-40 h-40" sublabel="/ 100" />
+          <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">
+            {props.hasRealData() && currentStreak() > 0 ? `${currentStreak()} day streak` : 'Good - Keep it up!'}
+          </p>
         </div>
 
         {/* Quick Stats Grid */}
@@ -383,12 +478,12 @@ const DashboardTab: Component = () => {
               <div class="p-2 rounded-lg bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400">
                 <Icon name="steps" class="w-5 h-5" />
               </div>
-              <span class="text-sm font-medium text-gray-500 dark:text-gray-400">Steps Today</span>
+              <span class="text-sm font-medium text-gray-500 dark:text-gray-400">Steps (avg 7d)</span>
             </div>
             <p class="text-2xl font-bold text-gray-900 dark:text-white mb-1">
-              8,432 <span class="text-sm font-normal text-gray-400">/ 10,000</span>
+              {Math.round(stepsToday()).toLocaleString()} <span class="text-sm font-normal text-gray-400">/ 10,000</span>
             </p>
-            <MiniBar value={8432} max={10000} colorClass="bg-blue-500" />
+            <MiniBar value={stepsToday()} max={10000} colorClass="bg-blue-500" />
           </div>
 
           {/* Heart Rate */}
@@ -400,13 +495,12 @@ const DashboardTab: Component = () => {
               <span class="text-sm font-medium text-gray-500 dark:text-gray-400">Heart Rate</span>
             </div>
             <div class="flex items-end gap-2">
-              <p class="text-2xl font-bold text-gray-900 dark:text-white">72</p>
+              <p class="text-2xl font-bold text-gray-900 dark:text-white">{heartRate()}</p>
               <span class="text-sm text-gray-400 mb-1">BPM</span>
-              <span class="text-green-500 ml-auto flex items-center gap-0.5 text-sm">
-                <Icon name="arrow-down" class="w-3 h-3" /> 3
-              </span>
             </div>
-            <p class="text-xs text-gray-400 mt-1">Resting: 62 BPM</p>
+            <Show when={latestWeight() !== null}>
+              <p class="text-xs text-gray-400 mt-1">Weight: {latestWeight()?.toFixed(1)} kg</p>
+            </Show>
           </div>
 
           {/* Sleep */}
@@ -415,28 +509,28 @@ const DashboardTab: Component = () => {
               <div class="p-2 rounded-lg bg-indigo-100 dark:bg-indigo-900/40 text-indigo-500">
                 <Icon name="moon" class="w-5 h-5" />
               </div>
-              <span class="text-sm font-medium text-gray-500 dark:text-gray-400">Sleep Last Night</span>
+              <span class="text-sm font-medium text-gray-500 dark:text-gray-400">Sleep (avg 7d)</span>
             </div>
-            <p class="text-2xl font-bold text-gray-900 dark:text-white mb-1">7h 23m</p>
+            <p class="text-2xl font-bold text-gray-900 dark:text-white mb-1">{sleepLabel()}</p>
             <div class="flex items-center gap-2">
               <span class="text-xs px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-900/40 text-green-600 dark:text-green-400">
-                Good quality
+                {sleepHours() >= 7 ? 'Good quality' : sleepHours() >= 6 ? 'Fair' : 'Needs improvement'}
               </span>
             </div>
           </div>
 
-          {/* Calories */}
+          {/* Water / Calories */}
           <div class="card p-5">
             <div class="flex items-center gap-3 mb-3">
               <div class="p-2 rounded-lg bg-orange-100 dark:bg-orange-900/40 text-orange-500">
                 <Icon name="fire" class="w-5 h-5" />
               </div>
-              <span class="text-sm font-medium text-gray-500 dark:text-gray-400">Calories Burned</span>
+              <span class="text-sm font-medium text-gray-500 dark:text-gray-400">Water Today</span>
             </div>
             <p class="text-2xl font-bold text-gray-900 dark:text-white mb-1">
-              1,847 <span class="text-sm font-normal text-gray-400">/ 2,200</span>
+              {waterToday().toLocaleString()} <span class="text-sm font-normal text-gray-400">ml</span>
             </p>
-            <MiniBar value={1847} max={2200} colorClass="bg-orange-500" />
+            <MiniBar value={waterToday()} max={2500} colorClass="bg-orange-500" />
           </div>
         </div>
       </div>
@@ -447,14 +541,14 @@ const DashboardTab: Component = () => {
           Weekly Activity
         </h3>
         <div class="flex items-end gap-3 h-40">
-          <For each={WEEKLY_STEPS}>
+          <For each={weeklyStepsData()}>
             {(entry) => (
               <div class="flex-1 flex flex-col items-center gap-1">
                 <span class="text-xs text-gray-400">{(entry.steps / 1000).toFixed(1)}k</span>
                 <div class="w-full flex justify-center">
                   <div
                     class="w-full max-w-[40px] rounded-t-md bg-minion-500 dark:bg-minion-400 transition-all duration-500"
-                    style={{ height: `${(entry.steps / maxSteps) * 120}px` }}
+                    style={{ height: `${(entry.steps / maxSteps()) * 120}px` }}
                   />
                 </div>
                 <span class="text-xs font-medium text-gray-500 dark:text-gray-400">{entry.day}</span>
@@ -473,9 +567,20 @@ const DashboardTab: Component = () => {
           <div>
             <h3 class="font-medium text-gray-900 dark:text-white mb-1">AI Insight</h3>
             <p class="text-sm text-gray-600 dark:text-gray-300 leading-relaxed">
-              Your sleep quality has improved 12% this week. Consider maintaining your 10:30 PM
-              bedtime routine. Your step count is trending 8% above last week's average, and your
-              resting heart rate has decreased by 2 BPM -- a sign of improving cardiovascular fitness.
+              <Show when={props.hasRealData()} fallback={
+                <>Your sleep quality has improved 12% this week. Consider maintaining your 10:30 PM
+                bedtime routine. Your step count is trending 8% above last week's average.</>
+              }>
+                {sleepHours() >= 7
+                  ? 'Your sleep average is in a healthy range. '
+                  : 'Your sleep average is below the recommended 7 hours. Consider adjusting your routine. '}
+                {stepsToday() >= 8000
+                  ? 'Great step count -- you are meeting activity targets.'
+                  : 'Try to increase your daily steps toward the 10,000 goal.'}
+                {currentStreak() > 3
+                  ? ` You have a ${currentStreak()}-day habit streak going -- keep it up!`
+                  : ''}
+              </Show>
             </p>
           </div>
         </div>
@@ -894,9 +999,81 @@ const ActivityTab: Component = () => {
   );
 };
 
-const AiAnalysisTab: Component = () => {
+const AiAnalysisTab: Component<{
+  dashboard: () => FitnessDashboard | null;
+  metrics: () => FitnessMetricResponse[];
+}> = (props) => {
+  const [aiLoading, setAiLoading] = createSignal(false);
+  const [aiResponse, setAiResponse] = createSignal('');
+  const [aiError, setAiError] = createSignal('');
+
+  const handleAnalyze = async () => {
+    setAiLoading(true);
+    setAiResponse('');
+    setAiError('');
+    try {
+      const metricsData = {
+        dashboard: props.dashboard(),
+        recentMetrics: props.metrics().slice(0, 14),
+      };
+      const result = await invoke<string>('ai_analyze_health', {
+        metricsJson: JSON.stringify(metricsData, null, 2),
+      });
+      setAiResponse(result);
+    } catch (e: any) {
+      setAiError(String(e));
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
   return (
     <div class="space-y-6">
+      {/* AI Analyze Button */}
+      <div class="card p-6">
+        <div class="flex items-center gap-2 mb-4">
+          <Icon name="sparkle" class="w-5 h-5 text-minion-500" />
+          <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+            AI Health Analysis (Ollama)
+          </h3>
+        </div>
+        <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+          Send your health metrics to your local LLM for personalized analysis and recommendations.
+          Configure the Ollama connection in Settings.
+        </p>
+        <button
+          class="btn btn-primary flex items-center gap-2"
+          disabled={aiLoading()}
+          onClick={handleAnalyze}
+        >
+          <Show when={aiLoading()} fallback={<Icon name="sparkle" class="w-4 h-4" />}>
+            <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+          </Show>
+          {aiLoading() ? 'Analyzing...' : 'Analyze My Health with AI'}
+        </button>
+
+        <Show when={aiError()}>
+          <div class="mt-4 p-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-sm text-red-700 dark:text-red-300">
+            {aiError()}
+          </div>
+        </Show>
+
+        <Show when={aiResponse()}>
+          <div class="mt-4 card p-5 border-l-4 border-l-minion-500 bg-minion-50 dark:bg-minion-900/10">
+            <div class="flex items-center gap-2 mb-3">
+              <Icon name="sparkle" class="w-4 h-4 text-minion-500" />
+              <h4 class="font-medium text-gray-900 dark:text-white text-sm">AI Analysis Result</h4>
+            </div>
+            <div class="text-sm text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap">
+              {aiResponse()}
+            </div>
+          </div>
+        </Show>
+      </div>
+
       {/* Health Score Breakdown */}
       <div class="card p-6">
         <div class="flex items-center gap-2 mb-6">
@@ -1010,28 +1187,9 @@ const AiAnalysisTab: Component = () => {
 const HabitsTab: Component<{
   habits: () => Habit[];
   setHabits: (v: Habit[] | ((prev: Habit[]) => Habit[])) => void;
+  onToggle: (id: string) => void;
+  onAdd: () => void;
 }> = (props) => {
-  const toggleHabit = (id: string) => {
-    props.setHabits((prev: Habit[]) =>
-      prev.map((h) =>
-        h.id === id
-          ? {
-              ...h,
-              completedToday: !h.completedToday,
-              streak: !h.completedToday ? h.streak + 1 : Math.max(h.streak - 1, 0),
-            }
-          : h
-      )
-    );
-  };
-
-  const addHabit = () => {
-    const name = prompt('Enter a new habit name:');
-    if (!name || !name.trim()) return;
-    const id = String(Date.now());
-    props.setHabits((prev: Habit[]) => [...prev, { id, name: name.trim(), streak: 0, completedToday: false }]);
-  };
-
   const completedCount = () => props.habits().filter((h) => h.completedToday).length;
 
   return (
@@ -1040,7 +1198,7 @@ const HabitsTab: Component<{
       <div class="card p-6 flex items-center gap-6">
         <CircularProgress
           value={completedCount()}
-          max={props.habits().length}
+          max={props.habits().length || 1}
           size="w-28 h-28"
           colorClass="text-green-500"
           sublabel={`/ ${props.habits().length}`}
@@ -1050,7 +1208,7 @@ const HabitsTab: Component<{
           <p class="text-sm text-gray-500 dark:text-gray-400">
             {completedCount()} of {props.habits().length} habits completed
           </p>
-          <Show when={completedCount() === props.habits().length}>
+          <Show when={props.habits().length > 0 && completedCount() === props.habits().length}>
             <p class="text-sm text-green-500 font-medium mt-1">All habits done -- great job!</p>
           </Show>
         </div>
@@ -1061,7 +1219,7 @@ const HabitsTab: Component<{
         <div class="flex items-center justify-between mb-4">
           <h3 class="font-medium text-gray-900 dark:text-white">Today's Habits</h3>
           <button
-            onClick={addHabit}
+            onClick={props.onAdd}
             class="flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-minion-600 text-white hover:bg-minion-700 transition-colors"
           >
             <Icon name="plus" class="w-4 h-4" />
@@ -1073,7 +1231,7 @@ const HabitsTab: Component<{
             {(habit) => (
               <div
                 class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-gray-800/50 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors"
-                onClick={() => toggleHabit(habit.id)}
+                onClick={() => props.onToggle(habit.id)}
               >
                 <div class="flex items-center gap-3">
                   <div
@@ -1186,6 +1344,121 @@ const Fitness: Component = () => {
   const [activeTab, setActiveTab] = createSignal<TabId>('dashboard');
   const [habits, setHabits] = createSignal<Habit[]>(DEFAULT_HABITS);
 
+  // Real data from backend
+  const [dashboard, setDashboard] = createSignal<FitnessDashboard | null>(null);
+  const [metrics, setMetrics] = createSignal<FitnessMetricResponse[]>([]);
+  const [hasRealData, setHasRealData] = createSignal(false);
+  const [loading, setLoading] = createSignal(true);
+
+  // Log form state
+  const [logFormOpen, setLogFormOpen] = createSignal(false);
+  const [logWeight, setLogWeight] = createSignal('');
+  const [logSteps, setLogSteps] = createSignal('');
+  const [logHeartRate, setLogHeartRate] = createSignal('');
+  const [logSleepHours, setLogSleepHours] = createSignal('');
+  const [logWater, setLogWater] = createSignal('');
+  const [logCalories, setLogCalories] = createSignal('');
+  const [logSaving, setLogSaving] = createSignal(false);
+  const [logMessage, setLogMessage] = createSignal('');
+
+  const loadData = async () => {
+    try {
+      const [dash, mets, habs] = await Promise.all([
+        invoke<FitnessDashboard>('fitness_get_dashboard'),
+        invoke<FitnessMetricResponse[]>('fitness_get_metrics', { days: 30 }),
+        invoke<FitnessHabitResponse[]>('fitness_list_habits'),
+      ]);
+      setDashboard(dash);
+      setMetrics(mets);
+      // Check if any real data exists
+      const hasData =
+        mets.length > 0 ||
+        dash.total_habits > 0 ||
+        dash.latest_weight_kg !== null ||
+        dash.avg_steps_7d !== null;
+      setHasRealData(hasData);
+      // Map backend habits into local Habit format
+      if (habs.length > 0) {
+        setHabits(
+          habs.map((h) => ({
+            id: h.id,
+            name: h.name,
+            streak: 0,
+            completedToday: h.completed_today,
+          }))
+        );
+      }
+    } catch (e) {
+      console.error('Failed to load fitness data:', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  onMount(loadData);
+
+  const handleLogMetric = async () => {
+    setLogSaving(true);
+    setLogMessage('');
+    try {
+      const metric: any = {};
+      if (logWeight()) metric.weight_kg = parseFloat(logWeight());
+      if (logSteps()) metric.steps = parseInt(logSteps(), 10);
+      if (logHeartRate()) metric.heart_rate_avg = parseInt(logHeartRate(), 10);
+      if (logSleepHours()) metric.sleep_hours = parseFloat(logSleepHours());
+      if (logWater()) metric.water_ml = parseInt(logWater(), 10);
+      if (logCalories()) metric.calories_in = parseInt(logCalories(), 10);
+
+      await invoke('fitness_log_metric', { metric });
+      setLogMessage('Metric logged successfully!');
+      // Clear form
+      setLogWeight(''); setLogSteps(''); setLogHeartRate('');
+      setLogSleepHours(''); setLogWater(''); setLogCalories('');
+      // Reload data
+      await loadData();
+    } catch (e: any) {
+      setLogMessage('Error: ' + String(e));
+    } finally {
+      setLogSaving(false);
+    }
+  };
+
+  const handleToggleHabit = async (habitId: string) => {
+    try {
+      const nowCompleted = await invoke<boolean>('fitness_toggle_habit', { habitId });
+      setHabits((prev) =>
+        prev.map((h) =>
+          h.id === habitId ? { ...h, completedToday: nowCompleted } : h
+        )
+      );
+      // Refresh dashboard for updated counts
+      const dash = await invoke<FitnessDashboard>('fitness_get_dashboard');
+      setDashboard(dash);
+    } catch (e) {
+      console.error('Failed to toggle habit:', e);
+    }
+  };
+
+  const handleAddHabit = async () => {
+    const name = prompt('Enter a new habit name:');
+    if (!name || !name.trim()) return;
+    try {
+      const habit = await invoke<FitnessHabitResponse>('fitness_add_habit', {
+        name: name.trim(),
+        frequency: null,
+        description: null,
+      });
+      setHabits((prev) => [
+        ...prev,
+        { id: habit.id, name: habit.name, streak: 0, completedToday: false },
+      ]);
+      const dash = await invoke<FitnessDashboard>('fitness_get_dashboard');
+      setDashboard(dash);
+    } catch (e) {
+      console.error('Failed to add habit:', e);
+    }
+  };
+
   return (
     <div class="p-6">
       <div class="flex items-center justify-between mb-6">
@@ -1193,7 +1466,115 @@ const Fitness: Component = () => {
         <Show when={connected()}>
           <div class="flex items-center gap-2 text-sm text-green-500">
             <div class="w-2 h-2 rounded-full bg-green-500" />
-            Google Fit Connected
+            Connected
+          </div>
+        </Show>
+      </div>
+
+      {/* Demo data banner */}
+      <Show when={!loading() && !hasRealData()}>
+        <div class="mb-4 p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 text-sm text-amber-700 dark:text-amber-300">
+          Showing demo data. Log your first metric to see real data.
+        </div>
+      </Show>
+
+      {/* Log Today's Data - Collapsible */}
+      <div class="mb-6">
+        <button
+          class="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-minion-600 text-white hover:bg-minion-700 transition-colors"
+          onClick={() => setLogFormOpen(!logFormOpen())}
+        >
+          <Icon name="plus" class="w-4 h-4" />
+          {logFormOpen() ? 'Hide Log Form' : "Log Today's Data"}
+        </button>
+
+        <Show when={logFormOpen()}>
+          <div class="card p-5 mt-3">
+            <h3 class="font-medium text-gray-900 dark:text-white mb-4">Log Today's Metrics</h3>
+            <div class="grid grid-cols-2 sm:grid-cols-3 gap-4">
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Weight (kg)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  class="input w-full"
+                  value={logWeight()}
+                  onInput={(e) => setLogWeight(e.currentTarget.value)}
+                  placeholder="e.g. 75.5"
+                />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Steps</label>
+                <input
+                  type="number"
+                  class="input w-full"
+                  value={logSteps()}
+                  onInput={(e) => setLogSteps(e.currentTarget.value)}
+                  placeholder="e.g. 8000"
+                />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Heart Rate (avg BPM)</label>
+                <input
+                  type="number"
+                  class="input w-full"
+                  value={logHeartRate()}
+                  onInput={(e) => setLogHeartRate(e.currentTarget.value)}
+                  placeholder="e.g. 72"
+                />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Sleep (hours)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  class="input w-full"
+                  value={logSleepHours()}
+                  onInput={(e) => setLogSleepHours(e.currentTarget.value)}
+                  placeholder="e.g. 7.5"
+                />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Water (ml)</label>
+                <input
+                  type="number"
+                  class="input w-full"
+                  value={logWater()}
+                  onInput={(e) => setLogWater(e.currentTarget.value)}
+                  placeholder="e.g. 2000"
+                />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Calories In</label>
+                <input
+                  type="number"
+                  class="input w-full"
+                  value={logCalories()}
+                  onInput={(e) => setLogCalories(e.currentTarget.value)}
+                  placeholder="e.g. 2200"
+                />
+              </div>
+            </div>
+            <div class="flex items-center gap-3 mt-4">
+              <button
+                class="btn btn-primary"
+                disabled={logSaving()}
+                onClick={handleLogMetric}
+              >
+                {logSaving() ? 'Saving...' : 'Save Metric'}
+              </button>
+              <Show when={logMessage()}>
+                <span
+                  class="text-sm"
+                  classList={{
+                    'text-green-500': logMessage().startsWith('Metric'),
+                    'text-red-500': logMessage().startsWith('Error'),
+                  }}
+                >
+                  {logMessage()}
+                </span>
+              </Show>
+            </div>
           </div>
         </Show>
       </div>
@@ -1225,7 +1606,7 @@ const Fitness: Component = () => {
         {/* Tab Content */}
         <Switch>
           <Match when={activeTab() === 'dashboard'}>
-            <DashboardTab />
+            <DashboardTab dashboard={dashboard} metrics={metrics} hasRealData={hasRealData} />
           </Match>
           <Match when={activeTab() === 'sleep'}>
             <SleepTab />
@@ -1237,10 +1618,15 @@ const Fitness: Component = () => {
             <ActivityTab />
           </Match>
           <Match when={activeTab() === 'ai'}>
-            <AiAnalysisTab />
+            <AiAnalysisTab dashboard={dashboard} metrics={metrics} />
           </Match>
           <Match when={activeTab() === 'habits'}>
-            <HabitsTab habits={habits} setHabits={setHabits} />
+            <HabitsTab
+              habits={habits}
+              setHabits={setHabits}
+              onToggle={handleToggleHabit}
+              onAdd={handleAddHabit}
+            />
           </Match>
         </Switch>
       </Show>

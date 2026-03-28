@@ -24,6 +24,12 @@ cd ui && pnpm typecheck          # TypeScript type check
 # Full Tauri dev (builds UI + Rust, launches app)
 cargo tauri dev
 
+# Production build (outputs .deb and .AppImage on Linux)
+cargo tauri build
+
+# Integration tests (separate crate, may need running app or DB)
+cargo test -p minion-integration-tests
+
 # Version management
 ./scripts/version.sh get|patch|minor|major
 ```
@@ -47,10 +53,11 @@ sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicat
 - **minion-plugins** — Plugin loader/registry built on minion-core's Plugin trait.
 - **minion-files**, **minion-media**, **minion-blog**, **minion-finance**, **minion-fitness**, **minion-reader** — Feature modules implementing domain logic.
 - **minion-app** — CLI application entry point, wires commands to crates.
+- **minion-integration-tests** — Cross-crate integration tests.
 
-**Tauri layer** (`src-tauri/`): `commands.rs` exposes `#[tauri::command]` functions invoked from the frontend. `state.rs` holds shared app state managed by Tauri.
+**Tauri layer** (`src-tauri/`): `commands.rs` exposes `#[tauri::command]` functions invoked from the frontend (25+ IPC commands across all modules). `state.rs` holds shared app state managed by Tauri. `tests.rs` contains Tauri-specific tests.
 
-**Frontend** (`ui/`): SolidJS + TypeScript + Tailwind CSS. Pages in `ui/src/pages/`, shared layout in `ui/src/components/`.
+**Frontend** (`ui/`): SolidJS + TypeScript + Tailwind CSS. Pages in `ui/src/pages/` (Dashboard, Files, Reader, Finance, Fitness, Settings), shared layout in `ui/src/components/`. Command palette (Ctrl+K) provides fuzzy search across all actions.
 
 ## Conventions
 
@@ -59,4 +66,13 @@ sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicat
 - **Clippy**: configured in `.clippy.toml` — cognitive complexity ≤ 25, function args ≤ 7, function lines ≤ 100
 - **Commits**: Conventional Commits format — `feat(scope): description`, `fix(scope):`, etc.
 - **Error handling**: `thiserror` for library errors, `anyhow` for application-level errors
+- **Database migrations**: each crate with DB tables owns its migrations in its `migrations.rs`; new tables must be added there
+- **Tauri commands**: new IPC commands go in `src-tauri/src/commands.rs` and must be registered in `src-tauri/src/lib.rs`
+- **Tests**: 623+ tests; run `cargo test --workspace` before pushing. Individual crates can be tested with `-p`.
 - Some crypto dependency versions are pinned to avoid Rust edition2024 incompatibilities (see `Cargo.toml` comments)
+
+## Keyboard Shortcuts (UI)
+
+- `Ctrl+K` — Command palette (fuzzy search across all actions)
+- `Left` / `Right` arrow keys — Previous / next chapter in Reader
+- `Ctrl+,` — Open Settings

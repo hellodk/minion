@@ -404,6 +404,7 @@ pub async fn files_add_directory(
 pub async fn files_start_scan(
     state: State<'_, AppStateHandle>,
     path: String,
+    exclude_patterns: Option<Vec<String>>,
 ) -> Result<ScanProgress, String> {
     let task_id = uuid::Uuid::new_v4().to_string();
     let scan_path = PathBuf::from(&path);
@@ -444,6 +445,7 @@ pub async fn files_start_scan(
             root: scan_path,
             recursive: true,
             compute_hashes: false, // Skip hashing in initial scan for speed
+            exclude_patterns: exclude_patterns.unwrap_or_default(),
             ..Default::default()
         };
 
@@ -598,6 +600,7 @@ pub async fn files_start_scan(
 pub async fn files_start_multi_scan(
     state: State<'_, AppStateHandle>,
     paths: Vec<String>,
+    exclude_patterns: Option<Vec<String>>,
 ) -> Result<ScanProgress, String> {
     if paths.is_empty() {
         return Err("No directories specified".to_string());
@@ -643,6 +646,7 @@ pub async fn files_start_multi_scan(
 
     let state_clone = state.inner().clone();
     let task_id_clone = task_id.clone();
+    let exclude_pats = exclude_patterns.unwrap_or_default();
 
     tokio::spawn(async move {
         // Create shared atomic counters for all scanners
@@ -687,6 +691,7 @@ pub async fn files_start_multi_scan(
         let tp = total_processed.clone();
         let tb = total_bytes.clone();
         let scan_paths = paths.clone();
+        let exclude_patterns_for_scan = exclude_pats;
 
         let scan_result = tokio::task::spawn_blocking(move || {
             let mut all_files: Vec<minion_files::FileInfo> = Vec::new();
@@ -698,6 +703,7 @@ pub async fn files_start_multi_scan(
                     root: PathBuf::from(p),
                     recursive: true,
                     compute_hashes: false, // Skip hashing for speed, hash only candidates later
+                    exclude_patterns: exclude_patterns_for_scan.clone(),
                     ..Default::default()
                 };
 
@@ -904,6 +910,25 @@ pub async fn files_get_scan_progress(
                 total_files: None,
                 progress_percent: 0.0,
             }),
+        }
+    } else {
+        Err(format!("Task not found: {}", task_id))
+    }
+}
+
+#[tauri::command]
+pub async fn files_cancel_scan(
+    state: State<'_, AppStateHandle>,
+    task_id: String,
+) -> Result<(), String> {
+    let mut state_guard = state.write().await;
+    if let Some(task) = state_guard.scan_tasks.get_mut(&task_id) {
+        if matches!(task.status, ScanStatus::Running { .. }) {
+            task.status = ScanStatus::Failed("Cancelled by user".to_string());
+            tracing::info!("Scan {} cancelled by user", task_id);
+            Ok(())
+        } else {
+            Err(format!("Task {} is not currently running", task_id))
         }
     } else {
         Err(format!("Task not found: {}", task_id))
@@ -2969,4 +2994,85 @@ pub async fn oreilly_logout(
         .map_err(|e| e.to_string())?;
     tracing::info!("O'Reilly session cleared");
     Ok(())
+}
+
+// ============================================================================
+// AI / LLM commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn ai_test_connection(url: String) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/tags", url))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| format!("Connection failed: {}", e))?;
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+    Ok(body)
+}
+
+#[tauri::command]
+pub async fn ai_analyze_health(
+    state: State<'_, AppStateHandle>,
+    metrics_json: String,
+) -> Result<String, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    // Read LLM config from DB
+    let ollama_url: String = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'ai_ollama_url'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "http://192.168.1.10:11434".to_string());
+
+    let model: String = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'ai_model'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "llama3.2:3b".to_string());
+
+    drop(conn);
+    drop(st);
+
+    let prompt = format!(
+        "You are a health and fitness AI assistant. Analyze the following health metrics \
+         and provide personalized insights, recommendations, and areas of concern. \
+         Be concise but thorough. Format your response with clear sections.\n\n\
+         Health Metrics:\n{}\n\n\
+         Please provide:\n\
+         1. Overall health assessment\n\
+         2. Key observations\n\
+         3. Actionable recommendations\n\
+         4. Areas that need attention",
+        metrics_json
+    );
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/generate", ollama_url))
+        .json(&serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "stream": false,
+        }))
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Ollama: {}", e))?;
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let response = body
+        .get("response")
+        .and_then(|v| v.as_str())
+        .unwrap_or("No response from model")
+        .to_string();
+
+    Ok(response)
 }

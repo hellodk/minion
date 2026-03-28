@@ -60,6 +60,7 @@ pub fn run() {
             commands::files_start_scan,
             commands::files_start_multi_scan,
             commands::files_get_scan_progress,
+            commands::files_cancel_scan,
             commands::files_list_duplicates,
             commands::files_get_analytics,
             commands::files_open_file,
@@ -102,6 +103,9 @@ pub fn run() {
             commands::reader_get_collection_books,
             commands::reader_delete_collection,
             commands::reader_scan_directory,
+            // AI commands
+            commands::ai_test_connection,
+            commands::ai_analyze_health,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
