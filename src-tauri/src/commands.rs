@@ -1355,10 +1355,23 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
         BookFormat::Epub => {
             // Run EPUB parsing on blocking thread (heavy I/O for image inlining)
             let bp = book_path.clone();
-            let content = tokio::task::spawn_blocking(move || parse_epub(&bp))
-                .await
-                .map_err(|e| format!("EPUB parse task failed: {}", e))?
-                .map_err(|e| format!("EPUB parse error: {}", e))?;
+            let content = tokio::task::spawn_blocking(move || {
+                std::panic::catch_unwind(|| parse_epub(&bp))
+                    .unwrap_or_else(|_| {
+                        Ok(minion_reader::formats::BookContent {
+                            chapters: vec![minion_reader::formats::Chapter {
+                                index: 0,
+                                title: "Content".to_string(),
+                                content: "<p>This EPUB could not be parsed. The file may be corrupted.</p>".to_string(),
+                            }],
+                            toc: vec![],
+                            cover_base64: None,
+                        })
+                    })
+            })
+            .await
+            .map_err(|e| format!("EPUB task failed: {}", e))?
+            .map_err(|e| format!("EPUB parse error: {}", e))?;
 
             tracing::info!("Parsed EPUB: {} chapters", content.chapters.len());
 
@@ -1405,10 +1418,27 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
         }
         BookFormat::Pdf => {
             let bp = book_path.clone();
-            let content = tokio::task::spawn_blocking(move || parse_pdf(&bp))
-                .await
-                .map_err(|e| format!("PDF parse task failed: {}", e))?
-                .map_err(|e| format!("PDF parse error: {}", e))?;
+            let content = tokio::task::spawn_blocking(move || {
+                // Catch panics from pdf_extract (some PDFs cause index out of bounds)
+                std::panic::catch_unwind(|| parse_pdf(&bp))
+                    .unwrap_or_else(|_| {
+                        Ok(minion_reader::formats::BookContent {
+                            chapters: vec![minion_reader::formats::Chapter {
+                                index: 0,
+                                title: "Content".to_string(),
+                                content: "<div style='padding:2em;text-align:center;'>\
+                                    <p style='font-size:1.2em;margin-bottom:1em;'>This PDF could not be parsed for text extraction.</p>\
+                                    <p style='color:#888;'>The file may be image-based (scanned) or use an unsupported encoding.</p>\
+                                    </div>".to_string(),
+                            }],
+                            toc: vec![],
+                            cover_base64: None,
+                        })
+                    })
+            })
+            .await
+            .map_err(|e| format!("PDF task failed: {}", e))?
+            .map_err(|e| format!("PDF parse error: {}", e))?;
 
             tracing::info!("Parsed PDF: {} chapters", content.chapters.len());
 
