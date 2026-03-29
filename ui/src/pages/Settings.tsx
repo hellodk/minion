@@ -359,6 +359,80 @@ const Settings: Component = () => {
         </div>
       </section>
 
+      {/* Calendar Integrations */}
+      <section class="card p-4 mb-6">
+        <h2 class="text-lg font-medium mb-4">Calendar Integrations</h2>
+
+        <div class="space-y-4">
+          {/* Google Calendar */}
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="font-medium">Google Calendar</p>
+              <p class="text-sm text-gray-500 dark:text-gray-400">
+                Same Google account as Fit. Connect once, get both.
+              </p>
+            </div>
+            <Show
+              when={gfitConnected()}
+              fallback={
+                <button
+                  class="btn btn-secondary text-sm"
+                  onClick={async () => {
+                    try {
+                      await invoke('gfit_open_auth');
+                    } catch (e: any) {
+                      console.error('Failed to open Google auth:', e);
+                    }
+                  }}
+                >
+                  Connect
+                </button>
+              }
+            >
+              <div class="flex items-center gap-2">
+                <span class="px-2 py-1 text-xs bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded">
+                  Connected
+                </span>
+                <button
+                  class="btn btn-secondary text-sm"
+                  onClick={async () => {
+                    try {
+                      await invoke('calendar_sync_google');
+                    } catch (e: any) {
+                      console.error('Calendar sync failed:', e);
+                    }
+                  }}
+                >
+                  Sync
+                </button>
+              </div>
+            </Show>
+          </div>
+
+          {/* Outlook Calendar */}
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="font-medium">Outlook Calendar</p>
+              <p class="text-sm text-gray-500 dark:text-gray-400">
+                Connect your Microsoft account for Outlook Calendar sync.
+              </p>
+            </div>
+            <button
+              class="btn btn-secondary text-sm"
+              onClick={async () => {
+                try {
+                  await invoke('calendar_open_outlook_auth');
+                } catch (e: any) {
+                  console.error('Failed to open Outlook auth:', e);
+                }
+              }}
+            >
+              Connect
+            </button>
+          </div>
+        </div>
+      </section>
+
       {/* Zerodha Kite Connect */}
       <section class="card p-4 mb-6">
         <h2 class="text-lg font-medium mb-4">Zerodha Kite Connect</h2>

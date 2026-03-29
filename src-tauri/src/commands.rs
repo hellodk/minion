@@ -3887,3 +3887,270 @@ pub async fn gfit_disconnect(state: State<'_, AppStateHandle>) -> Result<(), Str
         .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+// ============================================================================
+// Calendar commands
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CalendarEventResponse {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub start_time: String,
+    pub end_time: Option<String>,
+    pub all_day: bool,
+    pub location: Option<String>,
+    pub color: String,
+    pub source: String,
+    pub calendar_name: Option<String>,
+}
+
+#[tauri::command]
+pub async fn calendar_add_event(
+    state: State<'_, AppStateHandle>,
+    title: String,
+    start_time: String,
+    end_time: Option<String>,
+    all_day: Option<bool>,
+    location: Option<String>,
+    color: Option<String>,
+    description: Option<String>,
+) -> Result<CalendarEventResponse, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let all_day_val = all_day.unwrap_or(false);
+    let color_val = color.unwrap_or_else(|| "#0ea5e9".to_string());
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO calendar_events (id, title, description, start_time, end_time, all_day, location, color, source, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'local', ?9, ?9)",
+        rusqlite::params![
+            id, title, description, start_time, end_time,
+            all_day_val as i32, location, color_val, now
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(CalendarEventResponse {
+        id,
+        title,
+        description,
+        start_time,
+        end_time,
+        all_day: all_day_val,
+        location,
+        color: color_val,
+        source: "local".to_string(),
+        calendar_name: None,
+    })
+}
+
+#[tauri::command]
+pub async fn calendar_list_events(
+    state: State<'_, AppStateHandle>,
+    from: String,
+    to: String,
+) -> Result<Vec<CalendarEventResponse>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title, description, start_time, end_time, all_day, location, color, source, calendar_name
+             FROM calendar_events
+             WHERE start_time >= ?1 AND start_time <= ?2
+             ORDER BY start_time ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![from, to], |row| {
+            let all_day_int: i32 = row.get(5)?;
+            Ok(CalendarEventResponse {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                start_time: row.get(3)?,
+                end_time: row.get(4)?,
+                all_day: all_day_int != 0,
+                location: row.get(6)?,
+                color: row.get(7)?,
+                source: row.get(8)?,
+                calendar_name: row.get(9)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(events)
+}
+
+#[tauri::command]
+pub async fn calendar_delete_event(
+    state: State<'_, AppStateHandle>,
+    event_id: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let affected = conn
+        .execute(
+            "DELETE FROM calendar_events WHERE id = ?1",
+            rusqlite::params![event_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if affected == 0 {
+        return Err(format!("Event not found: {}", event_id));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn calendar_sync_google(
+    state: State<'_, AppStateHandle>,
+) -> Result<String, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let token: Option<String> = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'gfit_access_token'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let token =
+        token.ok_or("Not connected to Google. Please connect in Settings first.")?;
+
+    drop(conn);
+    drop(st);
+
+    let client = reqwest::Client::new();
+    let now = chrono::Utc::now();
+    let time_min = (now - chrono::Duration::days(30)).to_rfc3339();
+    let time_max = (now + chrono::Duration::days(60)).to_rfc3339();
+
+    let url = format!(
+        "https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin={}&timeMax={}&singleEvents=true&orderBy=startTime&maxResults=250",
+        time_min, time_max
+    );
+
+    let resp = client
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("Google Calendar API error: {}", e))?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "Google Calendar API returned {}: {}",
+            status,
+            serde_json::to_string(&body).unwrap_or_default()
+        ));
+    }
+
+    let items = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let now_str = chrono::Utc::now().to_rfc3339();
+    let mut upserted = 0;
+
+    for item in &items {
+        let remote_id = item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let title = item
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(No title)")
+            .to_string();
+        let description = item
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let location = item
+            .get("location")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let start_obj = item.get("start");
+        let end_obj = item.get("end");
+        let all_day = start_obj
+            .and_then(|s| s.get("date"))
+            .is_some();
+        let start_time = start_obj
+            .and_then(|s| s.get("dateTime").or(s.get("date")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let end_time = end_obj
+            .and_then(|s| s.get("dateTime").or(s.get("date")))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        if start_time.is_empty() {
+            continue;
+        }
+
+        let id = format!("gcal_{}", remote_id);
+        conn.execute(
+            "INSERT OR REPLACE INTO calendar_events \
+             (id, title, description, start_time, end_time, all_day, location, color, source, remote_id, calendar_name, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '#4285f4', 'google', ?8, 'Google', ?9, ?9)",
+            rusqlite::params![
+                id, title, description, start_time, end_time,
+                all_day as i32, location, remote_id, now_str
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        upserted += 1;
+    }
+
+    Ok(format!(
+        "Synced {} events from Google Calendar.",
+        upserted
+    ))
+}
+
+#[tauri::command]
+pub async fn calendar_open_outlook_auth(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    let auth_url = "https://login.microsoftonline.com/common/oauth2/v2/authorize?\
+        scope=Calendars.Read+offline_access&\
+        response_type=code&\
+        redirect_uri=https://login.microsoftonline.com/common/oauth2/nativeclient";
+
+    WebviewWindowBuilder::new(
+        &app,
+        "outlook-calendar-auth",
+        WebviewUrl::External(auth_url.parse().unwrap()),
+    )
+    .title("Microsoft - Sign In")
+    .inner_size(500.0, 700.0)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}

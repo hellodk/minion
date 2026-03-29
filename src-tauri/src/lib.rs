@@ -130,6 +130,12 @@ pub fn run() {
             commands::gfit_save_token,
             commands::gfit_check_connected,
             commands::gfit_disconnect,
+            // Calendar commands
+            commands::calendar_add_event,
+            commands::calendar_list_events,
+            commands::calendar_delete_event,
+            commands::calendar_sync_google,
+            commands::calendar_open_outlook_auth,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
