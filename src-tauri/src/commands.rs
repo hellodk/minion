@@ -227,6 +227,38 @@ pub struct FitnessDashboard {
     pub workouts_this_week: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkoutResponse {
+    pub id: String,
+    pub name: String,
+    pub exercises: Option<String>,
+    pub duration_minutes: f64,
+    pub calories_burned: Option<f64>,
+    pub date: String,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NutritionResponse {
+    pub id: String,
+    pub name: String,
+    pub calories: f64,
+    pub protein_g: f64,
+    pub carbs_g: f64,
+    pub fat_g: f64,
+    pub meal_type: String,
+    pub date: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NutritionDaySummary {
+    pub total_calories: f64,
+    pub total_protein: f64,
+    pub total_carbs: f64,
+    pub total_fat: f64,
+    pub meals: Vec<NutritionResponse>,
+}
+
 // ============================================================================
 // Collection response types
 // ============================================================================
@@ -2878,6 +2910,247 @@ pub async fn fitness_get_dashboard(
 }
 
 // ============================================================================
+// Fitness workout commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn fitness_log_workout(
+    state: State<'_, AppStateHandle>,
+    name: String,
+    exercises: Option<String>,
+    duration_minutes: f64,
+    calories_burned: Option<f64>,
+    notes: Option<String>,
+) -> Result<WorkoutResponse, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO fitness_workouts (id, name, exercises, duration_minutes, calories_burned, date, notes, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![id, name, exercises, duration_minutes, calories_burned, today, notes, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(WorkoutResponse {
+        id,
+        name,
+        exercises,
+        duration_minutes,
+        calories_burned,
+        date: today,
+        notes,
+    })
+}
+
+#[tauri::command]
+pub async fn fitness_list_workouts(
+    state: State<'_, AppStateHandle>,
+    limit: Option<i32>,
+) -> Result<Vec<WorkoutResponse>, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let limit = limit.unwrap_or(50);
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, exercises, duration_minutes, calories_burned, date, notes
+             FROM fitness_workouts ORDER BY date DESC, created_at DESC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![limit], |row| {
+            Ok(WorkoutResponse {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                exercises: row.get(2)?,
+                duration_minutes: row.get::<_, f64>(3)?,
+                calories_burned: row.get(4)?,
+                date: row.get(5)?,
+                notes: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut workouts = Vec::new();
+    for row in rows {
+        workouts.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(workouts)
+}
+
+#[tauri::command]
+pub async fn fitness_delete_workout(
+    state: State<'_, AppStateHandle>,
+    workout_id: String,
+) -> Result<(), String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "DELETE FROM fitness_workouts WHERE id = ?1",
+        rusqlite::params![workout_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Fitness nutrition commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn fitness_log_food(
+    state: State<'_, AppStateHandle>,
+    name: String,
+    calories: f64,
+    protein_g: f64,
+    carbs_g: f64,
+    fat_g: f64,
+    meal_type: String,
+    date: Option<String>,
+) -> Result<NutritionResponse, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let date = date.unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO fitness_nutrition (id, name, calories, protein_g, carbs_g, fat_g, meal_type, date, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![id, name, calories, protein_g, carbs_g, fat_g, meal_type, date, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(NutritionResponse {
+        id,
+        name,
+        calories,
+        protein_g,
+        carbs_g,
+        fat_g,
+        meal_type,
+        date,
+    })
+}
+
+#[tauri::command]
+pub async fn fitness_list_nutrition(
+    state: State<'_, AppStateHandle>,
+    date: Option<String>,
+) -> Result<Vec<NutritionResponse>, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let date = date.unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, calories, protein_g, carbs_g, fat_g, meal_type, date
+             FROM fitness_nutrition WHERE date = ?1
+             ORDER BY created_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![date], |row| {
+            Ok(NutritionResponse {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                calories: row.get::<_, f64>(2)?,
+                protein_g: row.get::<_, f64>(3)?,
+                carbs_g: row.get::<_, f64>(4)?,
+                fat_g: row.get::<_, f64>(5)?,
+                meal_type: row.get(6)?,
+                date: row.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(entries)
+}
+
+#[tauri::command]
+pub async fn fitness_nutrition_summary(
+    state: State<'_, AppStateHandle>,
+    date: String,
+) -> Result<NutritionDaySummary, String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, calories, protein_g, carbs_g, fat_g, meal_type, date
+             FROM fitness_nutrition WHERE date = ?1
+             ORDER BY created_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![date], |row| {
+            Ok(NutritionResponse {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                calories: row.get::<_, f64>(2)?,
+                protein_g: row.get::<_, f64>(3)?,
+                carbs_g: row.get::<_, f64>(4)?,
+                fat_g: row.get::<_, f64>(5)?,
+                meal_type: row.get(6)?,
+                date: row.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut meals = Vec::new();
+    for row in rows {
+        meals.push(row.map_err(|e| e.to_string())?);
+    }
+
+    let total_calories = meals.iter().map(|m| m.calories).sum();
+    let total_protein = meals.iter().map(|m| m.protein_g).sum();
+    let total_carbs = meals.iter().map(|m| m.carbs_g).sum();
+    let total_fat = meals.iter().map(|m| m.fat_g).sum();
+
+    Ok(NutritionDaySummary {
+        total_calories,
+        total_protein,
+        total_carbs,
+        total_fat,
+        meals,
+    })
+}
+
+#[tauri::command]
+pub async fn fitness_delete_nutrition(
+    state: State<'_, AppStateHandle>,
+    entry_id: String,
+) -> Result<(), String> {
+    let state = state.read().await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "DELETE FROM fitness_nutrition WHERE id = ?1",
+        rusqlite::params![entry_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// ============================================================================
 // Reader persistence commands (DB-backed)
 // ============================================================================
 
@@ -3078,7 +3351,11 @@ pub async fn reader_get_library(
                 if let Ok(data) = std::fs::read(path) {
                     use base64ct::{Base64, Encoding};
                     let b64 = Base64::encode_string(&data);
-                    let mime = if path.ends_with(".png") { "image/png" } else { "image/jpeg" };
+                    let mime = if path.ends_with(".png") {
+                        "image/png"
+                    } else {
+                        "image/jpeg"
+                    };
                     book.cover_path = Some(format!("data:{};base64,{}", mime, b64));
                 }
             }
@@ -4026,9 +4303,7 @@ pub async fn calendar_delete_event(
 }
 
 #[tauri::command]
-pub async fn calendar_sync_google(
-    state: State<'_, AppStateHandle>,
-) -> Result<String, String> {
+pub async fn calendar_sync_google(state: State<'_, AppStateHandle>) -> Result<String, String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
 
@@ -4040,8 +4315,7 @@ pub async fn calendar_sync_google(
         )
         .ok();
 
-    let token =
-        token.ok_or("Not connected to Google. Please connect in Settings first.")?;
+    let token = token.ok_or("Not connected to Google. Please connect in Settings first.")?;
 
     drop(conn);
     drop(st);
@@ -4107,9 +4381,7 @@ pub async fn calendar_sync_google(
 
         let start_obj = item.get("start");
         let end_obj = item.get("end");
-        let all_day = start_obj
-            .and_then(|s| s.get("date"))
-            .is_some();
+        let all_day = start_obj.and_then(|s| s.get("date")).is_some();
         let start_time = start_obj
             .and_then(|s| s.get("dateTime").or(s.get("date")))
             .and_then(|v| v.as_str())
@@ -4138,10 +4410,7 @@ pub async fn calendar_sync_google(
         upserted += 1;
     }
 
-    Ok(format!(
-        "Synced {} events from Google Calendar.",
-        upserted
-    ))
+    Ok(format!("Synced {} events from Google Calendar.", upserted))
 }
 
 #[tauri::command]
@@ -4165,4 +4434,484 @@ pub async fn calendar_open_outlook_auth(app: tauri::AppHandle) -> Result<(), Str
     .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+// ============================================================================
+// Media Intelligence commands
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MediaProjectResponse {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub file_path: String,
+    pub duration_seconds: Option<f64>,
+    pub codec: Option<String>,
+    pub resolution: Option<String>,
+    pub status: String,
+    pub tags: Option<String>,
+    pub created_at: String,
+}
+
+#[tauri::command]
+pub async fn media_import_video(
+    state: State<'_, AppStateHandle>,
+    path: String,
+) -> Result<MediaProjectResponse, String> {
+    // Extract metadata from the file
+    let meta =
+        minion_media::metadata::MediaMetadata::from_path(&path).map_err(|e| e.to_string())?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    // Derive title from file name (strip extension)
+    let title = std::path::Path::new(&path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Untitled".to_string());
+
+    let resolution = meta.resolution();
+    let codec = meta.codec.clone();
+    let duration = meta.duration_seconds;
+
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "INSERT INTO media_projects \
+         (id, title, file_path, duration_seconds, codec, resolution, status, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'draft', ?7, ?7)",
+        rusqlite::params![id, title, path, duration, codec, resolution, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(MediaProjectResponse {
+        id,
+        title,
+        description: None,
+        file_path: path,
+        duration_seconds: duration,
+        codec,
+        resolution,
+        status: "draft".to_string(),
+        tags: None,
+        created_at: now,
+    })
+}
+
+#[tauri::command]
+pub async fn media_list_projects(
+    state: State<'_, AppStateHandle>,
+) -> Result<Vec<MediaProjectResponse>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title, description, file_path, duration_seconds, \
+             codec, resolution, status, tags, created_at \
+             FROM media_projects ORDER BY created_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(MediaProjectResponse {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                file_path: row.get(3)?,
+                duration_seconds: row.get(4)?,
+                codec: row.get(5)?,
+                resolution: row.get(6)?,
+                status: row.get(7)?,
+                tags: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut projects = Vec::new();
+    for row in rows {
+        projects.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(projects)
+}
+
+#[tauri::command]
+pub async fn media_get_project(
+    state: State<'_, AppStateHandle>,
+    project_id: String,
+) -> Result<MediaProjectResponse, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    conn.query_row(
+        "SELECT id, title, description, file_path, duration_seconds, \
+         codec, resolution, status, tags, created_at \
+         FROM media_projects WHERE id = ?1",
+        rusqlite::params![project_id],
+        |row| {
+            Ok(MediaProjectResponse {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                file_path: row.get(3)?,
+                duration_seconds: row.get(4)?,
+                codec: row.get(5)?,
+                resolution: row.get(6)?,
+                status: row.get(7)?,
+                tags: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn media_update_project(
+    state: State<'_, AppStateHandle>,
+    project_id: String,
+    title: Option<String>,
+    description: Option<String>,
+    tags: Option<String>,
+    status: Option<String>,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    if let Some(t) = title {
+        conn.execute(
+            "UPDATE media_projects SET title = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![t, now, project_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if let Some(d) = description {
+        conn.execute(
+            "UPDATE media_projects SET description = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![d, now, project_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if let Some(tg) = tags {
+        conn.execute(
+            "UPDATE media_projects SET tags = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![tg, now, project_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if let Some(s) = status {
+        conn.execute(
+            "UPDATE media_projects SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![s, now, project_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn media_delete_project(
+    state: State<'_, AppStateHandle>,
+    project_id: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "DELETE FROM media_projects WHERE id = ?1",
+        rusqlite::params![project_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn media_open_video(path: String) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("Failed to open video: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn media_get_metadata(path: String) -> Result<serde_json::Value, String> {
+    let meta =
+        minion_media::metadata::MediaMetadata::from_path(&path).map_err(|e| e.to_string())?;
+
+    serde_json::to_value(&meta).map_err(|e| e.to_string())
+}
+
+// ============================================================================
+// Blog commands
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BlogPostResponse {
+    pub id: String,
+    pub title: String,
+    pub slug: String,
+    pub content: Option<String>,
+    pub excerpt: Option<String>,
+    pub status: String,
+    pub author: Option<String>,
+    pub tags: Option<String>,
+    pub seo_score: Option<i32>,
+    pub word_count: Option<i32>,
+    pub reading_time: Option<i32>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub published_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SeoAnalysisResponse {
+    pub score: i32,
+    pub title_length: i32,
+    pub keyword_density: f64,
+    pub heading_structure: bool,
+    pub word_count: i32,
+    pub suggestions: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn blog_create_post(
+    state: State<'_, AppStateHandle>,
+    title: String,
+    content: String,
+    author: Option<String>,
+) -> Result<BlogPostResponse, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let slug = minion_blog::posts::slugify(&title);
+    let wc = minion_blog::posts::word_count(&content) as i32;
+    let rt = minion_blog::posts::calculate_reading_time(&content) as i32;
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO blog_posts (id, title, slug, content, status, author, \
+         word_count, reading_time, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'draft', ?5, ?6, ?7, ?8, ?8)",
+        rusqlite::params![id, title, slug, content, author, wc, rt, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(BlogPostResponse {
+        id,
+        title,
+        slug,
+        content: Some(content),
+        excerpt: None,
+        status: "draft".to_string(),
+        author,
+        tags: None,
+        seo_score: None,
+        word_count: Some(wc),
+        reading_time: Some(rt),
+        created_at: now.clone(),
+        updated_at: now,
+        published_at: None,
+    })
+}
+
+#[tauri::command]
+pub async fn blog_list_posts(
+    state: State<'_, AppStateHandle>,
+    status: Option<String>,
+) -> Result<Vec<BlogPostResponse>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match &status {
+        Some(s) => (
+            "SELECT id, title, slug, content, excerpt, status, author, tags, \
+             seo_score, word_count, reading_time, created_at, updated_at, published_at \
+             FROM blog_posts WHERE status = ?1 ORDER BY updated_at DESC",
+            vec![Box::new(s.clone())],
+        ),
+        None => (
+            "SELECT id, title, slug, content, excerpt, status, author, tags, \
+             seo_score, word_count, reading_time, created_at, updated_at, published_at \
+             FROM blog_posts ORDER BY updated_at DESC",
+            vec![],
+        ),
+    };
+
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(BlogPostResponse {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                slug: row.get(2)?,
+                content: row.get(3)?,
+                excerpt: row.get(4)?,
+                status: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                author: row.get(6)?,
+                tags: row.get(7)?,
+                seo_score: row.get(8)?,
+                word_count: row.get(9)?,
+                reading_time: row.get(10)?,
+                created_at: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                updated_at: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                published_at: row.get(13)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut posts = Vec::new();
+    for row in rows {
+        posts.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(posts)
+}
+
+#[tauri::command]
+pub async fn blog_get_post(
+    state: State<'_, AppStateHandle>,
+    post_id: String,
+) -> Result<BlogPostResponse, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    conn.query_row(
+        "SELECT id, title, slug, content, excerpt, status, author, tags, \
+         seo_score, word_count, reading_time, created_at, updated_at, published_at \
+         FROM blog_posts WHERE id = ?1",
+        rusqlite::params![post_id],
+        |row| {
+            Ok(BlogPostResponse {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                slug: row.get(2)?,
+                content: row.get(3)?,
+                excerpt: row.get(4)?,
+                status: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                author: row.get(6)?,
+                tags: row.get(7)?,
+                seo_score: row.get(8)?,
+                word_count: row.get(9)?,
+                reading_time: row.get(10)?,
+                created_at: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                updated_at: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                published_at: row.get(13)?,
+            })
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn blog_update_post(
+    state: State<'_, AppStateHandle>,
+    post_id: String,
+    title: Option<String>,
+    content: Option<String>,
+    status: Option<String>,
+    tags: Option<String>,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    if let Some(ref t) = title {
+        let slug = minion_blog::posts::slugify(t);
+        conn.execute(
+            "UPDATE blog_posts SET title = ?1, slug = ?2, updated_at = ?3 \
+             WHERE id = ?4",
+            rusqlite::params![t, slug, now, post_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    if let Some(ref c) = content {
+        let wc = minion_blog::posts::word_count(c) as i32;
+        let rt = minion_blog::posts::calculate_reading_time(c) as i32;
+        conn.execute(
+            "UPDATE blog_posts SET content = ?1, word_count = ?2, \
+             reading_time = ?3, updated_at = ?4 WHERE id = ?5",
+            rusqlite::params![c, wc, rt, now, post_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    if let Some(ref s) = status {
+        let published_at = if s == "published" {
+            Some(now.clone())
+        } else {
+            None
+        };
+        conn.execute(
+            "UPDATE blog_posts SET status = ?1, \
+             published_at = COALESCE(published_at, ?2), \
+             updated_at = ?3 WHERE id = ?4",
+            rusqlite::params![s, published_at, now, post_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    if let Some(ref tg) = tags {
+        conn.execute(
+            "UPDATE blog_posts SET tags = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![tg, now, post_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn blog_delete_post(
+    state: State<'_, AppStateHandle>,
+    post_id: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let affected = conn
+        .execute(
+            "DELETE FROM blog_posts WHERE id = ?1",
+            rusqlite::params![post_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if affected == 0 {
+        return Err(format!("Blog post not found: {}", post_id));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn blog_analyze_seo(
+    title: String,
+    content: String,
+    keywords: Vec<String>,
+) -> Result<SeoAnalysisResponse, String> {
+    let analysis = minion_blog::seo::SeoAnalyzer::analyze(&title, &content, &keywords);
+
+    Ok(SeoAnalysisResponse {
+        score: analysis.score as i32,
+        title_length: analysis.title_length as i32,
+        keyword_density: analysis.keyword_density,
+        heading_structure: analysis.heading_structure,
+        word_count: analysis.word_count as i32,
+        suggestions: analysis.suggestions,
+    })
+}
+
+#[tauri::command]
+pub async fn blog_generate_slug(title: String) -> Result<String, String> {
+    Ok(minion_blog::posts::slugify(&title))
 }

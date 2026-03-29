@@ -7,7 +7,9 @@ import Files from './pages/Files';
 import Reader from './pages/Reader';
 import Finance from './pages/Finance';
 import Fitness from './pages/Fitness';
+import Media from './pages/Media';
 import Calendar from './pages/Calendar';
+import Blog from './pages/Blog';
 import Settings from './pages/Settings';
 import './styles/index.css';
 
@@ -25,7 +27,9 @@ render(
       <Route path="/reader" component={Reader} />
       <Route path="/finance" component={Finance} />
       <Route path="/fitness" component={Fitness} />
+      <Route path="/media" component={Media} />
       <Route path="/calendar" component={Calendar} />
+      <Route path="/blog" component={Blog} />
       <Route path="/settings" component={Settings} />
     </Router>
   ),

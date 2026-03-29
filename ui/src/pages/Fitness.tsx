@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 // Types
 // ---------------------------------------------------------------------------
 
-type TabId = 'dashboard' | 'sleep' | 'heart' | 'activity' | 'ai' | 'habits';
+type TabId = 'dashboard' | 'sleep' | 'heart' | 'activity' | 'ai' | 'habits' | 'workouts' | 'nutrition';
 
 interface FitnessDashboard {
   total_habits: number;
@@ -75,6 +75,35 @@ interface DoctorSuggestion {
   specialty: string;
   reason: string;
   icon: string;
+}
+
+interface WorkoutResponse {
+  id: string;
+  name: string;
+  exercises: string | null;
+  duration_minutes: number;
+  calories_burned: number | null;
+  date: string;
+  notes: string | null;
+}
+
+interface NutritionResponse {
+  id: string;
+  name: string;
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+  meal_type: string;
+  date: string;
+}
+
+interface NutritionDaySummary {
+  total_calories: number;
+  total_protein: number;
+  total_carbs: number;
+  total_fat: number;
+  meals: NutritionResponse[];
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +414,12 @@ const Icon: Component<{ name: string; class?: string }> = (props) => {
         <svg class={cls()} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
             d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+        </svg>
+      </Match>
+      <Match when={props.name === 'trash'}>
+        <svg class={cls()} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
         </svg>
       </Match>
     </Switch>
@@ -1272,6 +1307,456 @@ const HabitsTab: Component<{
 };
 
 // ---------------------------------------------------------------------------
+// Workouts Tab
+// ---------------------------------------------------------------------------
+
+const WorkoutsTab: Component = () => {
+  const [workouts, setWorkouts] = createSignal<WorkoutResponse[]>([]);
+  const [formOpen, setFormOpen] = createSignal(false);
+  const [wName, setWName] = createSignal('');
+  const [wDuration, setWDuration] = createSignal('');
+  const [wCalories, setWCalories] = createSignal('');
+  const [wNotes, setWNotes] = createSignal('');
+  const [saving, setSaving] = createSignal(false);
+  const [msg, setMsg] = createSignal('');
+
+  const loadWorkouts = async () => {
+    try {
+      const data = await invoke<WorkoutResponse[]>('fitness_list_workouts', { limit: 50 });
+      setWorkouts(data);
+    } catch (e) {
+      console.error('Failed to load workouts:', e);
+    }
+  };
+
+  onMount(loadWorkouts);
+
+  const handleSave = async () => {
+    if (!wName().trim() || !wDuration().trim()) {
+      setMsg('Name and duration are required');
+      return;
+    }
+    setSaving(true);
+    setMsg('');
+    try {
+      await invoke<WorkoutResponse>('fitness_log_workout', {
+        name: wName().trim(),
+        exercises: null,
+        durationMinutes: parseFloat(wDuration()),
+        caloriesBurned: wCalories() ? parseFloat(wCalories()) : null,
+        notes: wNotes().trim() || null,
+      });
+      setWName(''); setWDuration(''); setWCalories(''); setWNotes('');
+      setMsg('Workout logged!');
+      setFormOpen(false);
+      await loadWorkouts();
+    } catch (e: any) {
+      setMsg('Error: ' + String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await invoke('fitness_delete_workout', { workoutId: id });
+      setWorkouts((prev) => prev.filter((w) => w.id !== id));
+    } catch (e) {
+      console.error('Failed to delete workout:', e);
+    }
+  };
+
+  // Weekly summary computed from workouts in last 7 days
+  const weeklySummary = () => {
+    const now = new Date();
+    const weekAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
+    const recent = workouts().filter((w) => new Date(w.date) >= weekAgo);
+    return {
+      count: recent.length,
+      totalDuration: recent.reduce((s, w) => s + w.duration_minutes, 0),
+      totalCalories: recent.reduce((s, w) => s + (w.calories_burned ?? 0), 0),
+    };
+  };
+
+  return (
+    <div class="space-y-6">
+      {/* Weekly Summary */}
+      <div class="grid grid-cols-3 gap-4">
+        <div class="card p-4 text-center">
+          <p class="text-2xl font-bold text-gray-900 dark:text-white">{weeklySummary().count}</p>
+          <p class="text-xs text-gray-500 dark:text-gray-400">Workouts this week</p>
+        </div>
+        <div class="card p-4 text-center">
+          <p class="text-2xl font-bold text-gray-900 dark:text-white">{Math.round(weeklySummary().totalDuration)}</p>
+          <p class="text-xs text-gray-500 dark:text-gray-400">Total minutes</p>
+        </div>
+        <div class="card p-4 text-center">
+          <p class="text-2xl font-bold text-gray-900 dark:text-white">{Math.round(weeklySummary().totalCalories)}</p>
+          <p class="text-xs text-gray-500 dark:text-gray-400">Calories burned</p>
+        </div>
+      </div>
+
+      {/* Log Workout button + form */}
+      <div>
+        <button
+          class="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-minion-600 text-white hover:bg-minion-700 transition-colors"
+          onClick={() => { setFormOpen(!formOpen()); setMsg(''); }}
+        >
+          <Icon name="plus" class="w-4 h-4" />
+          {formOpen() ? 'Cancel' : 'Log Workout'}
+        </button>
+
+        <Show when={formOpen()}>
+          <div class="card p-5 mt-3">
+            <h3 class="font-medium text-gray-900 dark:text-white mb-4">Log Workout</h3>
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Name *</label>
+                <input type="text" class="input w-full" value={wName()}
+                  onInput={(e) => setWName(e.currentTarget.value)} placeholder="e.g. Morning Run" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Duration (min) *</label>
+                <input type="number" class="input w-full" value={wDuration()}
+                  onInput={(e) => setWDuration(e.currentTarget.value)} placeholder="e.g. 45" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Calories Burned</label>
+                <input type="number" class="input w-full" value={wCalories()}
+                  onInput={(e) => setWCalories(e.currentTarget.value)} placeholder="e.g. 350" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Notes</label>
+                <input type="text" class="input w-full" value={wNotes()}
+                  onInput={(e) => setWNotes(e.currentTarget.value)} placeholder="Optional notes" />
+              </div>
+            </div>
+            <div class="flex items-center gap-3 mt-4">
+              <button class="btn btn-primary" disabled={saving()} onClick={handleSave}>
+                {saving() ? 'Saving...' : 'Save Workout'}
+              </button>
+              <Show when={msg()}>
+                <span class="text-sm" classList={{
+                  'text-green-500': msg().startsWith('Workout'),
+                  'text-red-500': msg().startsWith('Error') || msg().startsWith('Name'),
+                }}>{msg()}</span>
+              </Show>
+            </div>
+          </div>
+        </Show>
+      </div>
+
+      {/* Recent Workouts */}
+      <div class="card p-4">
+        <h3 class="font-medium text-gray-900 dark:text-white mb-4">Recent Workouts</h3>
+        <Show when={workouts().length > 0} fallback={
+          <p class="text-sm text-gray-500 dark:text-gray-400">No workouts logged yet. Start by logging your first workout above.</p>
+        }>
+          <div class="space-y-2">
+            <For each={workouts()}>
+              {(w) => (
+                <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-gray-800/50">
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2">
+                      <span class="text-sm font-medium text-gray-900 dark:text-white truncate">{w.name}</span>
+                      <span class="text-xs text-gray-400">{w.date}</span>
+                    </div>
+                    <div class="flex items-center gap-3 mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      <span>{w.duration_minutes} min</span>
+                      <Show when={w.calories_burned != null}>
+                        <span>{w.calories_burned} cal</span>
+                      </Show>
+                      <Show when={w.notes}>
+                        <span class="truncate">{w.notes}</span>
+                      </Show>
+                    </div>
+                  </div>
+                  <button
+                    class="ml-2 p-1.5 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                    onClick={() => handleDelete(w.id)}
+                    title="Delete workout"
+                  >
+                    <Icon name="trash" class="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+            </For>
+          </div>
+        </Show>
+      </div>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Nutrition Tab
+// ---------------------------------------------------------------------------
+
+const MEAL_TYPES = ['Breakfast', 'Lunch', 'Dinner', 'Snack'] as const;
+
+const NutritionTab: Component = () => {
+  const today = () => new Date().toISOString().slice(0, 10);
+  const [selectedDate, setSelectedDate] = createSignal(today());
+  const [summary, setSummary] = createSignal<NutritionDaySummary | null>(null);
+  const [formOpen, setFormOpen] = createSignal(false);
+  const [nName, setNName] = createSignal('');
+  const [nCalories, setNCalories] = createSignal('');
+  const [nProtein, setNProtein] = createSignal('');
+  const [nCarbs, setNCarbs] = createSignal('');
+  const [nFat, setNFat] = createSignal('');
+  const [nMealType, setNMealType] = createSignal<string>('Lunch');
+  const [saving, setSaving] = createSignal(false);
+  const [msg, setMsg] = createSignal('');
+
+  const loadNutrition = async () => {
+    try {
+      const data = await invoke<NutritionDaySummary>('fitness_nutrition_summary', {
+        date: selectedDate(),
+      });
+      setSummary(data);
+    } catch (e) {
+      console.error('Failed to load nutrition:', e);
+    }
+  };
+
+  onMount(loadNutrition);
+
+  const handleDateChange = (newDate: string) => {
+    setSelectedDate(newDate);
+    loadNutrition();
+  };
+
+  const handleSave = async () => {
+    if (!nName().trim() || !nCalories().trim()) {
+      setMsg('Name and calories are required');
+      return;
+    }
+    setSaving(true);
+    setMsg('');
+    try {
+      await invoke<NutritionResponse>('fitness_log_food', {
+        name: nName().trim(),
+        calories: parseFloat(nCalories()),
+        proteinG: parseFloat(nProtein() || '0'),
+        carbsG: parseFloat(nCarbs() || '0'),
+        fatG: parseFloat(nFat() || '0'),
+        mealType: nMealType(),
+        date: selectedDate(),
+      });
+      setNName(''); setNCalories(''); setNProtein(''); setNCarbs(''); setNFat('');
+      setMsg('Meal logged!');
+      setFormOpen(false);
+      await loadNutrition();
+    } catch (e: any) {
+      setMsg('Error: ' + String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await invoke('fitness_delete_nutrition', { entryId: id });
+      await loadNutrition();
+    } catch (e) {
+      console.error('Failed to delete entry:', e);
+    }
+  };
+
+  const mealsByType = (type: string) =>
+    (summary()?.meals ?? []).filter((m) => m.meal_type === type);
+
+  // Macro bar max = total calories goal rough estimate (2200)
+  const CALORIE_GOAL = 2200;
+
+  return (
+    <div class="space-y-6">
+      {/* Date Picker */}
+      <div class="flex items-center gap-3">
+        <label class="text-sm font-medium text-gray-700 dark:text-gray-300">Date:</label>
+        <input
+          type="date"
+          class="input"
+          value={selectedDate()}
+          onInput={(e) => handleDateChange(e.currentTarget.value)}
+        />
+        <Show when={selectedDate() !== today()}>
+          <button
+            class="text-xs text-minion-600 hover:underline"
+            onClick={() => handleDateChange(today())}
+          >
+            Go to today
+          </button>
+        </Show>
+      </div>
+
+      {/* Daily Summary */}
+      <div class="card p-6">
+        <h3 class="font-medium text-gray-900 dark:text-white mb-4">Daily Summary</h3>
+        <div class="grid grid-cols-4 gap-4 mb-4">
+          <div class="text-center">
+            <p class="text-2xl font-bold text-gray-900 dark:text-white">
+              {Math.round(summary()?.total_calories ?? 0)}
+            </p>
+            <p class="text-xs text-gray-500 dark:text-gray-400">Calories</p>
+          </div>
+          <div class="text-center">
+            <p class="text-2xl font-bold text-blue-600">{Math.round(summary()?.total_protein ?? 0)}g</p>
+            <p class="text-xs text-gray-500 dark:text-gray-400">Protein</p>
+          </div>
+          <div class="text-center">
+            <p class="text-2xl font-bold text-yellow-600">{Math.round(summary()?.total_carbs ?? 0)}g</p>
+            <p class="text-xs text-gray-500 dark:text-gray-400">Carbs</p>
+          </div>
+          <div class="text-center">
+            <p class="text-2xl font-bold text-red-500">{Math.round(summary()?.total_fat ?? 0)}g</p>
+            <p class="text-xs text-gray-500 dark:text-gray-400">Fat</p>
+          </div>
+        </div>
+        {/* Calorie progress bar */}
+        <div>
+          <div class="flex justify-between text-xs text-gray-500 mb-1">
+            <span>{Math.round(summary()?.total_calories ?? 0)} cal</span>
+            <span>{CALORIE_GOAL} cal goal</span>
+          </div>
+          <MiniBar value={summary()?.total_calories ?? 0} max={CALORIE_GOAL} colorClass="bg-green-500" />
+        </div>
+        {/* Macro bars */}
+        <div class="grid grid-cols-3 gap-4 mt-4">
+          <div>
+            <div class="flex justify-between text-xs text-gray-500 mb-1">
+              <span>Protein</span>
+              <span>{Math.round(summary()?.total_protein ?? 0)}g</span>
+            </div>
+            <MiniBar value={summary()?.total_protein ?? 0} max={150} colorClass="bg-blue-500" />
+          </div>
+          <div>
+            <div class="flex justify-between text-xs text-gray-500 mb-1">
+              <span>Carbs</span>
+              <span>{Math.round(summary()?.total_carbs ?? 0)}g</span>
+            </div>
+            <MiniBar value={summary()?.total_carbs ?? 0} max={275} colorClass="bg-yellow-500" />
+          </div>
+          <div>
+            <div class="flex justify-between text-xs text-gray-500 mb-1">
+              <span>Fat</span>
+              <span>{Math.round(summary()?.total_fat ?? 0)}g</span>
+            </div>
+            <MiniBar value={summary()?.total_fat ?? 0} max={75} colorClass="bg-red-500" />
+          </div>
+        </div>
+      </div>
+
+      {/* Log Meal button + form */}
+      <div>
+        <button
+          class="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-minion-600 text-white hover:bg-minion-700 transition-colors"
+          onClick={() => { setFormOpen(!formOpen()); setMsg(''); }}
+        >
+          <Icon name="plus" class="w-4 h-4" />
+          {formOpen() ? 'Cancel' : 'Log Meal'}
+        </button>
+
+        <Show when={formOpen()}>
+          <div class="card p-5 mt-3">
+            <h3 class="font-medium text-gray-900 dark:text-white mb-4">Log Meal</h3>
+            <div class="grid grid-cols-2 sm:grid-cols-3 gap-4">
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Food Name *</label>
+                <input type="text" class="input w-full" value={nName()}
+                  onInput={(e) => setNName(e.currentTarget.value)} placeholder="e.g. Chicken Breast" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Calories *</label>
+                <input type="number" class="input w-full" value={nCalories()}
+                  onInput={(e) => setNCalories(e.currentTarget.value)} placeholder="e.g. 250" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Meal Type</label>
+                <select class="input w-full" value={nMealType()}
+                  onChange={(e) => setNMealType(e.currentTarget.value)}>
+                  <For each={[...MEAL_TYPES]}>{(t) => <option value={t}>{t}</option>}</For>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Protein (g)</label>
+                <input type="number" step="0.1" class="input w-full" value={nProtein()}
+                  onInput={(e) => setNProtein(e.currentTarget.value)} placeholder="0" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Carbs (g)</label>
+                <input type="number" step="0.1" class="input w-full" value={nCarbs()}
+                  onInput={(e) => setNCarbs(e.currentTarget.value)} placeholder="0" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-500 mb-1">Fat (g)</label>
+                <input type="number" step="0.1" class="input w-full" value={nFat()}
+                  onInput={(e) => setNFat(e.currentTarget.value)} placeholder="0" />
+              </div>
+            </div>
+            <div class="flex items-center gap-3 mt-4">
+              <button class="btn btn-primary" disabled={saving()} onClick={handleSave}>
+                {saving() ? 'Saving...' : 'Save Meal'}
+              </button>
+              <Show when={msg()}>
+                <span class="text-sm" classList={{
+                  'text-green-500': msg().startsWith('Meal'),
+                  'text-red-500': msg().startsWith('Error') || msg().startsWith('Name'),
+                }}>{msg()}</span>
+              </Show>
+            </div>
+          </div>
+        </Show>
+      </div>
+
+      {/* Meals grouped by type */}
+      <For each={[...MEAL_TYPES]}>
+        {(type) => (
+          <Show when={mealsByType(type).length > 0}>
+            <div class="card p-4">
+              <h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">{type}</h4>
+              <div class="space-y-2">
+                <For each={mealsByType(type)}>
+                  {(meal) => (
+                    <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-gray-800/50">
+                      <div class="flex-1 min-w-0">
+                        <span class="text-sm font-medium text-gray-900 dark:text-white">{meal.name}</span>
+                        <div class="flex items-center gap-3 mt-1 text-xs text-gray-500 dark:text-gray-400">
+                          <span>{meal.calories} cal</span>
+                          <span>P: {meal.protein_g}g</span>
+                          <span>C: {meal.carbs_g}g</span>
+                          <span>F: {meal.fat_g}g</span>
+                        </div>
+                      </div>
+                      <button
+                        class="ml-2 p-1.5 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                        onClick={() => handleDelete(meal.id)}
+                        title="Delete entry"
+                      >
+                        <Icon name="trash" class="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </div>
+          </Show>
+        )}
+      </For>
+
+      {/* Empty state */}
+      <Show when={(summary()?.meals ?? []).length === 0}>
+        <div class="card p-6 text-center">
+          <p class="text-sm text-gray-500 dark:text-gray-400">
+            No meals logged for {selectedDate()}. Start tracking by logging a meal above.
+          </p>
+        </div>
+      </Show>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
 // Google Fit Onboarding
 // ---------------------------------------------------------------------------
 
@@ -1332,6 +1817,8 @@ const GoogleFitOnboarding: Component<{ onConnect: () => void }> = (props) => {
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
+  { id: 'workouts', label: 'Workouts' },
+  { id: 'nutrition', label: 'Nutrition' },
   { id: 'sleep', label: 'Sleep' },
   { id: 'heart', label: 'Heart' },
   { id: 'activity', label: 'Activity' },
@@ -1653,6 +2140,12 @@ const Fitness: Component = () => {
         <Switch>
           <Match when={activeTab() === 'dashboard'}>
             <DashboardTab dashboard={dashboard} metrics={metrics} hasRealData={hasRealData} />
+          </Match>
+          <Match when={activeTab() === 'workouts'}>
+            <WorkoutsTab />
+          </Match>
+          <Match when={activeTab() === 'nutrition'}>
+            <NutritionTab />
           </Match>
           <Match when={activeTab() === 'sleep'}>
             <SleepTab />

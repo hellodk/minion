@@ -101,6 +101,14 @@ pub fn run() {
             commands::fitness_log_metric,
             commands::fitness_get_metrics,
             commands::fitness_get_dashboard,
+            // Fitness workout & nutrition commands
+            commands::fitness_log_workout,
+            commands::fitness_list_workouts,
+            commands::fitness_delete_workout,
+            commands::fitness_log_food,
+            commands::fitness_list_nutrition,
+            commands::fitness_nutrition_summary,
+            commands::fitness_delete_nutrition,
             // Reader persistence commands
             commands::reader_import_book,
             commands::reader_get_library,
@@ -136,6 +144,22 @@ pub fn run() {
             commands::calendar_delete_event,
             commands::calendar_sync_google,
             commands::calendar_open_outlook_auth,
+            // Media Intelligence commands
+            commands::media_import_video,
+            commands::media_list_projects,
+            commands::media_get_project,
+            commands::media_update_project,
+            commands::media_delete_project,
+            commands::media_open_video,
+            commands::media_get_metadata,
+            // Blog Engine commands
+            commands::blog_create_post,
+            commands::blog_list_posts,
+            commands::blog_get_post,
+            commands::blog_update_post,
+            commands::blog_delete_post,
+            commands::blog_analyze_seo,
+            commands::blog_generate_slug,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
