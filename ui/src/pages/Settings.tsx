@@ -252,21 +252,55 @@ const Settings: Component = () => {
             </span>
           </div>
 
-          {/* Connect button */}
+          {/* Client ID + Connect */}
           <Show when={!gfitConnected()}>
-            <button
-              class="btn btn-primary w-full"
-              onClick={async () => {
-                try {
-                  await invoke('gfit_open_auth');
-                } catch (e: any) {
-                  setGfitMessage('Failed to open auth: ' + String(e));
-                  setGfitStatus('error');
-                }
-              }}
-            >
-              Connect Google Fit
-            </button>
+            <div class="space-y-3">
+              <div>
+                <label class="block text-sm font-medium mb-1">OAuth Client ID</label>
+                <input
+                  type="text"
+                  class="input w-full text-sm"
+                  placeholder="your-client-id.apps.googleusercontent.com"
+                  value={gfitToken()}
+                  onInput={(e) => setGfitToken(e.currentTarget.value)}
+                />
+                <p class="text-xs text-gray-400 mt-1">
+                  Get one free: Google Cloud Console &gt; APIs &gt; Credentials &gt; Create OAuth Client ID (Desktop app). Enable Fitness API.
+                </p>
+              </div>
+              <div class="flex gap-2">
+                <button
+                  class="btn btn-secondary flex-1"
+                  disabled={!gfitToken().trim()}
+                  onClick={async () => {
+                    try {
+                      await invoke('gfit_save_client_id', { clientId: gfitToken() });
+                      setGfitMessage('Client ID saved.');
+                      setGfitStatus('success');
+                    } catch (e: any) {
+                      setGfitMessage('Failed: ' + String(e));
+                      setGfitStatus('error');
+                    }
+                  }}
+                >
+                  Save Client ID
+                </button>
+                <button
+                  class="btn btn-primary flex-1"
+                  onClick={async () => {
+                    try {
+                      await invoke('gfit_open_auth');
+                      setGfitMessage('Complete login in the MINION window, then paste the auth code below.');
+                    } catch (e: any) {
+                      setGfitMessage(String(e));
+                      setGfitStatus('error');
+                    }
+                  }}
+                >
+                  Connect Google Fit
+                </button>
+              </div>
+            </div>
           </Show>
 
           {/* Token input */}

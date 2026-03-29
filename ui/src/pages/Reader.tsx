@@ -133,7 +133,6 @@ const Reader: Component = () => {
   const [oreillyConnected, setOreillyConnected] = createSignal(false);
   const [oreillyConnecting, setOreillyConnecting] = createSignal(false);
   const [oreillyStatus, setOreillyStatus] = createSignal('');
-  const [showOreillyBrowser, setShowOreillyBrowser] = createSignal(false);
 
   // Loading metadata (shown while full content loads)
   const [loadingBookMeta, setLoadingBookMeta] = createSignal<{ title: string; author: string } | null>(null);
@@ -1699,11 +1698,22 @@ const Reader: Component = () => {
                         </Show>
                       </button>
 
-                      {/* Option 2: Sign in with SSO (inline browser) */}
+                      {/* Option 2: Sign in with SSO via MINION browser window */}
                       <button
                         class="btn w-full flex items-center gap-3 p-4 bg-gray-50 dark:bg-gray-800 border-2 border-gray-200 dark:border-gray-700 hover:border-minion-400 dark:hover:border-minion-500 rounded-xl transition-colors text-left"
                         disabled={oreillyConnecting()}
-                        onClick={() => setShowOreillyBrowser(true)}
+                        onClick={async () => {
+                          setOreillyConnecting(true);
+                          setOreillyStatus('Opening O\'Reilly login in MINION...');
+                          try {
+                            await invoke('oreilly_open_browser');
+                            setOreillyStatus('Complete the login in the MINION browser window. After SSO login, close that window and click "Use Chrome Session" above.');
+                          } catch (e) {
+                            setOreillyStatus(`Failed: ${e}`);
+                          } finally {
+                            setOreillyConnecting(false);
+                          }
+                        }}
                       >
                         <div class="w-10 h-10 rounded-lg bg-red-100 dark:bg-red-900/30 flex items-center justify-center flex-shrink-0">
                           <svg class="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1713,9 +1723,12 @@ const Reader: Component = () => {
                         <div class="flex-1">
                           <p class="font-medium text-sm">Sign in with SSO (ACM/Institutional)</p>
                           <p class="text-xs text-gray-500 dark:text-gray-400">
-                            Opens O'Reilly login here. Follows all SSO redirects within MINION.
+                            Opens O'Reilly login in a MINION browser window with full SSO redirect support.
                           </p>
                         </div>
+                        <Show when={oreillyConnecting()}>
+                          <div class="w-5 h-5 rounded-full border-2 border-minion-200 border-t-minion-500" style={{ animation: 'spin 1s linear infinite' }} />
+                        </Show>
                       </button>
 
                       {/* Option 3: Manual email/password */}
@@ -1841,56 +1854,8 @@ const Reader: Component = () => {
                   </div>
                 </div>
 
-                {/* Inline O'Reilly browser */}
-                <Show when={showOreillyBrowser()}>
-                  <div class="card mt-4 overflow-hidden" style={{ height: '600px' }}>
-                    <div class="flex items-center justify-between px-4 py-2 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-                      <div class="flex items-center gap-2">
-                        <div class="w-3 h-3 rounded-full bg-red-500" />
-                        <span class="text-xs font-medium text-gray-600 dark:text-gray-300">O'Reilly Learning</span>
-                      </div>
-                      <div class="flex items-center gap-2">
-                        <button
-                          class="text-xs px-2 py-1 rounded bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300"
-                          onClick={async () => {
-                            // After SSO login, try to capture Chrome cookies
-                            setOreillyConnecting(true);
-                            try {
-                              const result = await invoke<{ success: boolean; message: string }>('oreilly_connect_chrome');
-                              if (result.success) {
-                                setOreillyConnected(true);
-                                setOreillyStatus('Connected!');
-                                setShowOreillyBrowser(false);
-                              } else {
-                                setOreillyStatus('Login detected. You can now browse O\'Reilly.');
-                              }
-                            } catch (e) {
-                              setOreillyStatus(`${e}`);
-                            } finally {
-                              setOreillyConnecting(false);
-                            }
-                          }}
-                        >
-                          I'm logged in
-                        </button>
-                        <button
-                          class="text-xs px-2 py-1 rounded bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300"
-                          onClick={() => setShowOreillyBrowser(false)}
-                        >
-                          Close
-                        </button>
-                      </div>
-                    </div>
-                    <iframe
-                      src="https://learning.oreilly.com/member/login/"
-                      style={{ width: '100%', height: 'calc(100% - 40px)', border: 'none' }}
-                      title="O'Reilly Learning"
-                    />
-                  </div>
-                </Show>
-
                 {/* Downloaded books placeholder */}
-                <Show when={!showOreillyBrowser()}>
+                <Show when={true}>
                   <div class="card p-6 mt-4">
                     <h4 class="font-medium mb-3">Downloaded Books</h4>
                     <div class="text-center py-8">

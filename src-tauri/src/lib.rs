@@ -136,6 +136,7 @@ pub fn run() {
             commands::gfit_open_auth,
             commands::gfit_sync,
             commands::gfit_save_token,
+            commands::gfit_save_client_id,
             commands::gfit_check_connected,
             commands::gfit_disconnect,
             // Calendar commands

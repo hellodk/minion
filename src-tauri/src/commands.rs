@@ -1340,14 +1340,27 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
         return Err(format!("File does not exist: {}", path));
     }
 
-    let ext = book_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let ext = book_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
 
-    let format =
-        BookFormat::from_extension(ext).ok_or_else(|| format!("Unsupported format: {}", ext))?;
+    let format = BookFormat::from_extension(&ext)
+        .ok_or_else(|| format!("Unsupported format: {}", ext))?;
+
+    tracing::info!("Opening book: {} (format: {:?})", path, format);
 
     match format {
         BookFormat::Epub => {
-            let content = parse_epub(&book_path).map_err(|e| e.to_string())?;
+            // Run EPUB parsing on blocking thread (heavy I/O for image inlining)
+            let bp = book_path.clone();
+            let content = tokio::task::spawn_blocking(move || parse_epub(&bp))
+                .await
+                .map_err(|e| format!("EPUB parse task failed: {}", e))?
+                .map_err(|e| format!("EPUB parse error: {}", e))?;
+
+            tracing::info!("Parsed EPUB: {} chapters", content.chapters.len());
 
             // Get metadata
             let doc = epub::doc::EpubDoc::new(&book_path).map_err(|e| e.to_string())?;
@@ -4066,24 +4079,47 @@ pub async fn ai_analyze_health(
 // ============================================================================
 
 #[tauri::command]
-pub async fn gfit_open_auth(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn gfit_open_auth(
+    app: tauri::AppHandle,
+    state: State<'_, AppStateHandle>,
+) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-    let auth_url = "https://accounts.google.com/o/oauth2/v2/auth?\
+    // Read client_id from config
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let client_id: String = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'gfit_client_id'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            "Google Fit client ID not configured. Go to Settings > Google Fit and enter your OAuth Client ID. \
+             Get one free at console.cloud.google.com > APIs > Credentials > OAuth 2.0 Client ID (Desktop app)."
+                .to_string()
+        })?;
+    drop(st);
+
+    let auth_url = format!(
+        "https://accounts.google.com/o/oauth2/v2/auth?\
+        client_id={}&\
         scope=https://www.googleapis.com/auth/fitness.activity.read+\
         https://www.googleapis.com/auth/fitness.body.read+\
         https://www.googleapis.com/auth/fitness.sleep.read+\
         https://www.googleapis.com/auth/fitness.heart_rate.read&\
         response_type=code&\
         access_type=offline&\
-        redirect_uri=urn:ietf:wg:oauth:2.0:oob";
+        redirect_uri=urn:ietf:wg:oauth:2.0:oob",
+        client_id
+    );
 
     WebviewWindowBuilder::new(
         &app,
         "google-fit-auth",
         WebviewUrl::External(auth_url.parse().unwrap()),
     )
-    .title("Google Fit - Sign In")
+    .title("MINION - Google Fit Sign In")
     .inner_size(500.0, 700.0)
     .center()
     .build()
@@ -4149,6 +4185,21 @@ pub async fn gfit_save_token(
     conn.execute(
         "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_access_token', ?1)",
         rusqlite::params![token],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn gfit_save_client_id(
+    state: State<'_, AppStateHandle>,
+    client_id: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_client_id', ?1)",
+        rusqlite::params![client_id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
