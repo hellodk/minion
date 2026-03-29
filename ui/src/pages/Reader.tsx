@@ -55,6 +55,7 @@ interface BookContent {
   toc: TocEntry[];
   file_path?: string;
   format: string;
+  cover_base64?: string;
 }
 
 type ReadingMode = 'light' | 'dark' | 'sepia';
@@ -74,6 +75,18 @@ const Reader: Component = () => {
   const [libraryBooks, setLibraryBooks] = createSignal<LibraryBook[]>([]);
   const [collections, setCollections] = createSignal<Collection[]>([]);
   const [libraryTab, setLibraryTab] = createSignal<LibraryTab>('all');
+  const [bookSearch, setBookSearch] = createSignal('');
+
+  const filteredBooks = () => {
+    const q = bookSearch().toLowerCase().trim();
+    if (!q) return libraryBooks();
+    return libraryBooks().filter(b =>
+      (b.title || '').toLowerCase().includes(q) ||
+      (b.authors || '').toLowerCase().includes(q) ||
+      (b.file_path || '').toLowerCase().includes(q) ||
+      (b.format || '').toLowerCase().includes(q)
+    );
+  };
 
   // Old-style file browsing (kept for "Open a Book" and "Browse Folder")
   const [bookPath, setBookPath] = createSignal('');
@@ -120,6 +133,7 @@ const Reader: Component = () => {
   const [oreillyConnected, setOreillyConnected] = createSignal(false);
   const [oreillyConnecting, setOreillyConnecting] = createSignal(false);
   const [oreillyStatus, setOreillyStatus] = createSignal('');
+  const [showOreillyBrowser, setShowOreillyBrowser] = createSignal(false);
 
   // Loading metadata (shown while full content loads)
   const [loadingBookMeta, setLoadingBookMeta] = createSignal<{ title: string; author: string } | null>(null);
@@ -234,19 +248,11 @@ const Reader: Component = () => {
     if (loading() || bookClosing()) return;
     setLoading(true);
     try {
-      // Phase 1: Quick import for metadata
+      // Import book to DB for metadata
       const imported = await invoke<LibraryBook>('reader_import_book', { path });
       setCurrentBookId(imported.id);
-      setLoadingBookMeta({ title: imported.title || 'Untitled', author: imported.authors || '' });
 
-      // Show reader immediately with loading state
-      setCurrentBook(null); // null = still loading content
-      setView('reader');
-      setBookOpening(true);
-      if (cardIndex !== undefined) setOpeningCardIndex(cardIndex);
-      setTimeout(() => { setBookOpening(false); setOpeningCardIndex(null); }, 500);
-
-      // Phase 2: Load content in background
+      // Load full content (single phase - more reliable)
       const content = await invoke<BookContent>('reader_open_book', { path });
       setCurrentBook(content);
 
@@ -254,10 +260,16 @@ const Reader: Component = () => {
       const startChapter = imported.current_position ? parseInt(imported.current_position, 10) || 0 : 0;
       setCurrentChapter(Math.min(startChapter, Math.max(0, content.chapters.length - 1)));
 
+      // Show reader with open animation
+      if (cardIndex !== undefined) setOpeningCardIndex(cardIndex);
+      setBookOpening(true);
+      setView('reader');
+      setTimeout(() => { setBookOpening(false); setOpeningCardIndex(null); }, 500);
+
       loadLibrary();
     } catch (e) {
       console.error('Failed to open book:', e);
-      alert(`Error: ${e}`);
+      alert(`Error opening book: ${e}`);
       setView('library');
     } finally {
       setLoading(false);
@@ -1356,8 +1368,37 @@ const Reader: Component = () => {
                   </div>
                 }
               >
+                {/* Search bar */}
+                <div class="mb-4">
+                  <div class="relative">
+                    <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                    <input
+                      type="text"
+                      class="input w-full pl-10"
+                      placeholder="Search books by title, author, or format..."
+                      value={bookSearch()}
+                      onInput={(e) => setBookSearch(e.currentTarget.value)}
+                    />
+                    <Show when={bookSearch()}>
+                      <button
+                        class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                        onClick={() => setBookSearch('')}
+                      >
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </Show>
+                  </div>
+                  <Show when={bookSearch()}>
+                    <p class="text-xs text-gray-400 mt-1">{filteredBooks().length} of {libraryBooks().length} books</p>
+                  </Show>
+                </div>
+
                 <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-5">
-                  <For each={libraryBooks()}>
+                  <For each={filteredBooks()}>
                     {(book, index) => renderBookCard(book, index())}
                   </For>
                 </div>
@@ -1658,27 +1699,21 @@ const Reader: Component = () => {
                         </Show>
                       </button>
 
-                      {/* Option 2: Open O'Reilly in embedded browser */}
+                      {/* Option 2: Sign in with SSO (inline browser) */}
                       <button
                         class="btn w-full flex items-center gap-3 p-4 bg-gray-50 dark:bg-gray-800 border-2 border-gray-200 dark:border-gray-700 hover:border-minion-400 dark:hover:border-minion-500 rounded-xl transition-colors text-left"
                         disabled={oreillyConnecting()}
-                        onClick={async () => {
-                          try {
-                            await invoke('oreilly_open_browser');
-                          } catch (e) {
-                            setOreillyStatus(`${e}`);
-                          }
-                        }}
+                        onClick={() => setShowOreillyBrowser(true)}
                       >
                         <div class="w-10 h-10 rounded-lg bg-red-100 dark:bg-red-900/30 flex items-center justify-center flex-shrink-0">
                           <svg class="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
                           </svg>
                         </div>
                         <div class="flex-1">
-                          <p class="font-medium text-sm">Open O'Reilly Library</p>
+                          <p class="font-medium text-sm">Sign in with SSO (ACM/Institutional)</p>
                           <p class="text-xs text-gray-500 dark:text-gray-400">
-                            Browse and download books from O'Reilly Learning in MINION.
+                            Opens O'Reilly login here. Follows all SSO redirects within MINION.
                           </p>
                         </div>
                       </button>
@@ -1806,28 +1841,78 @@ const Reader: Component = () => {
                   </div>
                 </div>
 
-                {/* Downloaded books placeholder */}
-                <div class="card p-6 mt-4">
-                  <h4 class="font-medium mb-3">Downloaded Books</h4>
-                  <div class="text-center py-8">
-                    <svg
-                      class="w-10 h-10 mx-auto mb-2 text-gray-300 dark:text-gray-600"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="1.5"
-                        d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10"
-                      />
-                    </svg>
-                    <p class="text-sm text-gray-500 dark:text-gray-400">
-                      No downloaded books yet. Connect your account to get started.
-                    </p>
+                {/* Inline O'Reilly browser */}
+                <Show when={showOreillyBrowser()}>
+                  <div class="card mt-4 overflow-hidden" style={{ height: '600px' }}>
+                    <div class="flex items-center justify-between px-4 py-2 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+                      <div class="flex items-center gap-2">
+                        <div class="w-3 h-3 rounded-full bg-red-500" />
+                        <span class="text-xs font-medium text-gray-600 dark:text-gray-300">O'Reilly Learning</span>
+                      </div>
+                      <div class="flex items-center gap-2">
+                        <button
+                          class="text-xs px-2 py-1 rounded bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300"
+                          onClick={async () => {
+                            // After SSO login, try to capture Chrome cookies
+                            setOreillyConnecting(true);
+                            try {
+                              const result = await invoke<{ success: boolean; message: string }>('oreilly_connect_chrome');
+                              if (result.success) {
+                                setOreillyConnected(true);
+                                setOreillyStatus('Connected!');
+                                setShowOreillyBrowser(false);
+                              } else {
+                                setOreillyStatus('Login detected. You can now browse O\'Reilly.');
+                              }
+                            } catch (e) {
+                              setOreillyStatus(`${e}`);
+                            } finally {
+                              setOreillyConnecting(false);
+                            }
+                          }}
+                        >
+                          I'm logged in
+                        </button>
+                        <button
+                          class="text-xs px-2 py-1 rounded bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300"
+                          onClick={() => setShowOreillyBrowser(false)}
+                        >
+                          Close
+                        </button>
+                      </div>
+                    </div>
+                    <iframe
+                      src="https://learning.oreilly.com/member/login/"
+                      style={{ width: '100%', height: 'calc(100% - 40px)', border: 'none' }}
+                      title="O'Reilly Learning"
+                    />
                   </div>
-                </div>
+                </Show>
+
+                {/* Downloaded books placeholder */}
+                <Show when={!showOreillyBrowser()}>
+                  <div class="card p-6 mt-4">
+                    <h4 class="font-medium mb-3">Downloaded Books</h4>
+                    <div class="text-center py-8">
+                      <svg
+                        class="w-10 h-10 mx-auto mb-2 text-gray-300 dark:text-gray-600"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="1.5"
+                          d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10"
+                        />
+                      </svg>
+                      <p class="text-sm text-gray-500 dark:text-gray-400">
+                        No downloaded books yet. Connect your account to get started.
+                      </p>
+                    </div>
+                  </div>
+                </Show>
               </div>
             </Show>
           </div>

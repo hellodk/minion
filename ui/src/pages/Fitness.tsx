@@ -2113,7 +2113,21 @@ const Fitness: Component = () => {
       </div>
 
       <Show when={!connected()}>
-        <GoogleFitOnboarding onConnect={() => setConnected(true)} />
+        <GoogleFitOnboarding onConnect={async () => {
+          try {
+            await invoke('gfit_open_auth');
+            // After user completes auth in the webview, they need to paste the token
+            // For now, show a message
+            alert('Google Fit login window opened. After logging in, go to Settings > Google Fit to save your token, then come back here.');
+          } catch (e) {
+            alert(`Failed to open Google Fit auth: ${e}. Go to Settings > Google Fit to configure manually.`);
+          }
+          // Check if already connected (in case token was saved previously)
+          try {
+            const connected = await invoke<boolean>('gfit_check_connected');
+            if (connected) setConnected(true);
+          } catch (_) {}
+        }} />
       </Show>
 
       <Show when={connected()}>
