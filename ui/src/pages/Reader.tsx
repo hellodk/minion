@@ -231,7 +231,7 @@ const Reader: Component = () => {
   };
 
   const openBookByPath = async (path: string, cardIndex?: number) => {
-    if (loading() || view() === 'reader') return;
+    if (loading() || bookClosing()) return;
     setLoading(true);
     try {
       // Phase 1: Quick import for metadata
@@ -603,7 +603,7 @@ const Reader: Component = () => {
               </svg>
             }>
               <img
-                src={convertFileSrc(book.cover_path!)}
+                src={book.cover_path!}
                 alt={displayTitle}
                 class="w-full h-full object-cover rounded-lg"
                 onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}

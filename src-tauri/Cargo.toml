@@ -40,6 +40,7 @@ html-escape = "0.2"
 epub = "2.1"
 tauri-plugin-dialog = "2.6.0"
 reqwest = { version = "0.12", features = ["json"] }
+base64ct = "=1.6.0"
 
 [dev-dependencies]
 tempfile = "3.10"

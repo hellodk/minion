@@ -3071,7 +3071,19 @@ pub async fn reader_get_library(
 
     let mut books = Vec::new();
     for row in rows {
-        books.push(row.map_err(|e| e.to_string())?);
+        let mut book = row.map_err(|e| e.to_string())?;
+        // Convert cover file path to base64 data URI for the frontend
+        if let Some(ref path) = book.cover_path {
+            if !path.starts_with("data:") && std::path::Path::new(path).exists() {
+                if let Ok(data) = std::fs::read(path) {
+                    use base64ct::{Base64, Encoding};
+                    let b64 = Base64::encode_string(&data);
+                    let mime = if path.ends_with(".png") { "image/png" } else { "image/jpeg" };
+                    book.cover_path = Some(format!("data:{};base64,{}", mime, b64));
+                }
+            }
+        }
+        books.push(book);
     }
     Ok(books)
 }
