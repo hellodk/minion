@@ -1418,8 +1418,9 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
         }
         BookFormat::Pdf => {
             let bp = book_path.clone();
-            let content = tokio::task::spawn_blocking(move || {
-                // Catch panics from pdf_extract (some PDFs cause index out of bounds)
+
+            // Run PDF parsing with a 15-second timeout to prevent hanging on complex PDFs
+            let parse_handle = tokio::task::spawn_blocking(move || {
                 std::panic::catch_unwind(|| parse_pdf(&bp))
                     .unwrap_or_else(|_| {
                         Ok(minion_reader::formats::BookContent {
@@ -1435,10 +1436,50 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
                             cover_base64: None,
                         })
                     })
-            })
+            });
+
+            let content = match tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                parse_handle,
+            )
             .await
-            .map_err(|e| format!("PDF task failed: {}", e))?
-            .map_err(|e| format!("PDF parse error: {}", e))?;
+            {
+                Ok(Ok(Ok(c))) => c,
+                Ok(Ok(Err(e))) => {
+                    tracing::warn!("PDF parse error: {}", e);
+                    minion_reader::formats::BookContent {
+                        chapters: vec![minion_reader::formats::Chapter {
+                            index: 0,
+                            title: "Content".to_string(),
+                            content: format!(
+                                "<div style='padding:2em;text-align:center;'>\
+                                <p style='font-size:1.2em;margin-bottom:1em;'>PDF parsing failed: {}</p>\
+                                <p style='color:#888;'>Try a different PDF viewer for this file.</p>\
+                                </div>",
+                                html_escape::encode_text(&e.to_string())
+                            ),
+                        }],
+                        toc: vec![],
+                        cover_base64: None,
+                    }
+                }
+                _ => {
+                    tracing::warn!("PDF parsing timed out after 15s");
+                    minion_reader::formats::BookContent {
+                        chapters: vec![minion_reader::formats::Chapter {
+                            index: 0,
+                            title: "Content".to_string(),
+                            content: "<div style='padding:2em;text-align:center;'>\
+                                <p style='font-size:1.2em;margin-bottom:1em;'>PDF parsing timed out.</p>\
+                                <p style='color:#888;'>This PDF is too large or complex for text extraction. \
+                                It may be image-based (scanned pages).</p>\
+                                </div>".to_string(),
+                        }],
+                        toc: vec![],
+                        cover_base64: None,
+                    }
+                }
+            };
 
             tracing::info!("Parsed PDF: {} chapters", content.chapters.len());
 
