@@ -1404,7 +1404,14 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
             })
         }
         BookFormat::Pdf => {
-            let content = parse_pdf(&book_path).map_err(|e| e.to_string())?;
+            let bp = book_path.clone();
+            let content = tokio::task::spawn_blocking(move || parse_pdf(&bp))
+                .await
+                .map_err(|e| format!("PDF parse task failed: {}", e))?
+                .map_err(|e| format!("PDF parse error: {}", e))?;
+
+            tracing::info!("Parsed PDF: {} chapters", content.chapters.len());
+
             let filename = book_path
                 .file_stem()
                 .and_then(|s| s.to_str())
