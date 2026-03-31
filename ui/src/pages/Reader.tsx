@@ -1,5 +1,5 @@
-import { Component, createSignal, onMount, onCleanup, For, Show } from 'solid-js';
-import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+import { Component, createSignal, createEffect, on, onMount, onCleanup, For, Show } from 'solid-js';
+import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 
 // ============================================================================
@@ -54,8 +54,15 @@ interface BookContent {
   chapters: ChapterInfo[];
   toc: TocEntry[];
   file_path?: string;
-  format: string;
+  format: string; // "epub", "pdf", "txt", "md", "html"
   cover_base64?: string;
+}
+
+// Chapter content loaded on demand (for EPUBs)
+interface ChapterContent {
+  index: number;
+  title: string;
+  content: string; // HTML
 }
 
 type ReadingMode = 'light' | 'dark' | 'sepia';
@@ -137,6 +144,21 @@ const Reader: Component = () => {
   // Loading metadata (shown while full content loads)
   const [loadingBookMeta, setLoadingBookMeta] = createSignal<{ title: string; author: string } | null>(null);
 
+  // ---- EPUB lazy chapter loading ----
+  const [chapterCache] = createSignal<Map<number, string>>(new Map());
+  const [chapterLoading, setChapterLoading] = createSignal(false);
+  const [chapterHtml, setChapterHtml] = createSignal('');
+
+  // ---- PDF state (pdf.js) ----
+  const [pdfDoc, setPdfDoc] = createSignal<any>(null);
+  const [pdfCurrentPage, setPdfCurrentPage] = createSignal(1);
+  const [pdfTotalPages, setPdfTotalPages] = createSignal(0);
+  const [pdfZoom, setPdfZoom] = createSignal(1.5);
+  const [pdfLoading, setPdfLoading] = createSignal(false);
+  const [pdfPageInputValue, setPdfPageInputValue] = createSignal('1');
+  let pdfCanvasRef: HTMLCanvasElement | undefined;
+  let pdfContainerRef: HTMLDivElement | undefined;
+
   // ============================================================================
   // Keyboard navigation
   // ============================================================================
@@ -145,12 +167,23 @@ const Reader: Component = () => {
     if (view() !== 'reader' || !currentBook()) return;
     if (pageTransitioning()) return;
 
+    const book = currentBook()!;
+    const isPdf = book.format === 'pdf';
+
     if (e.key === 'ArrowRight') {
       e.preventDefault();
-      nextChapter();
+      if (isPdf) {
+        nextPdfPage();
+      } else {
+        nextChapter();
+      }
     } else if (e.key === 'ArrowLeft') {
       e.preventDefault();
-      prevChapter();
+      if (isPdf) {
+        prevPdfPage();
+      } else {
+        prevChapter();
+      }
     } else if (e.key === 'Escape') {
       e.preventDefault();
       closeBook();
@@ -163,12 +196,16 @@ const Reader: Component = () => {
 
   onMount(async () => {
     document.addEventListener('keydown', handleKeyDown);
-    // Load persistent library and collections from DB
     await Promise.all([loadLibrary(), loadCollections()]);
   });
 
   onCleanup(() => {
     document.removeEventListener('keydown', handleKeyDown);
+    // Clean up pdf.js document
+    const doc = pdfDoc();
+    if (doc) {
+      doc.destroy().catch(() => {});
+    }
   });
 
   // ============================================================================
@@ -190,6 +227,183 @@ const Reader: Component = () => {
       setCollections(cols);
     } catch (e) {
       console.error('Failed to load collections:', e);
+    }
+  };
+
+  // ============================================================================
+  // EPUB lazy chapter loading
+  // ============================================================================
+
+  const loadChapter = async (index: number): Promise<string> => {
+    const cache = chapterCache();
+    if (cache.has(index)) return cache.get(index)!;
+
+    const book = currentBook();
+    if (!book || !book.file_path) return '<p>No content available.</p>';
+
+    setChapterLoading(true);
+    try {
+      const chapter = await invoke<ChapterContent>('reader_get_chapter', {
+        path: book.file_path,
+        chapterIndex: index,
+      });
+      cache.set(index, chapter.content);
+      return chapter.content;
+    } catch (e) {
+      console.error(`Failed to load chapter ${index}:`, e);
+      return `<p style="color:red;">Failed to load chapter: ${e}</p>`;
+    } finally {
+      setChapterLoading(false);
+    }
+  };
+
+  const preloadAdjacentChapters = (index: number) => {
+    const book = currentBook();
+    if (!book) return;
+    if (index + 1 < book.chapters.length) loadChapter(index + 1);
+    if (index - 1 >= 0) loadChapter(index - 1);
+  };
+
+  // When the current chapter changes for an EPUB, load the content
+  createEffect(on(
+    () => [currentChapter(), currentBook()?.format] as const,
+    async ([chapIdx, format]) => {
+      if (format !== 'epub' || !currentBook()) return;
+      const html = await loadChapter(chapIdx);
+      setChapterHtml(html);
+      preloadAdjacentChapters(chapIdx);
+    },
+    { defer: true }
+  ));
+
+  // ============================================================================
+  // PDF rendering with pdf.js
+  // ============================================================================
+
+  const loadPdf = async (filePath: string) => {
+    setPdfLoading(true);
+    try {
+      // Dynamically import pdfjs-dist
+      const pdfjsLib = await import('pdfjs-dist');
+
+      // Set worker source
+      pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+        'pdfjs-dist/build/pdf.worker.mjs',
+        import.meta.url
+      ).toString();
+
+      // Read PDF bytes through Tauri IPC
+      const pdfData = await invoke<number[]>('reader_get_pdf_bytes', { path: filePath });
+      const doc = await pdfjsLib.getDocument({ data: new Uint8Array(pdfData) }).promise;
+
+      setPdfDoc(doc);
+      setPdfTotalPages(doc.numPages);
+
+      // Restore page position
+      const imported = currentBookId();
+      if (imported) {
+        const lib = libraryBooks().find(b => b.id === imported);
+        if (lib?.current_position) {
+          const savedPage = parseInt(lib.current_position, 10);
+          if (savedPage > 0 && savedPage <= doc.numPages) {
+            setPdfCurrentPage(savedPage);
+            setPdfPageInputValue(String(savedPage));
+          }
+        }
+      }
+
+      await renderPdfPage(pdfCurrentPage());
+    } catch (e) {
+      console.error('Failed to load PDF:', e);
+      alert(`Error loading PDF: ${e}`);
+    } finally {
+      setPdfLoading(false);
+    }
+  };
+
+  const renderPdfPage = async (pageNum: number) => {
+    const doc = pdfDoc();
+    if (!doc || !pdfCanvasRef) return;
+
+    try {
+      const page = await doc.getPage(pageNum);
+      const scale = pdfZoom();
+      const viewport = page.getViewport({ scale });
+
+      // Set canvas size accounting for device pixel ratio for crisp rendering
+      const dpr = window.devicePixelRatio || 1;
+      pdfCanvasRef.width = Math.floor(viewport.width * dpr);
+      pdfCanvasRef.height = Math.floor(viewport.height * dpr);
+      pdfCanvasRef.style.width = `${Math.floor(viewport.width)}px`;
+      pdfCanvasRef.style.height = `${Math.floor(viewport.height)}px`;
+
+      const ctx = pdfCanvasRef.getContext('2d')!;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      await page.render({ canvasContext: ctx, viewport }).promise;
+
+      setPdfCurrentPage(pageNum);
+      setPdfPageInputValue(String(pageNum));
+    } catch (e) {
+      console.error('Failed to render PDF page:', e);
+    }
+  };
+
+  // Re-render when zoom changes
+  createEffect(on(
+    () => pdfZoom(),
+    () => {
+      if (pdfDoc()) {
+        renderPdfPage(pdfCurrentPage());
+      }
+    },
+    { defer: true }
+  ));
+
+  const nextPdfPage = () => {
+    if (pdfCurrentPage() >= pdfTotalPages()) return;
+    const next = pdfCurrentPage() + 1;
+    renderPdfPage(next);
+    savePdfProgress(next);
+    // Scroll canvas to top
+    if (pdfContainerRef) pdfContainerRef.scrollTop = 0;
+  };
+
+  const prevPdfPage = () => {
+    if (pdfCurrentPage() <= 1) return;
+    const prev = pdfCurrentPage() - 1;
+    renderPdfPage(prev);
+    savePdfProgress(prev);
+    if (pdfContainerRef) pdfContainerRef.scrollTop = 0;
+  };
+
+  const goToPdfPage = (page: number) => {
+    if (page < 1 || page > pdfTotalPages()) return;
+    renderPdfPage(page);
+    savePdfProgress(page);
+    if (pdfContainerRef) pdfContainerRef.scrollTop = 0;
+  };
+
+  const handlePdfPageInput = (e: KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      const val = parseInt(pdfPageInputValue(), 10);
+      if (!isNaN(val)) goToPdfPage(val);
+    }
+  };
+
+  const savePdfProgress = async (page: number) => {
+    const bookId = currentBookId();
+    if (!bookId) return;
+    const total = pdfTotalPages();
+    const progress = total > 0 ? (page / total) * 100 : 0;
+    try {
+      await invoke('reader_update_progress', {
+        bookId,
+        progress,
+        position: String(page),
+      });
+    } catch (e) {
+      console.error('Failed to save PDF progress:', e);
     }
   };
 
@@ -225,7 +439,6 @@ const Reader: Component = () => {
           const imported = await invoke<LibraryBook[]>('reader_scan_directory', {
             path: selected,
           });
-          // Refresh full library after scan
           await loadLibrary();
           if (imported.length === 0) {
             alert('No supported book files found in that directory.');
@@ -246,24 +459,49 @@ const Reader: Component = () => {
   const openBookByPath = async (path: string, cardIndex?: number) => {
     if (loading() || bookClosing()) return;
     setLoading(true);
+
+    // Clear previous state
+    chapterCache().clear();
+    setChapterHtml('');
+    setPdfDoc(null);
+    setPdfCurrentPage(1);
+    setPdfTotalPages(0);
+    setPdfPageInputValue('1');
+
     try {
       // Import book to DB for metadata
       const imported = await invoke<LibraryBook>('reader_import_book', { path });
       setCurrentBookId(imported.id);
 
-      // Load full content (single phase - more reliable)
+      // Load book structure (metadata + chapter list, no content for EPUBs)
       const content = await invoke<BookContent>('reader_open_book', { path });
       setCurrentBook(content);
 
-      // Restore position
-      const startChapter = imported.current_position ? parseInt(imported.current_position, 10) || 0 : 0;
-      setCurrentChapter(Math.min(startChapter, Math.max(0, content.chapters.length - 1)));
+      if (content.format === 'epub') {
+        // Restore EPUB position
+        const startChapter = imported.current_position
+          ? parseInt(imported.current_position, 10) || 0
+          : 0;
+        setCurrentChapter(Math.min(startChapter, Math.max(0, content.chapters.length - 1)));
+        // The createEffect will load the chapter content
+      } else if (content.format === 'pdf') {
+        // PDF: position is restored inside loadPdf
+        setCurrentChapter(0);
+      } else {
+        // TXT/MD/HTML: content is in chapters[0].content
+        setCurrentChapter(0);
+      }
 
       // Show reader with open animation
       if (cardIndex !== undefined) setOpeningCardIndex(cardIndex);
       setBookOpening(true);
       setView('reader');
       setTimeout(() => { setBookOpening(false); setOpeningCardIndex(null); }, 500);
+
+      // For PDFs, start loading after view transition
+      if (content.format === 'pdf' && content.file_path) {
+        setTimeout(() => loadPdf(content.file_path!), 100);
+      }
 
       loadLibrary();
     } catch (e) {
@@ -289,19 +527,26 @@ const Reader: Component = () => {
     if (bookClosing()) return;
     setBookClosing(true);
     setTimeout(() => {
+      // Clean up PDF doc
+      const doc = pdfDoc();
+      if (doc) {
+        doc.destroy().catch(() => {});
+        setPdfDoc(null);
+      }
       setCurrentBook(null);
       setCurrentBookId(null);
       setLoadingBookMeta(null);
+      setChapterHtml('');
+      chapterCache().clear();
       setView('library');
       setBookClosing(false);
       setShowToc(false);
-      // Refresh library to show updated progress
       loadLibrary();
     }, 350);
   };
 
   // ============================================================================
-  // Chapter navigation with progress persistence
+  // Chapter navigation with progress persistence (EPUB)
   // ============================================================================
 
   const saveProgress = async (chapterIdx: number) => {
@@ -309,7 +554,9 @@ const Reader: Component = () => {
     const book = currentBook();
     if (!bookId || !book) return;
 
-    const progress = ((chapterIdx + 1) / book.chapters.length) * 100;
+    const progress = book.chapters.length > 0
+      ? ((chapterIdx + 1) / book.chapters.length) * 100
+      : 0;
     const position = String(chapterIdx);
 
     try {
@@ -475,7 +722,6 @@ const Reader: Component = () => {
       await invoke('reader_add_to_collection', { collectionId, bookId });
       setAddToCollectionBookId(null);
       await loadCollections();
-      // Refresh expanded collection if it matches
       if (expandedCollection() === collectionId) {
         const books = await invoke<LibraryBook[]>('reader_get_collection_books', { collectionId });
         setCollectionBooks(books);
@@ -502,9 +748,16 @@ const Reader: Component = () => {
   // Derived values
   // ============================================================================
 
+  const isPdf = () => currentBook()?.format === 'pdf';
+  const isEpub = () => currentBook()?.format === 'epub';
+
   const progressPercent = () => {
     const book = currentBook();
-    if (!book || book.chapters.length === 0) return 0;
+    if (!book) return 0;
+    if (isPdf()) {
+      return pdfTotalPages() > 0 ? (pdfCurrentPage() / pdfTotalPages()) * 100 : 0;
+    }
+    if (book.chapters.length === 0) return 0;
     return ((currentChapter() + 1) / book.chapters.length) * 100;
   };
 
@@ -1212,6 +1465,56 @@ const Reader: Component = () => {
         .dark .lib-tab.active {
           background: #0ea5e9;
           color: white;
+        }
+
+        /* PDF canvas container */
+        .pdf-canvas-container {
+          display: flex;
+          justify-content: center;
+          align-items: flex-start;
+          min-height: 100%;
+        }
+
+        .pdf-canvas-container canvas {
+          box-shadow: 0 4px 24px rgba(0, 0, 0, 0.15);
+          border-radius: 2px;
+        }
+
+        /* Chapter loading spinner */
+        @keyframes chapterSpin {
+          to { transform: rotate(360deg); }
+        }
+
+        .chapter-spinner {
+          width: 32px;
+          height: 32px;
+          border: 3px solid rgba(0, 0, 0, 0.1);
+          border-top-color: #0ea5e9;
+          border-radius: 50%;
+          animation: chapterSpin 0.8s linear infinite;
+        }
+
+        /* Zoom controls */
+        .zoom-btn {
+          width: 32px;
+          height: 32px;
+          border-radius: 6px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 16px;
+          font-weight: 700;
+          cursor: pointer;
+          transition: background 0.15s, transform 0.1s;
+          user-select: none;
+        }
+
+        .zoom-btn:hover {
+          transform: scale(1.08);
+        }
+
+        .zoom-btn:active {
+          transform: scale(0.95);
         }
       `}</style>
 
@@ -1966,7 +2269,10 @@ const Reader: Component = () => {
                           {currentBook()!.metadata.authors?.length > 0
                             ? currentBook()!.metadata.authors.join(', ') + ' \u00B7 '
                             : ''}
-                          Chapter {currentChapter() + 1} of {currentBook()!.chapters.length}
+                          {isPdf()
+                            ? `Page ${pdfCurrentPage()} of ${pdfTotalPages()}`
+                            : `Chapter ${currentChapter() + 1} of ${currentBook()!.chapters.length}`
+                          }
                         </>
                       : loadingBookMeta()?.author || 'Loading book content...'}
                   </p>
@@ -2003,68 +2309,103 @@ const Reader: Component = () => {
                   }}
                 />
 
-                {/* Font size controls */}
-                <button
-                  class="p-2 rounded-lg transition-colors"
-                  style={{ color: modeStyles().text }}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLElement).style.background = modeStyles().hoverBg;
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLElement).style.background = 'transparent';
-                  }}
-                  onClick={() => setFontSize(Math.max(12, fontSize() - 2))}
-                  title="Decrease font size"
-                >
-                  <span class="text-sm font-bold">A-</span>
-                </button>
-                <span class="text-sm" style={{ color: modeStyles().mutedText }}>
-                  {fontSize()}px
-                </span>
-                <button
-                  class="p-2 rounded-lg transition-colors"
-                  style={{ color: modeStyles().text }}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLElement).style.background = modeStyles().hoverBg;
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLElement).style.background = 'transparent';
-                  }}
-                  onClick={() => setFontSize(Math.min(28, fontSize() + 2))}
-                  title="Increase font size"
-                >
-                  <span class="text-sm font-bold">A+</span>
-                </button>
+                {/* Font size controls (hide for PDF since we use zoom) */}
+                <Show when={!isPdf()}>
+                  <button
+                    class="p-2 rounded-lg transition-colors"
+                    style={{ color: modeStyles().text }}
+                    onMouseEnter={(e) => {
+                      (e.currentTarget as HTMLElement).style.background = modeStyles().hoverBg;
+                    }}
+                    onMouseLeave={(e) => {
+                      (e.currentTarget as HTMLElement).style.background = 'transparent';
+                    }}
+                    onClick={() => setFontSize(Math.max(12, fontSize() - 2))}
+                    title="Decrease font size"
+                  >
+                    <span class="text-sm font-bold">A-</span>
+                  </button>
+                  <span class="text-sm" style={{ color: modeStyles().mutedText }}>
+                    {fontSize()}px
+                  </span>
+                  <button
+                    class="p-2 rounded-lg transition-colors"
+                    style={{ color: modeStyles().text }}
+                    onMouseEnter={(e) => {
+                      (e.currentTarget as HTMLElement).style.background = modeStyles().hoverBg;
+                    }}
+                    onMouseLeave={(e) => {
+                      (e.currentTarget as HTMLElement).style.background = 'transparent';
+                    }}
+                    onClick={() => setFontSize(Math.min(28, fontSize() + 2))}
+                    title="Increase font size"
+                  >
+                    <span class="text-sm font-bold">A+</span>
+                  </button>
+                </Show>
 
-                {/* TOC toggle */}
-                <button
-                  class="p-2 rounded-lg ml-3 transition-colors"
-                  style={{ color: modeStyles().text }}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLElement).style.background = modeStyles().hoverBg;
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLElement).style.background = 'transparent';
-                  }}
-                  onClick={() => setShowToc(!showToc())}
-                  title="Table of contents"
-                >
-                  <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M4 6h16M4 12h16M4 18h7"
-                    />
-                  </svg>
-                </button>
+                {/* PDF Zoom controls */}
+                <Show when={isPdf()}>
+                  <div class="flex items-center gap-1">
+                    <button
+                      class="zoom-btn"
+                      style={{
+                        background: modeStyles().hoverBg,
+                        color: modeStyles().text,
+                      }}
+                      onClick={() => setPdfZoom(Math.max(0.5, pdfZoom() - 0.25))}
+                      title="Zoom out"
+                    >
+                      -
+                    </button>
+                    <span class="text-xs min-w-[3rem] text-center" style={{ color: modeStyles().mutedText }}>
+                      {Math.round(pdfZoom() * 100)}%
+                    </span>
+                    <button
+                      class="zoom-btn"
+                      style={{
+                        background: modeStyles().hoverBg,
+                        color: modeStyles().text,
+                      }}
+                      onClick={() => setPdfZoom(Math.min(4, pdfZoom() + 0.25))}
+                      title="Zoom in"
+                    >
+                      +
+                    </button>
+                  </div>
+                </Show>
+
+                {/* TOC toggle (hide for PDF) */}
+                <Show when={!isPdf()}>
+                  <button
+                    class="p-2 rounded-lg ml-3 transition-colors"
+                    style={{ color: modeStyles().text }}
+                    onMouseEnter={(e) => {
+                      (e.currentTarget as HTMLElement).style.background = modeStyles().hoverBg;
+                    }}
+                    onMouseLeave={(e) => {
+                      (e.currentTarget as HTMLElement).style.background = 'transparent';
+                    }}
+                    onClick={() => setShowToc(!showToc())}
+                    title="Table of contents"
+                  >
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M4 6h16M4 12h16M4 18h7"
+                      />
+                    </svg>
+                  </button>
+                </Show>
               </div>
             </div>
 
             {/* Content area */}
             <div class="flex-1 flex overflow-hidden" style={{ 'min-height': '0' }}>
-              {/* TOC Sidebar */}
-              <Show when={showToc() && currentBook()}>
+              {/* TOC Sidebar (EPUB / TXT / MD / HTML only) */}
+              <Show when={showToc() && currentBook() && !isPdf()}>
                 <div
                   class="toc-sidebar w-64 border-r overflow-y-auto flex-shrink-0"
                   style={{
@@ -2114,76 +2455,143 @@ const Reader: Component = () => {
                 </div>
               </Show>
 
-              {/* Reading content with page turn animation */}
-              <div
-                id="reader-content-scroll"
-                class="flex-1 overflow-y-auto"
-                style={{
-                  background: modeStyles().contentBg,
-                  color: modeStyles().text,
-                }}
-              >
+              {/* ============================================================ */}
+              {/* PDF Content (canvas-based via pdf.js)                        */}
+              {/* ============================================================ */}
+              <Show when={isPdf()}>
                 <div
-                  class="max-w-3xl mx-auto px-8 py-12"
-                  style={{ 'font-size': `${fontSize()}px` }}
-                  classList={{
-                    'page-exit-left': pageTransitioning() && pageDirection() === 'left',
-                    'page-enter-right': !pageTransitioning() && pageDirection() === 'left',
-                    'page-exit-right': pageTransitioning() && pageDirection() === 'right',
-                    'page-enter-left': !pageTransitioning() && pageDirection() === 'right',
+                  ref={pdfContainerRef}
+                  id="reader-content-scroll"
+                  class="flex-1 overflow-auto"
+                  style={{
+                    background: readingMode() === 'dark' ? '#1a1a2e'
+                      : readingMode() === 'sepia' ? '#f4ecd8'
+                      : '#e5e7eb',
                   }}
                 >
-                  <Show when={currentBook()} fallback={
-                    /* Loading skeleton while book content loads */
-                    <div class="animate-pulse space-y-6 py-4">
-                      <div class="h-8 rounded-md w-3/5" style={{ background: modeStyles().hoverBg }} />
-                      <div class="space-y-3">
-                        <div class="h-4 rounded w-full" style={{ background: modeStyles().hoverBg }} />
-                        <div class="h-4 rounded w-11/12" style={{ background: modeStyles().hoverBg }} />
-                        <div class="h-4 rounded w-4/5" style={{ background: modeStyles().hoverBg }} />
-                        <div class="h-4 rounded w-full" style={{ background: modeStyles().hoverBg }} />
-                        <div class="h-4 rounded w-3/4" style={{ background: modeStyles().hoverBg }} />
-                        <div class="h-4 rounded w-5/6" style={{ background: modeStyles().hoverBg }} />
-                      </div>
-                      <div class="space-y-3 pt-2">
-                        <div class="h-4 rounded w-full" style={{ background: modeStyles().hoverBg }} />
-                        <div class="h-4 rounded w-10/12" style={{ background: modeStyles().hoverBg }} />
-                        <div class="h-4 rounded w-4/5" style={{ background: modeStyles().hoverBg }} />
-                        <div class="h-4 rounded w-2/3" style={{ background: modeStyles().hoverBg }} />
-                      </div>
-                      <p class="text-sm text-center pt-4" style={{ color: modeStyles().mutedText }}>
-                        Loading book content...
+                  <Show when={pdfLoading()}>
+                    <div class="flex flex-col items-center justify-center py-24">
+                      <div class="chapter-spinner mb-4" />
+                      <p class="text-sm" style={{ color: modeStyles().mutedText }}>
+                        Loading PDF...
                       </p>
                     </div>
-                  }>
-                    <Show when={false}>
-                      {/* PDF embed placeholder - convertFileSrc kept for future use */}
-                      <iframe src={convertFileSrc('')} title="pdf" />
-                    </Show>
-                    <Show
-                      when={
-                        currentBook()!.format !== 'pdf' &&
-                        currentBook()!.chapters[currentChapter()]
-                      }
-                    >
-                      <h1
-                        class="text-2xl font-bold mb-8"
+                  </Show>
+                  <Show when={!pdfLoading() && pdfDoc()}>
+                    <div class="pdf-canvas-container py-6 px-4">
+                      <canvas
+                        ref={pdfCanvasRef}
                         style={{
-                          color: modeStyles().chapterTitle,
-                          'letter-spacing': '-0.02em',
+                          'max-width': '100%',
+                          'height': 'auto',
                         }}
-                      >
-                        {currentBook()!.chapters[currentChapter()].title ||
-                          `Chapter ${currentChapter() + 1}`}
-                      </h1>
-                      <div
-                        class={`prose max-w-none ${modeStyles().prose}`}
-                        innerHTML={currentBook()!.chapters[currentChapter()].content}
                       />
-                    </Show>
+                    </div>
+                  </Show>
+                  <Show when={!pdfLoading() && !pdfDoc()}>
+                    <div class="flex flex-col items-center justify-center py-24">
+                      <p class="text-sm" style={{ color: modeStyles().mutedText }}>
+                        Failed to load PDF. The file may be corrupted.
+                      </p>
+                    </div>
                   </Show>
                 </div>
-              </div>
+              </Show>
+
+              {/* ============================================================ */}
+              {/* EPUB / TXT / MD / HTML Content                               */}
+              {/* ============================================================ */}
+              <Show when={!isPdf()}>
+                <div
+                  id="reader-content-scroll"
+                  class="flex-1 overflow-y-auto"
+                  style={{
+                    background: modeStyles().contentBg,
+                    color: modeStyles().text,
+                  }}
+                >
+                  <div
+                    class="max-w-3xl mx-auto px-8 py-12"
+                    style={{ 'font-size': `${fontSize()}px` }}
+                    classList={{
+                      'page-exit-left': pageTransitioning() && pageDirection() === 'left',
+                      'page-enter-right': !pageTransitioning() && pageDirection() === 'left',
+                      'page-exit-right': pageTransitioning() && pageDirection() === 'right',
+                      'page-enter-left': !pageTransitioning() && pageDirection() === 'right',
+                    }}
+                  >
+                    <Show when={currentBook()} fallback={
+                      /* Loading skeleton while book content loads */
+                      <div class="animate-pulse space-y-6 py-4">
+                        <div class="h-8 rounded-md w-3/5" style={{ background: modeStyles().hoverBg }} />
+                        <div class="space-y-3">
+                          <div class="h-4 rounded w-full" style={{ background: modeStyles().hoverBg }} />
+                          <div class="h-4 rounded w-11/12" style={{ background: modeStyles().hoverBg }} />
+                          <div class="h-4 rounded w-4/5" style={{ background: modeStyles().hoverBg }} />
+                          <div class="h-4 rounded w-full" style={{ background: modeStyles().hoverBg }} />
+                          <div class="h-4 rounded w-3/4" style={{ background: modeStyles().hoverBg }} />
+                          <div class="h-4 rounded w-5/6" style={{ background: modeStyles().hoverBg }} />
+                        </div>
+                        <div class="space-y-3 pt-2">
+                          <div class="h-4 rounded w-full" style={{ background: modeStyles().hoverBg }} />
+                          <div class="h-4 rounded w-10/12" style={{ background: modeStyles().hoverBg }} />
+                          <div class="h-4 rounded w-4/5" style={{ background: modeStyles().hoverBg }} />
+                          <div class="h-4 rounded w-2/3" style={{ background: modeStyles().hoverBg }} />
+                        </div>
+                        <p class="text-sm text-center pt-4" style={{ color: modeStyles().mutedText }}>
+                          Loading book content...
+                        </p>
+                      </div>
+                    }>
+                      {/* EPUB content (lazy loaded) */}
+                      <Show when={isEpub()}>
+                        <Show when={chapterLoading() && !chapterHtml()}>
+                          <div class="flex flex-col items-center justify-center py-16">
+                            <div class="chapter-spinner mb-4" />
+                            <p class="text-sm" style={{ color: modeStyles().mutedText }}>
+                              Loading chapter...
+                            </p>
+                          </div>
+                        </Show>
+                        <Show when={chapterHtml()}>
+                          <h1
+                            class="text-2xl font-bold mb-8"
+                            style={{
+                              color: modeStyles().chapterTitle,
+                              'letter-spacing': '-0.02em',
+                            }}
+                          >
+                            {currentBook()!.chapters[currentChapter()]?.title ||
+                              `Chapter ${currentChapter() + 1}`}
+                          </h1>
+                          <div
+                            class={`prose max-w-none ${modeStyles().prose}`}
+                            innerHTML={chapterHtml()}
+                          />
+                        </Show>
+                      </Show>
+
+                      {/* TXT / MD / HTML content (full content in chapters[0]) */}
+                      <Show when={!isEpub() && currentBook()!.chapters[currentChapter()]}>
+                        <h1
+                          class="text-2xl font-bold mb-8"
+                          style={{
+                            color: modeStyles().chapterTitle,
+                            'letter-spacing': '-0.02em',
+                          }}
+                        >
+                          {currentBook()!.chapters[currentChapter()].title ||
+                            `Chapter ${currentChapter() + 1}`}
+                        </h1>
+                        <div
+                          class={`prose max-w-none ${modeStyles().prose}`}
+                          innerHTML={currentBook()!.chapters[currentChapter()].content}
+                        />
+                      </Show>
+                    </Show>
+                  </div>
+                </div>
+              </Show>
             </div>
 
             {/* Navigation footer */}
@@ -2197,74 +2605,154 @@ const Reader: Component = () => {
                   'flex-shrink': '0',
                 }}
               >
-                <button
-                  class="btn nav-btn"
-                  style={
-                    {
-                      background: modeStyles().hoverBg,
-                      color: modeStyles().text,
-                      '--nav-hover-x': '-3px',
-                      opacity: currentChapter() === 0 ? '0.35' : '1',
-                      cursor: currentChapter() === 0 ? 'not-allowed' : 'pointer',
-                    } as any
-                  }
-                  onClick={prevChapter}
-                  disabled={currentChapter() === 0 || pageTransitioning()}
-                >
-                  <span class="flex items-center gap-1.5">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="2"
-                        d="M15 19l-7-7 7-7"
-                      />
-                    </svg>
-                    Previous
-                  </span>
-                </button>
+                {/* PDF navigation */}
+                <Show when={isPdf()}>
+                  <button
+                    class="btn nav-btn"
+                    style={
+                      {
+                        background: modeStyles().hoverBg,
+                        color: modeStyles().text,
+                        '--nav-hover-x': '-3px',
+                        opacity: pdfCurrentPage() <= 1 ? '0.35' : '1',
+                        cursor: pdfCurrentPage() <= 1 ? 'not-allowed' : 'pointer',
+                      } as any
+                    }
+                    onClick={prevPdfPage}
+                    disabled={pdfCurrentPage() <= 1}
+                  >
+                    <span class="flex items-center gap-1.5">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+                      </svg>
+                      Previous
+                    </span>
+                  </button>
 
-                <div class="flex items-center gap-3">
-                  <span class="text-sm" style={{ color: modeStyles().mutedText }}>
-                    {currentChapter() + 1} / {currentBook()!.chapters.length}
-                  </span>
-                  <span class="text-xs" style={{ color: modeStyles().mutedText }}>
-                    ({Math.round(progressPercent())}%)
-                  </span>
-                </div>
+                  <div class="flex items-center gap-3">
+                    <span class="text-sm" style={{ color: modeStyles().mutedText }}>Page</span>
+                    <input
+                      type="text"
+                      class="w-14 text-center text-sm rounded-md border px-1 py-0.5"
+                      style={{
+                        background: modeStyles().hoverBg,
+                        color: modeStyles().text,
+                        'border-color': modeStyles().headerBorder,
+                      }}
+                      value={pdfPageInputValue()}
+                      onInput={(e) => setPdfPageInputValue(e.currentTarget.value)}
+                      onKeyDown={handlePdfPageInput}
+                      onBlur={() => {
+                        const val = parseInt(pdfPageInputValue(), 10);
+                        if (!isNaN(val) && val >= 1 && val <= pdfTotalPages()) {
+                          goToPdfPage(val);
+                        } else {
+                          setPdfPageInputValue(String(pdfCurrentPage()));
+                        }
+                      }}
+                    />
+                    <span class="text-sm" style={{ color: modeStyles().mutedText }}>
+                      of {pdfTotalPages()}
+                    </span>
+                    <span class="text-xs" style={{ color: modeStyles().mutedText }}>
+                      ({Math.round(progressPercent())}%)
+                    </span>
+                  </div>
 
-                <button
-                  class="btn nav-btn"
-                  style={
-                    {
-                      background: modeStyles().hoverBg,
-                      color: modeStyles().text,
-                      '--nav-hover-x': '3px',
-                      opacity:
-                        currentChapter() >= currentBook()!.chapters.length - 1 ? '0.35' : '1',
-                      cursor:
-                        currentChapter() >= currentBook()!.chapters.length - 1
-                          ? 'not-allowed'
-                          : 'pointer',
-                    } as any
-                  }
-                  onClick={nextChapter}
-                  disabled={
-                    currentChapter() >= currentBook()!.chapters.length - 1 || pageTransitioning()
-                  }
-                >
-                  <span class="flex items-center gap-1.5">
-                    Next
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="2"
-                        d="M9 5l7 7-7 7"
-                      />
-                    </svg>
-                  </span>
-                </button>
+                  <button
+                    class="btn nav-btn"
+                    style={
+                      {
+                        background: modeStyles().hoverBg,
+                        color: modeStyles().text,
+                        '--nav-hover-x': '3px',
+                        opacity: pdfCurrentPage() >= pdfTotalPages() ? '0.35' : '1',
+                        cursor: pdfCurrentPage() >= pdfTotalPages() ? 'not-allowed' : 'pointer',
+                      } as any
+                    }
+                    onClick={nextPdfPage}
+                    disabled={pdfCurrentPage() >= pdfTotalPages()}
+                  >
+                    <span class="flex items-center gap-1.5">
+                      Next
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                      </svg>
+                    </span>
+                  </button>
+                </Show>
+
+                {/* EPUB / TXT / MD / HTML navigation */}
+                <Show when={!isPdf()}>
+                  <button
+                    class="btn nav-btn"
+                    style={
+                      {
+                        background: modeStyles().hoverBg,
+                        color: modeStyles().text,
+                        '--nav-hover-x': '-3px',
+                        opacity: currentChapter() === 0 ? '0.35' : '1',
+                        cursor: currentChapter() === 0 ? 'not-allowed' : 'pointer',
+                      } as any
+                    }
+                    onClick={prevChapter}
+                    disabled={currentChapter() === 0 || pageTransitioning()}
+                  >
+                    <span class="flex items-center gap-1.5">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M15 19l-7-7 7-7"
+                        />
+                      </svg>
+                      Previous
+                    </span>
+                  </button>
+
+                  <div class="flex items-center gap-3">
+                    <span class="text-sm" style={{ color: modeStyles().mutedText }}>
+                      {currentChapter() + 1} / {currentBook()!.chapters.length}
+                    </span>
+                    <span class="text-xs" style={{ color: modeStyles().mutedText }}>
+                      ({Math.round(progressPercent())}%)
+                    </span>
+                  </div>
+
+                  <button
+                    class="btn nav-btn"
+                    style={
+                      {
+                        background: modeStyles().hoverBg,
+                        color: modeStyles().text,
+                        '--nav-hover-x': '3px',
+                        opacity:
+                          currentChapter() >= currentBook()!.chapters.length - 1 ? '0.35' : '1',
+                        cursor:
+                          currentChapter() >= currentBook()!.chapters.length - 1
+                            ? 'not-allowed'
+                            : 'pointer',
+                      } as any
+                    }
+                    onClick={nextChapter}
+                    disabled={
+                      currentChapter() >= currentBook()!.chapters.length - 1 || pageTransitioning()
+                    }
+                  >
+                    <span class="flex items-center gap-1.5">
+                      Next
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M9 5l7 7-7 7"
+                        />
+                      </svg>
+                    </span>
+                  </button>
+                </Show>
               </div>
             </Show>
           </div>

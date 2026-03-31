@@ -3,8 +3,8 @@
 use crate::state::{AppState, ScanCache, ScanStatus, ScanTask, WatchedDirectory};
 use chrono::Utc;
 use minion_files::{AnalyticsCalculator, DuplicateFinder, ScanConfig, Scanner};
-use minion_reader::formats::{parse_epub, parse_pdf};
 use minion_reader::BookFormat;
+use std::path::Path;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,6 +13,34 @@ use tauri::State;
 use tokio::sync::RwLock;
 
 type AppStateHandle = Arc<RwLock<AppState>>;
+
+// #region agent log
+fn __dbg_write(
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data: serde_json::Value,
+    run_id: &str,
+) {
+    let payload = serde_json::json!({
+        "sessionId": "84ea50",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": chrono::Utc::now().timestamp_millis()
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/home/dk/Documents/git/minion/.cursor/debug-84ea50.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", payload.to_string());
+    }
+}
+// #endregion
 
 // ============================================================================
 // Response types
@@ -1335,7 +1363,6 @@ pub struct BookMetadataInfo {
 #[tauri::command]
 pub async fn reader_open_book(path: String) -> Result<BookContentResponse, String> {
     let book_path = PathBuf::from(&path);
-
     if !book_path.exists() {
         return Err(format!("File does not exist: {}", path));
     }
@@ -1353,151 +1380,100 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
 
     match format {
         BookFormat::Epub => {
-            // Run EPUB parsing on blocking thread (heavy I/O for image inlining)
+            // Parse metadata and chapter list only - NO content loading.
+            // Content is loaded on demand via reader_get_chapter.
             let bp = book_path.clone();
-            let content = tokio::task::spawn_blocking(move || {
-                std::panic::catch_unwind(|| parse_epub(&bp))
-                    .unwrap_or_else(|_| {
-                        Ok(minion_reader::formats::BookContent {
-                            chapters: vec![minion_reader::formats::Chapter {
-                                index: 0,
-                                title: "Content".to_string(),
-                                content: "<p>This EPUB could not be parsed. The file may be corrupted.</p>".to_string(),
-                            }],
-                            toc: vec![],
-                            cover_base64: None,
+            let result = tokio::task::spawn_blocking(move || {
+                std::panic::catch_unwind(|| {
+                    let mut doc =
+                        epub::doc::EpubDoc::new(&bp).map_err(|e| e.to_string())?;
+
+                    let title = doc
+                        .mdata("title")
+                        .map(|m| m.value.clone())
+                        .unwrap_or_else(|| "Untitled".to_string());
+                    let authors = doc
+                        .mdata("creator")
+                        .map(|m| vec![m.value.clone()])
+                        .unwrap_or_default();
+                    let publisher = doc.mdata("publisher").map(|m| m.value.clone());
+                    let language = doc.mdata("language").map(|m| m.value.clone());
+                    let description =
+                        doc.mdata("description").map(|m| m.value.clone());
+
+                    // Extract cover image
+                    let cover_base64 = doc.get_cover().map(|(data, mime)| {
+                        use base64ct::{Base64, Encoding};
+                        let b64 = Base64::encode_string(&data);
+                        let mime_type = if mime.is_empty() {
+                            "image/jpeg".to_string()
+                        } else {
+                            mime
+                        };
+                        format!("data:{};base64,{}", mime_type, b64)
+                    });
+
+                    // Build chapter list (titles only, no content)
+                    let num_chapters = doc.get_num_chapters();
+                    let mut chapters = Vec::with_capacity(num_chapters);
+
+                    for i in 0..num_chapters {
+                        doc.set_current_chapter(i);
+                        let chapter_title = doc
+                            .get_current_id()
+                            .unwrap_or_else(|| format!("Chapter {}", i + 1));
+                        chapters.push(ChapterInfo {
+                            index: i,
+                            title: chapter_title,
+                            content: String::new(), // Loaded on demand
+                        });
+                    }
+
+                    // Build TOC from epub navigation
+                    let toc: Vec<TocEntryInfo> = doc
+                        .toc
+                        .iter()
+                        .map(|e| TocEntryInfo {
+                            title: e.label.clone(),
+                            href: e.content.to_string_lossy().to_string(),
                         })
+                        .collect();
+
+                    Ok::<_, String>(BookContentResponse {
+                        metadata: BookMetadataInfo {
+                            title,
+                            authors,
+                            publisher,
+                            language,
+                            description,
+                        },
+                        chapters,
+                        toc,
+                        file_path: Some(bp.to_string_lossy().to_string()),
+                        format: "epub".to_string(),
+                        cover_base64,
                     })
+                })
+                .unwrap_or_else(|_| Err("EPUB parsing panicked".to_string()))
             })
             .await
-            .map_err(|e| format!("EPUB task failed: {}", e))?
-            .map_err(|e| format!("EPUB parse error: {}", e))?;
+            .map_err(|e| e.to_string())??;
 
-            tracing::info!("Parsed EPUB: {} chapters", content.chapters.len());
-
-            // Get metadata
-            let doc = epub::doc::EpubDoc::new(&book_path).map_err(|e| e.to_string())?;
-            let get_str =
-                |name: &str| -> Option<String> { doc.mdata(name).map(|m| m.value.clone()) };
-
-            let metadata = BookMetadataInfo {
-                title: get_str("title").unwrap_or_else(|| "Unknown".to_string()),
-                authors: get_str("creator").map(|a| vec![a]).unwrap_or_default(),
-                publisher: get_str("publisher"),
-                language: get_str("language"),
-                description: get_str("description"),
-            };
-
-            let chapters: Vec<ChapterInfo> = content
-                .chapters
-                .iter()
-                .map(|c| ChapterInfo {
-                    index: c.index,
-                    title: c.title.clone(),
-                    content: c.content.clone(),
-                })
-                .collect();
-
-            let toc: Vec<TocEntryInfo> = content
-                .toc
-                .iter()
-                .map(|t| TocEntryInfo {
-                    title: t.title.clone(),
-                    href: t.href.clone(),
-                })
-                .collect();
-
-            Ok(BookContentResponse {
-                metadata,
-                chapters,
-                toc,
-                file_path: Some(path.clone()),
-                format: "epub".to_string(),
-                cover_base64: content.cover_base64,
-            })
+            tracing::info!(
+                "Opened EPUB: {} chapters (metadata only)",
+                result.chapters.len()
+            );
+            Ok(result)
         }
         BookFormat::Pdf => {
-            let bp = book_path.clone();
-
-            // Run PDF parsing with a 15-second timeout to prevent hanging on complex PDFs
-            let parse_handle = tokio::task::spawn_blocking(move || {
-                std::panic::catch_unwind(|| parse_pdf(&bp))
-                    .unwrap_or_else(|_| {
-                        Ok(minion_reader::formats::BookContent {
-                            chapters: vec![minion_reader::formats::Chapter {
-                                index: 0,
-                                title: "Content".to_string(),
-                                content: "<div style='padding:2em;text-align:center;'>\
-                                    <p style='font-size:1.2em;margin-bottom:1em;'>This PDF could not be parsed for text extraction.</p>\
-                                    <p style='color:#888;'>The file may be image-based (scanned) or use an unsupported encoding.</p>\
-                                    </div>".to_string(),
-                            }],
-                            toc: vec![],
-                            cover_base64: None,
-                        })
-                    })
-            });
-
-            let content = match tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                parse_handle,
-            )
-            .await
-            {
-                Ok(Ok(Ok(c))) => c,
-                Ok(Ok(Err(e))) => {
-                    tracing::warn!("PDF parse error: {}", e);
-                    minion_reader::formats::BookContent {
-                        chapters: vec![minion_reader::formats::Chapter {
-                            index: 0,
-                            title: "Content".to_string(),
-                            content: format!(
-                                "<div style='padding:2em;text-align:center;'>\
-                                <p style='font-size:1.2em;margin-bottom:1em;'>PDF parsing failed: {}</p>\
-                                <p style='color:#888;'>Try a different PDF viewer for this file.</p>\
-                                </div>",
-                                html_escape::encode_text(&e.to_string())
-                            ),
-                        }],
-                        toc: vec![],
-                        cover_base64: None,
-                    }
-                }
-                _ => {
-                    tracing::warn!("PDF parsing timed out after 15s");
-                    minion_reader::formats::BookContent {
-                        chapters: vec![minion_reader::formats::Chapter {
-                            index: 0,
-                            title: "Content".to_string(),
-                            content: "<div style='padding:2em;text-align:center;'>\
-                                <p style='font-size:1.2em;margin-bottom:1em;'>PDF parsing timed out.</p>\
-                                <p style='color:#888;'>This PDF is too large or complex for text extraction. \
-                                It may be image-based (scanned pages).</p>\
-                                </div>".to_string(),
-                        }],
-                        toc: vec![],
-                        cover_base64: None,
-                    }
-                }
-            };
-
-            tracing::info!("Parsed PDF: {} chapters", content.chapters.len());
-
+            // For PDFs, just return metadata - pdf.js renders on frontend
             let filename = book_path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("Unknown")
                 .to_string();
 
-            let chapters: Vec<ChapterInfo> = content
-                .chapters
-                .iter()
-                .map(|c| ChapterInfo {
-                    index: c.index,
-                    title: c.title.clone(),
-                    content: c.content.clone(),
-                })
-                .collect();
+            tracing::info!("Opening PDF for pdf.js rendering: {}", path);
 
             Ok(BookContentResponse {
                 metadata: BookMetadataInfo {
@@ -1507,53 +1483,40 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
                     language: None,
                     description: None,
                 },
-                chapters,
+                chapters: vec![], // pdf.js handles pages
                 toc: vec![],
-                file_path: Some(path.clone()),
+                file_path: Some(path),
                 format: "pdf".to_string(),
                 cover_base64: None,
             })
         }
-        BookFormat::Txt => {
-            let content = std::fs::read_to_string(&book_path).map_err(|e| e.to_string())?;
+        BookFormat::Txt | BookFormat::Markdown | BookFormat::Html => {
+            // Small files - load content directly (single chapter)
+            let content =
+                std::fs::read_to_string(&book_path).map_err(|e| e.to_string())?;
             let filename = book_path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("Unknown")
                 .to_string();
 
-            Ok(BookContentResponse {
-                metadata: BookMetadataInfo {
-                    title: filename.clone(),
-                    authors: vec![],
-                    publisher: None,
-                    language: None,
-                    description: None,
-                },
-                chapters: vec![ChapterInfo {
-                    index: 0,
-                    title: filename,
-                    content: format!(
-                        "<pre style=\"white-space: pre-wrap; font-family: inherit;\">{}</pre>",
-                        html_escape::encode_text(&content)
-                    ),
-                }],
-                toc: vec![],
-                file_path: Some(path.clone()),
-                format: "txt".to_string(),
-                cover_base64: None,
-            })
-        }
-        BookFormat::Markdown => {
-            let content = std::fs::read_to_string(&book_path).map_err(|e| e.to_string())?;
-            let filename = book_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Unknown")
-                .to_string();
+            let html_content = if ext == "md" || ext == "markdown" {
+                markdown_to_html(&content)
+            } else if ext == "txt" {
+                format!(
+                    "<pre style=\"white-space:pre-wrap;font-family:inherit;\
+                     line-height:1.8;\">{}</pre>",
+                    html_escape::encode_text(&content)
+                )
+            } else {
+                content // HTML rendered directly
+            };
 
-            // Basic markdown to HTML (simplified)
-            let html_content = markdown_to_html(&content);
+            let fmt = match ext.as_str() {
+                "md" | "markdown" => "md",
+                "txt" => "txt",
+                _ => "html",
+            };
 
             Ok(BookContentResponse {
                 metadata: BookMetadataInfo {
@@ -1569,40 +1532,192 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
                     content: html_content,
                 }],
                 toc: vec![],
-                file_path: Some(path.clone()),
-                format: "md".to_string(),
-                cover_base64: None,
-            })
-        }
-        BookFormat::Html => {
-            let content = std::fs::read_to_string(&book_path).map_err(|e| e.to_string())?;
-            let filename = book_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Unknown")
-                .to_string();
-
-            Ok(BookContentResponse {
-                metadata: BookMetadataInfo {
-                    title: filename.clone(),
-                    authors: vec![],
-                    publisher: None,
-                    language: None,
-                    description: None,
-                },
-                chapters: vec![ChapterInfo {
-                    index: 0,
-                    title: filename,
-                    content,
-                }],
-                toc: vec![],
-                file_path: Some(path.clone()),
-                format: "html".to_string(),
+                file_path: Some(path),
+                format: fmt.to_string(),
                 cover_base64: None,
             })
         }
         _ => Err(format!("Format {:?} not yet supported", format)),
     }
+}
+
+/// Load a single EPUB chapter on demand (lazy loading).
+/// Images are extracted to temp files and referenced via file:// URLs
+/// instead of being inlined as base64.
+#[tauri::command]
+pub async fn reader_get_chapter(
+    path: String,
+    chapter_index: usize,
+) -> Result<ChapterInfo, String> {
+    let book_path = PathBuf::from(&path);
+    if !book_path.exists() {
+        return Err(format!("File does not exist: {}", path));
+    }
+
+    let ext = book_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if ext != "epub" {
+        return Err("Chapter loading only supported for EPUB".to_string());
+    }
+
+    let bp = book_path.clone();
+    let idx = chapter_index;
+
+    tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(|| {
+            let mut doc =
+                epub::doc::EpubDoc::new(&bp).map_err(|e| e.to_string())?;
+
+            // Navigate to the requested chapter
+            if !doc.set_current_chapter(idx) {
+                return Err(format!("Chapter {} not found", idx));
+            }
+
+            let (content, _mime) = doc
+                .get_current_str()
+                .ok_or_else(|| format!("Failed to read chapter {}", idx))?;
+
+            let title = doc
+                .get_current_id()
+                .unwrap_or_else(|| format!("Chapter {}", idx + 1));
+
+            // Extract images to temp files and replace src attributes
+            let content_with_images =
+                replace_epub_images_with_temp_files(&content, &mut doc, &bp);
+
+            Ok::<_, String>(ChapterInfo {
+                index: idx,
+                title,
+                content: content_with_images,
+            })
+        })
+        .unwrap_or_else(|_| Err(format!("Chapter {} parsing panicked", idx)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Extract EPUB images to a temp directory and replace src attributes with
+/// file:// URLs instead of inlining as base64. This keeps chapter responses
+/// small and avoids serialization overhead for large images.
+fn replace_epub_images_with_temp_files(
+    html: &str,
+    doc: &mut epub::doc::EpubDoc<std::io::BufReader<std::fs::File>>,
+    book_path: &Path,
+) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // Create a stable hash of the book path for the temp directory name
+    let mut hasher = DefaultHasher::new();
+    book_path.to_string_lossy().hash(&mut hasher);
+    let book_hash = format!("{:x}", hasher.finish());
+
+    let img_dir = std::env::temp_dir()
+        .join("minion_book_images")
+        .join(&book_hash);
+    let _ = std::fs::create_dir_all(&img_dir);
+
+    let mut result = html.to_string();
+    let mut search_start = 0;
+
+    loop {
+        let src_pos = match result[search_start..].find("src=\"") {
+            Some(p) => p,
+            None => break,
+        };
+        let abs_pos = search_start + src_pos + 4;
+        let end_quote = match result[abs_pos..].find('"') {
+            Some(p) => p,
+            None => break,
+        };
+        let src_value = result[abs_pos..abs_pos + end_quote].to_string();
+
+        // Skip URLs that are already absolute or data URIs
+        if src_value.starts_with("data:")
+            || src_value.starts_with("http")
+            || src_value.starts_with("file:")
+        {
+            search_start = abs_pos + end_quote;
+            continue;
+        }
+
+        let resource_name = src_value
+            .rsplit('/')
+            .next()
+            .unwrap_or(&src_value)
+            .to_string();
+
+        // Find and extract the image resource from the EPUB
+        let mut extracted = false;
+        let resource_ids: Vec<String> = doc.resources.keys().cloned().collect();
+        for id in &resource_ids {
+            if let Some(item) = doc.resources.get(id) {
+                let path_str = item.path.to_string_lossy();
+                if path_str.ends_with(&resource_name)
+                    || id == &resource_name
+                {
+                    if let Some((data, _)) = doc.get_resource(id) {
+                        let img_path = img_dir.join(&resource_name);
+                        if std::fs::write(&img_path, &data).is_ok() {
+                            let file_url = format!(
+                                "file://{}",
+                                img_path.to_string_lossy()
+                            );
+                            result = format!(
+                                "{}{}{}",
+                                &result[..abs_pos],
+                                file_url,
+                                &result[abs_pos + end_quote..]
+                            );
+                            search_start = abs_pos + file_url.len();
+                            extracted = true;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        if !extracted {
+            search_start = abs_pos + end_quote;
+        }
+    }
+
+    result
+}
+
+/// Returns the canonical absolute file path for pdf.js to load directly.
+#[tauri::command]
+pub async fn reader_get_pdf_path(path: String) -> Result<String, String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err("File not found".to_string());
+    }
+    Ok(std::fs::canonicalize(p)
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .to_string())
+}
+
+/// Read PDF file bytes for pdf.js rendering in the webview.
+/// Returns raw bytes that the frontend converts to a Uint8Array for pdf.js.
+#[tauri::command]
+pub async fn reader_get_pdf_bytes(path: String) -> Result<Vec<u8>, String> {
+    let book_path = PathBuf::from(&path);
+    if !book_path.exists() {
+        return Err(format!("File does not exist: {}", path));
+    }
+
+    tokio::task::spawn_blocking(move || {
+        std::fs::read(&book_path).map_err(|e| format!("Failed to read PDF: {}", e))
+    })
+    .await
+    .map_err(|e| format!("PDF read task failed: {}", e))?
 }
 
 /// Simple markdown to HTML conversion
@@ -3251,7 +3366,28 @@ pub async fn reader_import_book(
     path: String,
 ) -> Result<ReaderBookResponse, String> {
     let book_path = PathBuf::from(&path);
+    // #region agent log
+    __dbg_write(
+        "C",
+        "src-tauri/src/commands.rs:reader_import_book",
+        "Import start",
+        serde_json::json!({
+            "pathExt": book_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase(),
+            "exists": book_path.exists()
+        }),
+        "pre-fix",
+    );
+    // #endregion
     if !book_path.exists() {
+        // #region agent log
+        __dbg_write(
+            "C",
+            "src-tauri/src/commands.rs:reader_import_book",
+            "File missing",
+            serde_json::json!({ "path": path }),
+            "pre-fix",
+        );
+        // #endregion
         return Err(format!("File not found: {}", path));
     }
 

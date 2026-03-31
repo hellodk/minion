@@ -68,6 +68,9 @@ pub fn run() {
             commands::files_bulk_move,
             // Book Reader commands
             commands::reader_open_book,
+            commands::reader_get_chapter,
+            commands::reader_get_pdf_path,
+            commands::reader_get_pdf_bytes,
             commands::reader_list_books,
             // Finance commands
             commands::finance_add_account,
