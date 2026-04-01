@@ -280,6 +280,13 @@ const Reader: Component = () => {
   // PDF rendering with pdf.js
   // ============================================================================
 
+  const normalizePdfBytes = (data: unknown): Uint8Array => {
+    if (data instanceof Uint8Array) return data;
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    if (Array.isArray(data)) return new Uint8Array(data);
+    return new Uint8Array();
+  };
+
   const loadPdf = async (filePath: string) => {
     setPdfLoading(true);
     try {
@@ -292,9 +299,13 @@ const Reader: Component = () => {
         import.meta.url
       ).toString();
 
-      // Read PDF bytes through Tauri IPC
-      const pdfData = await invoke<number[]>('reader_get_pdf_bytes', { path: filePath });
-      const doc = await pdfjsLib.getDocument({ data: new Uint8Array(pdfData) }).promise;
+      // Read PDF bytes through Tauri IPC (serde may deliver number[] or Uint8Array)
+      const pdfRaw = await invoke<unknown>('reader_get_pdf_bytes', { path: filePath });
+      const pdfBytes = normalizePdfBytes(pdfRaw);
+      if (pdfBytes.length === 0) {
+        throw new Error('PDF file is empty or could not be read');
+      }
+      const doc = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
 
       setPdfDoc(doc);
       setPdfTotalPages(doc.numPages);
@@ -311,14 +322,16 @@ const Reader: Component = () => {
           }
         }
       }
-
-      await renderPdfPage(pdfCurrentPage());
     } catch (e) {
       console.error('Failed to load PDF:', e);
       alert(`Error loading PDF: ${e}`);
     } finally {
       setPdfLoading(false);
     }
+
+    // First paint happens in the <canvas> ref callback once Solid mounts the canvas
+    // (`Show when={!pdfLoading() && pdfDoc()}`). requestAnimationFrame retries can run
+    // before refs run, so the canvas stayed blank.
   };
 
   const renderPdfPage = async (pageNum: number) => {
@@ -326,7 +339,8 @@ const Reader: Component = () => {
     if (!doc || !pdfCanvasRef) return;
 
     try {
-      const page = await doc.getPage(pageNum);
+      const n = Math.max(1, Math.min(Math.floor(Number(pageNum)) || 1, doc.numPages));
+      const page = await doc.getPage(n);
       const scale = pdfZoom();
       const viewport = page.getViewport({ scale });
 
@@ -342,8 +356,8 @@ const Reader: Component = () => {
 
       await page.render({ canvasContext: ctx, viewport }).promise;
 
-      setPdfCurrentPage(pageNum);
-      setPdfPageInputValue(String(pageNum));
+      setPdfCurrentPage(n);
+      setPdfPageInputValue(String(n));
     } catch (e) {
       console.error('Failed to render PDF page:', e);
     }
@@ -2460,7 +2474,9 @@ const Reader: Component = () => {
               {/* ============================================================ */}
               <Show when={isPdf()}>
                 <div
-                  ref={pdfContainerRef}
+                  ref={(el) => {
+                    pdfContainerRef = el;
+                  }}
                   id="reader-content-scroll"
                   class="flex-1 overflow-auto"
                   style={{
@@ -2480,7 +2496,14 @@ const Reader: Component = () => {
                   <Show when={!pdfLoading() && pdfDoc()}>
                     <div class="pdf-canvas-container py-6 px-4">
                       <canvas
-                        ref={pdfCanvasRef}
+                        ref={(el) => {
+                          pdfCanvasRef = el;
+                          if (!el) return;
+                          // Defer paint so Solid has applied `pdfCurrentPage` / `pdfDoc` after `setPdfLoading(false)`.
+                          queueMicrotask(() => {
+                            void renderPdfPage(pdfCurrentPage());
+                          });
+                        }}
                         style={{
                           'max-width': '100%',
                           'height': 'auto',

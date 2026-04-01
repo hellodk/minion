@@ -14,34 +14,6 @@ use tokio::sync::RwLock;
 
 type AppStateHandle = Arc<RwLock<AppState>>;
 
-// #region agent log
-fn __dbg_write(
-    hypothesis_id: &str,
-    location: &str,
-    message: &str,
-    data: serde_json::Value,
-    run_id: &str,
-) {
-    let payload = serde_json::json!({
-        "sessionId": "84ea50",
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": chrono::Utc::now().timestamp_millis()
-    });
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/home/dk/Documents/git/minion/.cursor/debug-84ea50.log")
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{}", payload.to_string());
-    }
-}
-// #endregion
-
 // ============================================================================
 // Response types
 // ============================================================================
@@ -3366,28 +3338,7 @@ pub async fn reader_import_book(
     path: String,
 ) -> Result<ReaderBookResponse, String> {
     let book_path = PathBuf::from(&path);
-    // #region agent log
-    __dbg_write(
-        "C",
-        "src-tauri/src/commands.rs:reader_import_book",
-        "Import start",
-        serde_json::json!({
-            "pathExt": book_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase(),
-            "exists": book_path.exists()
-        }),
-        "pre-fix",
-    );
-    // #endregion
     if !book_path.exists() {
-        // #region agent log
-        __dbg_write(
-            "C",
-            "src-tauri/src/commands.rs:reader_import_book",
-            "File missing",
-            serde_json::json!({ "path": path }),
-            "pre-fix",
-        );
-        // #endregion
         return Err(format!("File not found: {}", path));
     }
 
@@ -4185,7 +4136,7 @@ pub async fn oreilly_open_browser(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn oreilly_connect_manual(
     email: String,
-    password: String,
+    _password: String,
 ) -> Result<OreillyConnectResult, String> {
     // For manual login, we'd need to POST to O'Reilly's auth endpoint
     // This doesn't work with SSO accounts but works for direct O'Reilly accounts
