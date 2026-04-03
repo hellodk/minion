@@ -64,8 +64,6 @@ pub struct FileInfoResponse {
     pub modified: String,
     pub extension: Option<String>,
     pub is_video: bool,
-    pub video_duration: Option<String>,
-    pub video_resolution: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1024,10 +1022,7 @@ pub async fn files_list_duplicates(
                 let match_label = match &match_type_str[..] {
                     "Exact" => "Identical content (SHA-256 hash match)".to_string(),
                     "Perceptual" => "Visually similar images".to_string(),
-                    "Near" => format!(
-                        "Similar filenames (fuzzy match, {:.0}% similar)",
-                        d.similarity * 100.0
-                    ),
+                    "Near" => "Similar filenames (fuzzy match)".to_string(),
                     _ => format!("{} match", match_type_str),
                 };
                 let hash = d.files.first().and_then(|f| f.sha256.clone());
@@ -1043,11 +1038,17 @@ pub async fn files_list_duplicates(
                         .files
                         .iter()
                         .map(|f| {
-                            let ext_lower = f.extension.as_deref().unwrap_or("").to_lowercase();
-                            let is_video = matches!(
-                                ext_lower.as_str(),
-                                "mp4" | "mkv" | "avi" | "mov" | "wmv" | "webm" | "m4v"
-                            );
+                            let is_video = f
+                                .extension
+                                .as_deref()
+                                .map(|ext| {
+                                    matches!(
+                                        ext.to_lowercase().as_str(),
+                                        "mp4" | "mkv" | "webm" | "avi"
+                                            | "mov" | "wmv" | "flv"
+                                    )
+                                })
+                                .unwrap_or(false);
                             FileInfoResponse {
                                 path: f.path.to_string_lossy().to_string(),
                                 name: f.name.clone(),
@@ -1055,8 +1056,6 @@ pub async fn files_list_duplicates(
                                 modified: f.modified.to_rfc3339(),
                                 extension: f.extension.clone(),
                                 is_video,
-                                video_duration: None,
-                                video_resolution: None,
                             }
                         })
                         .collect(),
@@ -1108,6 +1107,165 @@ pub async fn files_get_analytics(
             duplicate_size: 0,
         })
     }
+}
+
+// ============================================================================
+// Video metadata
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct VideoMetadataResponse {
+    pub path: String,
+    pub duration_seconds: Option<f64>,
+    pub duration_display: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub codec: Option<String>,
+    pub bitrate_kbps: Option<u64>,
+    pub size_bytes: u64,
+    pub size_display: String,
+    pub format_name: Option<String>,
+    pub has_audio: bool,
+    pub thumbnail_base64: Option<String>,
+}
+
+#[tauri::command]
+pub async fn files_get_video_metadata(path: String) -> Result<VideoMetadataResponse, String> {
+    let file_path = std::path::Path::new(&path);
+    if !file_path.exists() {
+        return Err("File not found".to_string());
+    }
+
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+    // Use ffprobe to get video metadata
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            &path,
+        ])
+        .output()
+        .map_err(|e| {
+            format!(
+                "ffprobe not found: {}. Install with: sudo apt install ffmpeg",
+                e
+            )
+        })?;
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse ffprobe output: {}", e))?;
+
+    // Parse duration
+    let duration = json["format"]["duration"]
+        .as_str()
+        .and_then(|d| d.parse::<f64>().ok());
+
+    let duration_display = duration.map(|d| {
+        let h = (d / 3600.0) as u64;
+        let m = ((d % 3600.0) / 60.0) as u64;
+        let s = (d % 60.0) as u64;
+        if h > 0 {
+            format!("{}:{:02}:{:02}", h, m, s)
+        } else {
+            format!("{}:{:02}", m, s)
+        }
+    });
+
+    // Find video stream
+    let video_stream = json["streams"]
+        .as_array()
+        .and_then(|streams| streams.iter().find(|s| s["codec_type"] == "video"));
+
+    let width = video_stream.and_then(|s| s["width"].as_u64().map(|w| w as u32));
+    let height = video_stream.and_then(|s| s["height"].as_u64().map(|h| h as u32));
+    let codec = video_stream.and_then(|s| s["codec_name"].as_str().map(|c| c.to_string()));
+
+    let has_audio = json["streams"]
+        .as_array()
+        .map(|streams| streams.iter().any(|s| s["codec_type"] == "audio"))
+        .unwrap_or(false);
+
+    let bitrate = json["format"]["bit_rate"]
+        .as_str()
+        .and_then(|b| b.parse::<u64>().ok())
+        .map(|b| b / 1000);
+
+    let format_name = json["format"]["format_name"]
+        .as_str()
+        .map(|f| f.to_string());
+
+    // Generate thumbnail from first frame
+    let thumbnail_base64 = generate_video_thumbnail(&path);
+
+    let size_display = format_file_size(size);
+
+    Ok(VideoMetadataResponse {
+        path: path.clone(),
+        duration_seconds: duration,
+        duration_display,
+        width,
+        height,
+        codec,
+        bitrate_kbps: bitrate,
+        size_bytes: size,
+        size_display,
+        format_name,
+        has_audio,
+        thumbnail_base64,
+    })
+}
+
+fn generate_video_thumbnail(path: &str) -> Option<String> {
+    let tmp = std::env::temp_dir().join(format!("minion_thumb_{}.jpg", uuid::Uuid::new_v4()));
+
+    let result = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-i",
+            path,
+            "-vf",
+            "thumbnail,scale=320:-1",
+            "-frames:v",
+            "1",
+            "-q:v",
+            "5",
+            tmp.to_str().unwrap_or("/tmp/thumb.jpg"),
+        ])
+        .output();
+
+    if let Ok(output) = result {
+        if output.status.success() {
+            if let Ok(data) = std::fs::read(&tmp) {
+                let _ = std::fs::remove_file(&tmp);
+                use base64ct::{Base64, Encoding};
+                let b64 = Base64::encode_string(&data);
+                return Some(format!("data:image/jpeg;base64,{}", b64));
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    None
+}
+
+fn format_file_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{} B", bytes);
+    }
+    let kb = bytes as f64 / 1024.0;
+    if kb < 1024.0 {
+        return format!("{:.1} KB", kb);
+    }
+    let mb = kb / 1024.0;
+    if mb < 1024.0 {
+        return format!("{:.1} MB", mb);
+    }
+    let gb = mb / 1024.0;
+    format!("{:.2} GB", gb)
 }
 
 // ============================================================================
@@ -5374,161 +5532,4 @@ pub async fn blog_analyze_seo(
 #[tauri::command]
 pub async fn blog_generate_slug(title: String) -> Result<String, String> {
     Ok(minion_blog::posts::slugify(&title))
-}
-
-// ============================================================================
-// Video metadata commands
-// ============================================================================
-
-#[derive(Debug, Serialize)]
-pub struct VideoMetadataResponse {
-    pub duration_seconds: Option<f64>,
-    pub duration_formatted: Option<String>,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub resolution: Option<String>,
-    pub codec: Option<String>,
-    pub bitrate_kbps: Option<u64>,
-    pub file_size: u64,
-    pub file_size_formatted: String,
-    pub is_video: bool,
-}
-
-#[tauri::command]
-pub async fn files_get_video_metadata(path: String) -> Result<VideoMetadataResponse, String> {
-    let p = std::path::Path::new(&path);
-    if !p.exists() {
-        return Err("File not found".to_string());
-    }
-
-    let file_size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-    let ext = p
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let is_video = matches!(
-        ext.as_str(),
-        "mp4"
-            | "mkv"
-            | "avi"
-            | "mov"
-            | "wmv"
-            | "flv"
-            | "webm"
-            | "m4v"
-            | "mpg"
-            | "mpeg"
-            | "3gp"
-            | "ts"
-    );
-
-    if !is_video {
-        return Ok(VideoMetadataResponse {
-            duration_seconds: None,
-            duration_formatted: None,
-            width: None,
-            height: None,
-            resolution: None,
-            codec: None,
-            bitrate_kbps: None,
-            file_size,
-            file_size_formatted: format_bytes_helper(file_size),
-            is_video: false,
-        });
-    }
-
-    // Try ffprobe
-    let output = std::process::Command::new("ffprobe")
-        .args([
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-            &path,
-        ])
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {
-            let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-
-            // Parse duration from format
-            let duration = json["format"]["duration"]
-                .as_str()
-                .and_then(|d| d.parse::<f64>().ok());
-
-            // Find video stream
-            let video_stream = json["streams"]
-                .as_array()
-                .and_then(|streams| streams.iter().find(|s| s["codec_type"] == "video"));
-
-            let width = video_stream.and_then(|s| s["width"].as_u64().map(|w| w as u32));
-            let height = video_stream.and_then(|s| s["height"].as_u64().map(|h| h as u32));
-            let codec = video_stream.and_then(|s| s["codec_name"].as_str().map(|c| c.to_string()));
-
-            let bitrate = json["format"]["bit_rate"]
-                .as_str()
-                .and_then(|b| b.parse::<u64>().ok())
-                .map(|b| b / 1000);
-
-            let duration_formatted = duration.map(|d| {
-                let h = (d / 3600.0) as u64;
-                let m = ((d % 3600.0) / 60.0) as u64;
-                let s = (d % 60.0) as u64;
-                if h > 0 {
-                    format!("{}:{:02}:{:02}", h, m, s)
-                } else {
-                    format!("{}:{:02}", m, s)
-                }
-            });
-
-            let resolution = match (width, height) {
-                (Some(w), Some(h)) => Some(format!("{}x{}", w, h)),
-                _ => None,
-            };
-
-            Ok(VideoMetadataResponse {
-                duration_seconds: duration,
-                duration_formatted,
-                width,
-                height,
-                resolution,
-                codec,
-                bitrate_kbps: bitrate,
-                file_size,
-                file_size_formatted: format_bytes_helper(file_size),
-                is_video: true,
-            })
-        }
-        _ => {
-            // ffprobe not available or failed - return basic info
-            Ok(VideoMetadataResponse {
-                duration_seconds: None,
-                duration_formatted: None,
-                width: None,
-                height: None,
-                resolution: None,
-                codec: None,
-                bitrate_kbps: None,
-                file_size,
-                file_size_formatted: format_bytes_helper(file_size),
-                is_video: true,
-            })
-        }
-    }
-}
-
-fn format_bytes_helper(bytes: u64) -> String {
-    if bytes == 0 {
-        return "0 B".to_string();
-    }
-    let k = 1024u64;
-    let sizes = ["B", "KB", "MB", "GB", "TB"];
-    let i = (bytes as f64).log(k as f64).floor() as usize;
-    let i = i.min(sizes.len() - 1);
-    format!("{:.1} {}", bytes as f64 / k.pow(i as u32) as f64, sizes[i])
 }

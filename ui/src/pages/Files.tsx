@@ -11,16 +11,22 @@ interface FileInfo {
   size: number;
   modified: string;
   extension?: string;
-  is_video: boolean;
-  video_duration?: string;
-  video_resolution?: string;
+  is_video?: boolean;
 }
 
-interface VideoMeta {
-  duration_formatted?: string;
-  resolution?: string;
+interface VideoMetadata {
+  path: string;
+  duration_seconds?: number;
+  duration_display?: string;
+  width?: number;
+  height?: number;
   codec?: string;
-  file_size_formatted: string;
+  bitrate_kbps?: number;
+  size_bytes: number;
+  size_display: string;
+  format_name?: string;
+  has_audio: boolean;
+  thumbnail_base64?: string;
 }
 
 interface DuplicateGroup {
@@ -67,22 +73,7 @@ const Files: Component = () => {
   const [operationResult, setOperationResult] = createSignal<{ succeeded: number; failed: number; freed_bytes: number; action: string } | null>(null);
   const [excludePatterns, setExcludePatterns] = createSignal<string[]>(['node_modules', '.git', 'target']);
   const [newExcludePattern, setNewExcludePattern] = createSignal('');
-  const [fuzzyEnabled, setFuzzyEnabled] = createSignal(true);
-  const [videoMetadata, setVideoMetadata] = createSignal<Map<string, VideoMeta>>(new Map());
-
-  const loadVideoMeta = async (path: string) => {
-    if (videoMetadata().has(path)) return;
-    try {
-      const meta = await invoke<VideoMeta>('files_get_video_metadata', { path });
-      setVideoMetadata(prev => {
-        const newMap = new Map(prev);
-        newMap.set(path, meta);
-        return newMap;
-      });
-    } catch (e) {
-      console.error('Failed to get video metadata:', e);
-    }
-  };
+  const [videoMetadataCache, setVideoMetadataCache] = createSignal<Record<string, VideoMetadata>>({});
 
   const openFile = async (path: string) => {
     try {
@@ -398,17 +389,31 @@ const Files: Component = () => {
     return `${m}m ${s}s`;
   };
 
+  const fetchVideoMetadataForGroup = async (group: DuplicateGroup) => {
+    const videoFiles = group.files.filter((f) => f.is_video);
+    const cache = videoMetadataCache();
+    const toFetch = videoFiles.filter((f) => !cache[f.path]);
+    if (toFetch.length === 0) return;
+
+    const results: Record<string, VideoMetadata> = { ...cache };
+    for (const file of toFetch) {
+      try {
+        const meta = await invoke<VideoMetadata>('files_get_video_metadata', { path: file.path });
+        results[file.path] = meta;
+      } catch (e) {
+        console.error('Failed to get video metadata for', file.path, e);
+      }
+    }
+    setVideoMetadataCache(results);
+  };
+
   const toggleGroup = (id: string) => {
     const newId = expandedGroup() === id ? null : id;
     setExpandedGroup(newId);
-
-    // Load video metadata for files in expanded group
     if (newId) {
-      const group = duplicates().find(g => g.id === newId);
-      if (group) {
-        group.files.forEach(f => {
-          if (f.is_video) loadVideoMeta(f.path);
-        });
+      const group = duplicates().find((g) => g.id === newId);
+      if (group && group.files.some((f) => f.is_video)) {
+        fetchVideoMetadataForGroup(group);
       }
     }
   };
@@ -587,20 +592,6 @@ const Files: Component = () => {
                 </For>
               </div>
             </Show>
-          </div>
-
-          {/* Fuzzy matching toggle */}
-          <div class="flex items-center gap-2 mt-2 mb-4">
-            <input
-              type="checkbox"
-              id="fuzzy-toggle"
-              checked={fuzzyEnabled()}
-              onChange={(e) => setFuzzyEnabled(e.currentTarget.checked)}
-              disabled={scanning()}
-            />
-            <label for="fuzzy-toggle" class="text-sm text-gray-700 dark:text-gray-300">
-              Find similar filenames (fuzzy matching)
-            </label>
           </div>
 
           {/* Scan button */}
@@ -832,22 +823,12 @@ const Files: Component = () => {
                         <div>
                           <p class="font-medium">
                             {group.files[0]?.name ?? 'Unknown'}
-                            <Show when={group.match_type === 'near' && group.files.length >= 2 && group.files[0]?.name !== group.files[1]?.name}>
-                              <span class="text-gray-400 font-normal ml-1 text-sm">
-                                / {group.files[1]?.name}
-                              </span>
-                            </Show>
                             <span class="text-gray-400 font-normal ml-1">
                               + {group.file_count - 1} cop{group.file_count > 2 ? 'ies' : 'y'}
                             </span>
                           </p>
                           <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                            <Show when={group.match_type === 'near'} fallback={
-                              <>{group.match_label} • {formatSize(group.files[0]?.size ?? 0)} each</>
-                            }>
-                              <span class="text-amber-600 dark:text-amber-400">Similar names</span>
-                              {' '} • {group.match_label}
-                            </Show>
+                            {group.match_label} • {formatSize(group.files[0]?.size ?? 0)} each
                           </p>
                         </div>
                       </div>
@@ -895,23 +876,37 @@ const Files: Component = () => {
                       {/* File list */}
                       <div class="bg-gray-50 dark:bg-gray-800/50">
                         <For each={group.files}>
-                          {(file, index) => (
+                          {(file, index) => {
+                            const videoMeta = () => file.is_video ? videoMetadataCache()[file.path] : undefined;
+                            return (
                             <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 last:border-b-0">
                               <div class="flex items-center gap-3">
-                                {/* File icon - video or generic */}
-                                <div class="w-10 h-10 rounded bg-gray-200 dark:bg-gray-700 flex items-center justify-center flex-shrink-0">
-                                  <Show when={file.is_video} fallback={
-                                    <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase">
-                                      {file.extension ?? '?'}
-                                    </span>
-                                  }>
-                                    <svg class="w-5 h-5 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                                    </svg>
-                                  </Show>
-                                </div>
-
-                                {/* File info */}
+                                {/* Thumbnail or extension icon */}
+                                <Show
+                                  when={file.is_video && videoMeta()?.thumbnail_base64}
+                                  fallback={
+                                    <div class="w-8 h-8 rounded bg-gray-200 dark:bg-gray-700 flex items-center justify-center flex-shrink-0">
+                                      <Show
+                                        when={file.is_video}
+                                        fallback={
+                                          <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase">
+                                            {file.extension ?? '?'}
+                                          </span>
+                                        }
+                                      >
+                                        <svg class="w-4 h-4 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                        </svg>
+                                      </Show>
+                                    </div>
+                                  }
+                                >
+                                  <img
+                                    src={videoMeta()!.thumbnail_base64!}
+                                    alt="thumbnail"
+                                    class="w-16 h-10 rounded object-cover flex-shrink-0 border border-gray-300 dark:border-gray-600"
+                                  />
+                                </Show>
                                 <div class="flex-1 min-w-0">
                                   <div class="flex items-center gap-2">
                                     <p class="font-medium text-sm truncate" title={file.name}>{file.name}</p>
@@ -925,24 +920,27 @@ const Files: Component = () => {
                                         COPY
                                       </span>
                                     </Show>
-                                  </div>
-                                  <div class="flex items-center gap-2 mt-0.5">
-                                    <Show when={file.is_video && videoMetadata().get(file.path)?.duration_formatted}>
-                                      <span class="text-xs px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded">
-                                        {videoMetadata().get(file.path)!.duration_formatted}
+                                    <Show when={file.is_video && videoMeta()?.duration_display}>
+                                      <span class="text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 rounded font-medium flex-shrink-0">
+                                        {videoMeta()!.duration_display}
                                       </span>
                                     </Show>
-                                    <Show when={file.is_video && videoMetadata().get(file.path)?.resolution}>
-                                      <span class="text-xs px-1.5 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded">
-                                        {videoMetadata().get(file.path)!.resolution}
+                                    <Show when={file.is_video && videoMeta()?.width && videoMeta()?.height}>
+                                      <span class="text-[10px] px-1.5 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded font-medium flex-shrink-0">
+                                        {videoMeta()!.width}x{videoMeta()!.height}
                                       </span>
                                     </Show>
-                                    <p class="text-xs text-gray-500 dark:text-gray-400 truncate" title={file.path}>
-                                      {file.path}
-                                    </p>
+                                    <Show when={file.is_video && videoMeta()?.codec}>
+                                      <span class="text-[10px] px-1.5 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded font-medium flex-shrink-0">
+                                        {videoMeta()!.codec}
+                                      </span>
+                                    </Show>
                                   </div>
+                                  <p class="text-xs text-gray-500 dark:text-gray-400 truncate" title={file.path}>
+                                    {file.path}
+                                  </p>
                                 </div>
-                                <span class="text-sm font-medium text-gray-600 dark:text-gray-400 flex-shrink-0">
+                                <span class="text-xs text-gray-500 dark:text-gray-400 flex-shrink-0 font-medium">
                                   {formatSize(file.size)}
                                 </span>
                                 <button
@@ -954,7 +952,8 @@ const Files: Component = () => {
                                 </button>
                               </div>
                             </div>
-                          )}
+                            );
+                          }}
                         </For>
                       </div>
                     </div>
