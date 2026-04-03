@@ -4,11 +4,12 @@ use crate::state::{AppState, ScanCache, ScanStatus, ScanTask, WatchedDirectory};
 use chrono::Utc;
 use minion_files::{AnalyticsCalculator, DuplicateFinder, ScanConfig, Scanner};
 use minion_reader::BookFormat;
-use std::path::Path;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tauri::Manager;
 use tauri::State;
 use tokio::sync::RwLock;
 
@@ -62,6 +63,9 @@ pub struct FileInfoResponse {
     pub size: u64,
     pub modified: String,
     pub extension: Option<String>,
+    pub is_video: bool,
+    pub video_duration: Option<String>,
+    pub video_resolution: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1020,7 +1024,10 @@ pub async fn files_list_duplicates(
                 let match_label = match &match_type_str[..] {
                     "Exact" => "Identical content (SHA-256 hash match)".to_string(),
                     "Perceptual" => "Visually similar images".to_string(),
-                    "Near" => "Nearly identical content".to_string(),
+                    "Near" => format!(
+                        "Similar filenames (fuzzy match, {:.0}% similar)",
+                        d.similarity * 100.0
+                    ),
                     _ => format!("{} match", match_type_str),
                 };
                 let hash = d.files.first().and_then(|f| f.sha256.clone());
@@ -1035,12 +1042,22 @@ pub async fn files_list_duplicates(
                     files: d
                         .files
                         .iter()
-                        .map(|f| FileInfoResponse {
-                            path: f.path.to_string_lossy().to_string(),
-                            name: f.name.clone(),
-                            size: f.size,
-                            modified: f.modified.to_rfc3339(),
-                            extension: f.extension.clone(),
+                        .map(|f| {
+                            let ext_lower = f.extension.as_deref().unwrap_or("").to_lowercase();
+                            let is_video = matches!(
+                                ext_lower.as_str(),
+                                "mp4" | "mkv" | "avi" | "mov" | "wmv" | "webm" | "m4v"
+                            );
+                            FileInfoResponse {
+                                path: f.path.to_string_lossy().to_string(),
+                                name: f.name.clone(),
+                                size: f.size,
+                                modified: f.modified.to_rfc3339(),
+                                extension: f.extension.clone(),
+                                is_video,
+                                video_duration: None,
+                                video_resolution: None,
+                            }
                         })
                         .collect(),
                 }
@@ -1345,8 +1362,8 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
         .unwrap_or("")
         .to_lowercase();
 
-    let format = BookFormat::from_extension(&ext)
-        .ok_or_else(|| format!("Unsupported format: {}", ext))?;
+    let format =
+        BookFormat::from_extension(&ext).ok_or_else(|| format!("Unsupported format: {}", ext))?;
 
     tracing::info!("Opening book: {} (format: {:?})", path, format);
 
@@ -1357,8 +1374,7 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
             let bp = book_path.clone();
             let result = tokio::task::spawn_blocking(move || {
                 std::panic::catch_unwind(|| {
-                    let mut doc =
-                        epub::doc::EpubDoc::new(&bp).map_err(|e| e.to_string())?;
+                    let mut doc = epub::doc::EpubDoc::new(&bp).map_err(|e| e.to_string())?;
 
                     let title = doc
                         .mdata("title")
@@ -1370,8 +1386,7 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
                         .unwrap_or_default();
                     let publisher = doc.mdata("publisher").map(|m| m.value.clone());
                     let language = doc.mdata("language").map(|m| m.value.clone());
-                    let description =
-                        doc.mdata("description").map(|m| m.value.clone());
+                    let description = doc.mdata("description").map(|m| m.value.clone());
 
                     // Extract cover image
                     let cover_base64 = doc.get_cover().map(|(data, mime)| {
@@ -1464,8 +1479,7 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
         }
         BookFormat::Txt | BookFormat::Markdown | BookFormat::Html => {
             // Small files - load content directly (single chapter)
-            let content =
-                std::fs::read_to_string(&book_path).map_err(|e| e.to_string())?;
+            let content = std::fs::read_to_string(&book_path).map_err(|e| e.to_string())?;
             let filename = book_path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -1513,14 +1527,96 @@ pub async fn reader_open_book(path: String) -> Result<BookContentResponse, Strin
     }
 }
 
+type EpubDocFile = epub::doc::EpubDoc<std::io::BufReader<std::fs::File>>;
+
+/// Load one chapter using an already-open EPUB document (avoids reopening the file).
+fn load_epub_chapter_from_doc(
+    doc: &mut EpubDocFile,
+    idx: usize,
+    book_path: &Path,
+) -> Result<ChapterInfo, String> {
+    if !doc.set_current_chapter(idx) {
+        return Err(format!("Chapter {} not found", idx));
+    }
+
+    let (content, _mime) = doc
+        .get_current_str()
+        .ok_or_else(|| format!("Failed to read chapter {}", idx))?;
+
+    let title = doc
+        .get_current_id()
+        .unwrap_or_else(|| format!("Chapter {}", idx + 1));
+
+    let content_with_images = replace_epub_images_with_temp_files(&content, doc, book_path);
+
+    Ok(ChapterInfo {
+        index: idx,
+        title,
+        content: content_with_images,
+    })
+}
+
+/// Load several EPUB chapters in one blocking task with a single `EpubDoc::new` — much faster
+/// than calling [`reader_get_chapter`] once per chapter when prefetching.
+#[tauri::command]
+pub async fn reader_prefetch_epub_chapters(
+    path: String,
+    indices: Vec<usize>,
+) -> Result<Vec<ChapterInfo>, String> {
+    let book_path = PathBuf::from(&path);
+    if !book_path.exists() {
+        return Err(format!("File does not exist: {}", path));
+    }
+
+    let ext = book_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if ext != "epub" {
+        return Err("Prefetch only supported for EPUB".to_string());
+    }
+
+    let mut unique: Vec<usize> = indices
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    unique.sort_unstable();
+
+    if unique.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let bp = book_path.clone();
+
+    tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(|| {
+            let mut doc = epub::doc::EpubDoc::new(&bp).map_err(|e| e.to_string())?;
+            let num = doc.get_num_chapters();
+            let mut out = Vec::with_capacity(unique.len());
+
+            for idx in unique {
+                if idx >= num {
+                    continue;
+                }
+                out.push(load_epub_chapter_from_doc(&mut doc, idx, &bp)?);
+            }
+
+            Ok::<_, String>(out)
+        })
+        .unwrap_or_else(|_| Err("EPUB prefetch panicked".to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Load a single EPUB chapter on demand (lazy loading).
 /// Images are extracted to temp files and referenced via file:// URLs
 /// instead of being inlined as base64.
 #[tauri::command]
-pub async fn reader_get_chapter(
-    path: String,
-    chapter_index: usize,
-) -> Result<ChapterInfo, String> {
+pub async fn reader_get_chapter(path: String, chapter_index: usize) -> Result<ChapterInfo, String> {
     let book_path = PathBuf::from(&path);
     if !book_path.exists() {
         return Err(format!("File does not exist: {}", path));
@@ -1541,31 +1637,9 @@ pub async fn reader_get_chapter(
 
     tokio::task::spawn_blocking(move || {
         std::panic::catch_unwind(|| {
-            let mut doc =
-                epub::doc::EpubDoc::new(&bp).map_err(|e| e.to_string())?;
+            let mut doc = epub::doc::EpubDoc::new(&bp).map_err(|e| e.to_string())?;
 
-            // Navigate to the requested chapter
-            if !doc.set_current_chapter(idx) {
-                return Err(format!("Chapter {} not found", idx));
-            }
-
-            let (content, _mime) = doc
-                .get_current_str()
-                .ok_or_else(|| format!("Failed to read chapter {}", idx))?;
-
-            let title = doc
-                .get_current_id()
-                .unwrap_or_else(|| format!("Chapter {}", idx + 1));
-
-            // Extract images to temp files and replace src attributes
-            let content_with_images =
-                replace_epub_images_with_temp_files(&content, &mut doc, &bp);
-
-            Ok::<_, String>(ChapterInfo {
-                index: idx,
-                title,
-                content: content_with_images,
-            })
+            load_epub_chapter_from_doc(&mut doc, idx, &bp)
         })
         .unwrap_or_else(|_| Err(format!("Chapter {} parsing panicked", idx)))
     })
@@ -1630,16 +1704,11 @@ fn replace_epub_images_with_temp_files(
         for id in &resource_ids {
             if let Some(item) = doc.resources.get(id) {
                 let path_str = item.path.to_string_lossy();
-                if path_str.ends_with(&resource_name)
-                    || id == &resource_name
-                {
+                if path_str.ends_with(&resource_name) || id == &resource_name {
                     if let Some((data, _)) = doc.get_resource(id) {
                         let img_path = img_dir.join(&resource_name);
                         if std::fs::write(&img_path, &data).is_ok() {
-                            let file_url = format!(
-                                "file://{}",
-                                img_path.to_string_lossy()
-                            );
+                            let file_url = format!("file://{}", img_path.to_string_lossy());
                             result = format!(
                                 "{}{}{}",
                                 &result[..abs_pos],
@@ -4243,14 +4312,101 @@ pub async fn ai_analyze_health(
 // Google Fit integration
 // ============================================================================
 
+/// Must match an **Authorized redirect URI** in Google Cloud Console (OAuth client).
+/// Add exactly: `http://127.0.0.1:8745/` (with trailing slash) for a Desktop app client.
+const GFIT_LOOPBACK_REDIRECT: &str = "http://127.0.0.1:8745/";
+
+const GFIT_SCOPE: &str = concat!(
+    "https://www.googleapis.com/auth/fitness.activity.read ",
+    "https://www.googleapis.com/auth/fitness.body.read ",
+    "https://www.googleapis.com/auth/fitness.sleep.read ",
+    "https://www.googleapis.com/auth/fitness.heart_rate.read",
+);
+
+fn parse_gfit_oauth_callback(buf: &[u8]) -> Result<String, String> {
+    let s = std::str::from_utf8(buf).map_err(|_| "Invalid HTTP request".to_string())?;
+    let first = s
+        .lines()
+        .next()
+        .ok_or_else(|| "Empty request".to_string())?;
+    let path = first
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| "Bad request line".to_string())?;
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let query = query.split_whitespace().next().unwrap_or(query);
+    for pair in query.split('&') {
+        let mut it = pair.splitn(2, '=');
+        let k = it.next().unwrap_or("");
+        let v = it.next().unwrap_or("");
+        if k == "error" {
+            return Err(format!(
+                "Google OAuth error: {}",
+                urlencoding::decode(v).unwrap_or_else(|_| v.into())
+            ));
+        }
+        if k == "code" {
+            return urlencoding::decode(v)
+                .map(|c| c.into_owned())
+                .map_err(|e| e.to_string());
+        }
+    }
+    Err("No authorization code in OAuth callback".to_string())
+}
+
+#[derive(Debug, Deserialize)]
+struct GfitTokenJson {
+    access_token: String,
+    refresh_token: Option<String>,
+    #[allow(dead_code)]
+    expires_in: Option<u64>,
+}
+
+async fn gfit_exchange_code_for_tokens(
+    client_id: &str,
+    code: &str,
+    redirect_uri: &str,
+) -> Result<GfitTokenJson, String> {
+    let client = reqwest::Client::new();
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("client_id", client_id),
+        ("redirect_uri", redirect_uri),
+    ];
+    let resp = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Token request failed: {}", e))?;
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "Google token endpoint returned {}: {}",
+            status, body
+        ));
+    }
+    serde_json::from_str::<GfitTokenJson>(&body).map_err(|e| format!("Invalid token JSON: {}", e))
+}
+
+fn close_gfit_auth_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("google-fit-auth") {
+        let _ = w.close();
+    }
+}
+
 #[tauri::command]
 pub async fn gfit_open_auth(
     app: tauri::AppHandle,
     state: State<'_, AppStateHandle>,
 ) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::time::Duration;
 
-    // Read client_id from config
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
     let client_id: String = conn
@@ -4260,36 +4416,118 @@ pub async fn gfit_open_auth(
             |row| row.get(0),
         )
         .map_err(|_| {
-            "Google Fit client ID not configured. Go to Settings > Google Fit and enter your OAuth Client ID. \
-             Get one free at console.cloud.google.com > APIs > Credentials > OAuth 2.0 Client ID (Desktop app)."
+            "Google Fit client ID not configured. Enter your OAuth Client ID under Health & Fitness or \
+             Settings > Google Fit, save it, then try Connect again. Create a Desktop OAuth client at \
+             console.cloud.google.com and add redirect URI http://127.0.0.1:8745/"
                 .to_string()
         })?;
     drop(st);
 
+    let redirect_uri = GFIT_LOOPBACK_REDIRECT;
+    let listener = TcpListener::bind("127.0.0.1:8745").await.map_err(|e| {
+        format!(
+            "Could not listen on 127.0.0.1:8745 ({}). Close anything using that port, or ensure \
+                 your OAuth client uses redirect http://127.0.0.1:8745/",
+            e
+        )
+    })?;
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+
+    let callback_task = tokio::spawn(async move {
+        let result = tokio::time::timeout(Duration::from_secs(300), listener.accept()).await;
+        match result {
+            Ok(Ok((mut stream, _))) => {
+                let mut buf = vec![0u8; 16_384];
+                let n = match stream.read(&mut buf).await {
+                    Ok(n) => n,
+                    Err(e) => {
+                        let _ = tx.send(Err(e.to_string()));
+                        return;
+                    }
+                };
+                buf.truncate(n);
+                let parse_result = parse_gfit_oauth_callback(&buf);
+                let ok = parse_result.is_ok();
+                let body = if ok {
+                    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Connected</title></head>\
+                     <body style=\"font-family:system-ui;padding:2rem\">\
+                     <p>Google Fit is connected. You can close this window.</p></body></html>"
+                } else {
+                    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Authorization</title></head>\
+                     <body style=\"font-family:system-ui;padding:2rem\">\
+                     <p>Authorization did not complete. You can close this window.</p></body></html>"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+                let _ = tx.send(parse_result);
+            }
+            Ok(Err(e)) => {
+                let _ = tx.send(Err(format!("Accept failed: {}", e)));
+            }
+            Err(_) => {
+                let _ = tx.send(Err(
+                    "OAuth login timed out waiting for browser (5 minutes).".to_string(),
+                ));
+            }
+        }
+    });
+
     let auth_url = format!(
-        "https://accounts.google.com/o/oauth2/v2/auth?\
-        client_id={}&\
-        scope=https://www.googleapis.com/auth/fitness.activity.read+\
-        https://www.googleapis.com/auth/fitness.body.read+\
-        https://www.googleapis.com/auth/fitness.sleep.read+\
-        https://www.googleapis.com/auth/fitness.heart_rate.read&\
-        response_type=code&\
-        access_type=offline&\
-        redirect_uri=urn:ietf:wg:oauth:2.0:oob",
-        client_id
+        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&scope={}&response_type=code&\
+         access_type=offline&prompt=consent&redirect_uri={}",
+        urlencoding::encode(&client_id),
+        urlencoding::encode(GFIT_SCOPE),
+        urlencoding::encode(redirect_uri),
     );
 
-    WebviewWindowBuilder::new(
-        &app,
-        "google-fit-auth",
-        WebviewUrl::External(auth_url.parse().unwrap()),
-    )
-    .title("MINION - Google Fit Sign In")
-    .inner_size(500.0, 700.0)
-    .center()
-    .build()
-    .map_err(|e| e.to_string())?;
+    close_gfit_auth_window(&app);
+    let auth_parsed = url::Url::parse(&auth_url).map_err(|e| e.to_string())?;
+    WebviewWindowBuilder::new(&app, "google-fit-auth", WebviewUrl::External(auth_parsed))
+        .title("MINION - Google Fit Sign In")
+        .inner_size(500.0, 700.0)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
 
+    let code_result = tokio::time::timeout(Duration::from_secs(300), rx)
+        .await
+        .map_err(|_| {
+            callback_task.abort();
+            "OAuth login timed out.".to_string()
+        })?
+        .map_err(|_| {
+            callback_task.abort();
+            "OAuth was cancelled.".to_string()
+        })?;
+
+    callback_task.abort();
+
+    let code = code_result?;
+    let tokens = gfit_exchange_code_for_tokens(&client_id, &code, redirect_uri).await?;
+
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_access_token', ?1)",
+        rusqlite::params![tokens.access_token],
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(ref rt) = tokens.refresh_token {
+        conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_refresh_token', ?1)",
+            rusqlite::params![rt],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    drop(st);
+
+    close_gfit_auth_window(&app);
     Ok(())
 }
 
@@ -4388,9 +4626,64 @@ pub async fn gfit_check_connected(state: State<'_, AppStateHandle>) -> Result<bo
 pub async fn gfit_disconnect(state: State<'_, AppStateHandle>) -> Result<(), String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM config WHERE key LIKE 'gfit_%'", [])
-        .map_err(|e| e.to_string())?;
+    for key in ["gfit_access_token", "gfit_refresh_token"] {
+        conn.execute("DELETE FROM config WHERE key = ?1", rusqlite::params![key])
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
+}
+
+/// Exchange a pasted OAuth authorization code (same redirect as `gfit_open_auth`).
+#[tauri::command]
+pub async fn gfit_exchange_auth_code(
+    state: State<'_, AppStateHandle>,
+    code: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let client_id: String = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'gfit_client_id'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            "Google Fit client ID not configured. Save your OAuth Client ID first.".to_string()
+        })?;
+    drop(st);
+
+    let tokens =
+        gfit_exchange_code_for_tokens(&client_id, code.trim(), GFIT_LOOPBACK_REDIRECT).await?;
+
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_access_token', ?1)",
+        rusqlite::params![tokens.access_token],
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(ref rt) = tokens.refresh_token {
+        conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_refresh_token', ?1)",
+            rusqlite::params![rt],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn gfit_get_client_id(
+    state: State<'_, AppStateHandle>,
+) -> Result<Option<String>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let row: std::result::Result<String, rusqlite::Error> = conn.query_row(
+        "SELECT value FROM config WHERE key = 'gfit_client_id'",
+        [],
+        |row| row.get(0),
+    );
+    Ok(row.ok())
 }
 
 // ============================================================================
@@ -4519,137 +4812,88 @@ pub async fn calendar_delete_event(
 }
 
 #[tauri::command]
-pub async fn calendar_sync_google(state: State<'_, AppStateHandle>) -> Result<String, String> {
-    let st = state.read().await;
-    let conn = st.db.get().map_err(|e| e.to_string())?;
-
-    let token: Option<String> = conn
-        .query_row(
-            "SELECT value FROM config WHERE key = 'gfit_access_token'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-
-    let token = token.ok_or("Not connected to Google. Please connect in Settings first.")?;
-
-    drop(conn);
-    drop(st);
-
-    let client = reqwest::Client::new();
-    let now = chrono::Utc::now();
-    let time_min = (now - chrono::Duration::days(30)).to_rfc3339();
-    let time_max = (now + chrono::Duration::days(60)).to_rfc3339();
-
-    let url = format!(
-        "https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin={}&timeMax={}&singleEvents=true&orderBy=startTime&maxResults=250",
-        time_min, time_max
-    );
-
-    let resp = client
-        .get(&url)
-        .bearer_auth(&token)
-        .send()
-        .await
-        .map_err(|e| format!("Google Calendar API error: {}", e))?;
-
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-
-    if !status.is_success() {
-        return Err(format!(
-            "Google Calendar API returned {}: {}",
-            status,
-            serde_json::to_string(&body).unwrap_or_default()
-        ));
-    }
-
-    let items = body
-        .get("items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let st = state.read().await;
-    let conn = st.db.get().map_err(|e| e.to_string())?;
-    let now_str = chrono::Utc::now().to_rfc3339();
-    let mut upserted = 0;
-
-    for item in &items {
-        let remote_id = item
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let title = item
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(No title)")
-            .to_string();
-        let description = item
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let location = item
-            .get("location")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let start_obj = item.get("start");
-        let end_obj = item.get("end");
-        let all_day = start_obj.and_then(|s| s.get("date")).is_some();
-        let start_time = start_obj
-            .and_then(|s| s.get("dateTime").or(s.get("date")))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let end_time = end_obj
-            .and_then(|s| s.get("dateTime").or(s.get("date")))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        if start_time.is_empty() {
-            continue;
-        }
-
-        let id = format!("gcal_{}", remote_id);
-        conn.execute(
-            "INSERT OR REPLACE INTO calendar_events \
-             (id, title, description, start_time, end_time, all_day, location, color, source, remote_id, calendar_name, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '#4285f4', 'google', ?8, 'Google', ?9, ?9)",
-            rusqlite::params![
-                id, title, description, start_time, end_time,
-                all_day as i32, location, remote_id, now_str
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        upserted += 1;
-    }
-
-    Ok(format!("Synced {} events from Google Calendar.", upserted))
+pub async fn calendar_list_accounts(
+    state: State<'_, AppStateHandle>,
+) -> Result<Vec<crate::calendar_integration::CalendarAccountInfo>, String> {
+    crate::calendar_integration::list_accounts(state.inner()).await
 }
 
 #[tauri::command]
-pub async fn calendar_open_outlook_auth(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
+pub async fn calendar_google_open_auth(
+    app: tauri::AppHandle,
+    state: State<'_, AppStateHandle>,
+) -> Result<(), String> {
+    crate::calendar_integration::google_open_auth(app, state.inner().clone()).await
+}
 
-    let auth_url = "https://login.microsoftonline.com/common/oauth2/v2/authorize?\
-        scope=Calendars.Read+offline_access&\
-        response_type=code&\
-        redirect_uri=https://login.microsoftonline.com/common/oauth2/nativeclient";
+#[tauri::command]
+pub async fn calendar_outlook_open_auth(
+    app: tauri::AppHandle,
+    state: State<'_, AppStateHandle>,
+) -> Result<(), String> {
+    crate::calendar_integration::outlook_open_auth(app, state.inner().clone()).await
+}
 
-    WebviewWindowBuilder::new(
-        &app,
-        "outlook-calendar-auth",
-        WebviewUrl::External(auth_url.parse().unwrap()),
+#[tauri::command]
+pub async fn calendar_save_outlook_client_id(
+    state: State<'_, AppStateHandle>,
+    client_id: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('outlook_client_id', ?1)",
+        rusqlite::params![client_id],
     )
-    .title("Microsoft - Sign In")
-    .inner_size(500.0, 700.0)
-    .center()
-    .build()
     .map_err(|e| e.to_string())?;
-
     Ok(())
+}
+
+#[tauri::command]
+pub async fn calendar_get_outlook_client_id(
+    state: State<'_, AppStateHandle>,
+) -> Result<Option<String>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    match conn.query_row(
+        "SELECT value FROM config WHERE key = 'outlook_client_id'",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(s) => Ok(Some(s)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn calendar_remove_account(
+    state: State<'_, AppStateHandle>,
+    account_id: String,
+) -> Result<(), String> {
+    crate::calendar_integration::remove_account(state.inner(), account_id).await
+}
+
+#[tauri::command]
+pub async fn calendar_sync_google(
+    state: State<'_, AppStateHandle>,
+    account_id: Option<String>,
+) -> Result<String, String> {
+    match account_id {
+        Some(id) => crate::calendar_integration::sync_one_google(state.inner(), id).await,
+        None => crate::calendar_integration::sync_all_google(state.inner()).await,
+    }
+}
+
+#[tauri::command]
+pub async fn calendar_sync_outlook(
+    state: State<'_, AppStateHandle>,
+    account_id: Option<String>,
+) -> Result<String, String> {
+    match account_id {
+        Some(id) => crate::calendar_integration::sync_one_outlook(state.inner(), id).await,
+        None => crate::calendar_integration::sync_all_outlook(state.inner()).await,
+    }
 }
 
 // ============================================================================
@@ -5130,4 +5374,161 @@ pub async fn blog_analyze_seo(
 #[tauri::command]
 pub async fn blog_generate_slug(title: String) -> Result<String, String> {
     Ok(minion_blog::posts::slugify(&title))
+}
+
+// ============================================================================
+// Video metadata commands
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct VideoMetadataResponse {
+    pub duration_seconds: Option<f64>,
+    pub duration_formatted: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub resolution: Option<String>,
+    pub codec: Option<String>,
+    pub bitrate_kbps: Option<u64>,
+    pub file_size: u64,
+    pub file_size_formatted: String,
+    pub is_video: bool,
+}
+
+#[tauri::command]
+pub async fn files_get_video_metadata(path: String) -> Result<VideoMetadataResponse, String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err("File not found".to_string());
+    }
+
+    let file_size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let is_video = matches!(
+        ext.as_str(),
+        "mp4"
+            | "mkv"
+            | "avi"
+            | "mov"
+            | "wmv"
+            | "flv"
+            | "webm"
+            | "m4v"
+            | "mpg"
+            | "mpeg"
+            | "3gp"
+            | "ts"
+    );
+
+    if !is_video {
+        return Ok(VideoMetadataResponse {
+            duration_seconds: None,
+            duration_formatted: None,
+            width: None,
+            height: None,
+            resolution: None,
+            codec: None,
+            bitrate_kbps: None,
+            file_size,
+            file_size_formatted: format_bytes_helper(file_size),
+            is_video: false,
+        });
+    }
+
+    // Try ffprobe
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            &path,
+        ])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+
+            // Parse duration from format
+            let duration = json["format"]["duration"]
+                .as_str()
+                .and_then(|d| d.parse::<f64>().ok());
+
+            // Find video stream
+            let video_stream = json["streams"]
+                .as_array()
+                .and_then(|streams| streams.iter().find(|s| s["codec_type"] == "video"));
+
+            let width = video_stream.and_then(|s| s["width"].as_u64().map(|w| w as u32));
+            let height = video_stream.and_then(|s| s["height"].as_u64().map(|h| h as u32));
+            let codec = video_stream.and_then(|s| s["codec_name"].as_str().map(|c| c.to_string()));
+
+            let bitrate = json["format"]["bit_rate"]
+                .as_str()
+                .and_then(|b| b.parse::<u64>().ok())
+                .map(|b| b / 1000);
+
+            let duration_formatted = duration.map(|d| {
+                let h = (d / 3600.0) as u64;
+                let m = ((d % 3600.0) / 60.0) as u64;
+                let s = (d % 60.0) as u64;
+                if h > 0 {
+                    format!("{}:{:02}:{:02}", h, m, s)
+                } else {
+                    format!("{}:{:02}", m, s)
+                }
+            });
+
+            let resolution = match (width, height) {
+                (Some(w), Some(h)) => Some(format!("{}x{}", w, h)),
+                _ => None,
+            };
+
+            Ok(VideoMetadataResponse {
+                duration_seconds: duration,
+                duration_formatted,
+                width,
+                height,
+                resolution,
+                codec,
+                bitrate_kbps: bitrate,
+                file_size,
+                file_size_formatted: format_bytes_helper(file_size),
+                is_video: true,
+            })
+        }
+        _ => {
+            // ffprobe not available or failed - return basic info
+            Ok(VideoMetadataResponse {
+                duration_seconds: None,
+                duration_formatted: None,
+                width: None,
+                height: None,
+                resolution: None,
+                codec: None,
+                bitrate_kbps: None,
+                file_size,
+                file_size_formatted: format_bytes_helper(file_size),
+                is_video: true,
+            })
+        }
+    }
+}
+
+fn format_bytes_helper(bytes: u64) -> String {
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let k = 1024u64;
+    let sizes = ["B", "KB", "MB", "GB", "TB"];
+    let i = (bytes as f64).log(k as f64).floor() as usize;
+    let i = i.min(sizes.len() - 1);
+    format!("{:.1} {}", bytes as f64 / k.pow(i as u32) as f64, sizes[i])
 }

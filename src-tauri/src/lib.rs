@@ -2,6 +2,7 @@
 //!
 //! Main entry point for the Tauri desktop application.
 
+mod calendar_integration;
 mod commands;
 mod state;
 
@@ -66,9 +67,11 @@ pub fn run() {
             commands::files_open_file,
             commands::files_bulk_delete,
             commands::files_bulk_move,
+            commands::files_get_video_metadata,
             // Book Reader commands
             commands::reader_open_book,
             commands::reader_get_chapter,
+            commands::reader_prefetch_epub_chapters,
             commands::reader_get_pdf_path,
             commands::reader_get_pdf_bytes,
             commands::reader_list_books,
@@ -142,12 +145,20 @@ pub fn run() {
             commands::gfit_save_client_id,
             commands::gfit_check_connected,
             commands::gfit_disconnect,
+            commands::gfit_exchange_auth_code,
+            commands::gfit_get_client_id,
             // Calendar commands
             commands::calendar_add_event,
             commands::calendar_list_events,
             commands::calendar_delete_event,
+            commands::calendar_list_accounts,
+            commands::calendar_google_open_auth,
+            commands::calendar_outlook_open_auth,
+            commands::calendar_save_outlook_client_id,
+            commands::calendar_get_outlook_client_id,
+            commands::calendar_remove_account,
             commands::calendar_sync_google,
-            commands::calendar_open_outlook_auth,
+            commands::calendar_sync_outlook,
             // Media Intelligence commands
             commands::media_import_video,
             commands::media_list_projects,

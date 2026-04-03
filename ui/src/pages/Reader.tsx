@@ -1,6 +1,8 @@
 import { Component, createSignal, createEffect, on, onMount, onCleanup, For, Show } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
+import { PageFlip } from 'page-flip';
 
 // ============================================================================
 // Types
@@ -67,11 +69,137 @@ interface ChapterContent {
 
 type ReadingMode = 'light' | 'dark' | 'sepia';
 type LibraryTab = 'all' | 'collections' | 'oreilly';
+type PdfFitMode = 'fitWidth' | 'fitPage' | 'actual';
+
+/** StPageFlip `flippingTime` (ms) — must match completion timer in EpubStPageFlip. */
+const EPUB_PAGE_FLIP_MS = 960;
 
 const PRESET_COLORS = [
   '#0ea5e9', '#8b5cf6', '#ec4899', '#f97316', '#22c55e',
   '#ef4444', '#14b8a6', '#f59e0b', '#6366f1', '#64748b',
 ];
+
+// ============================================================================
+// EPUB: StPageFlip — soft page curl (Apple Books–style mesh + shadows)
+// ============================================================================
+
+function escapeHtmlTitle(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+interface EpubStPageFlipProps {
+  dir: 'forward' | 'back';
+  outgoingTitle: string;
+  incomingTitle: string;
+  outgoingHtml: string;
+  incomingHtml: string;
+  proseClass: string;
+  chapterTitleColor: string;
+  onComplete: () => void;
+}
+
+const EpubStPageFlip: Component<EpubStPageFlipProps> = (props) => {
+  let host: HTMLDivElement | undefined;
+  let pf: PageFlip | undefined;
+  let doneTimer: ReturnType<typeof setTimeout> | undefined;
+  let completed = false;
+
+  const finish = () => {
+    if (completed) return;
+    completed = true;
+    if (doneTimer !== undefined) clearTimeout(doneTimer);
+    props.onComplete();
+  };
+
+  onMount(() => {
+    if (!host) {
+      finish();
+      return;
+    }
+
+    const p0 = document.createElement('div');
+    p0.dataset.density = 'soft';
+    const p1 = document.createElement('div');
+    p1.dataset.density = 'soft';
+
+    const hStyle = `color: ${props.chapterTitleColor}; letter-spacing: -0.02em;`;
+    const wrap = (title: string, html: string) =>
+      `<h1 class="text-2xl font-bold mb-8" style="${hStyle}">${escapeHtmlTitle(title)}</h1><div class="prose max-w-none ${props.proseClass}">${html}</div>`;
+
+    if (props.dir === 'forward') {
+      p0.innerHTML = wrap(props.outgoingTitle, props.outgoingHtml);
+      p1.innerHTML = wrap(props.incomingTitle, props.incomingHtml);
+    } else {
+      p0.innerHTML = wrap(props.incomingTitle, props.incomingHtml);
+      p1.innerHTML = wrap(props.outgoingTitle, props.outgoingHtml);
+    }
+
+    try {
+      pf = new PageFlip(host, {
+        width: 520,
+        height: 720,
+        size: 'stretch',
+        minWidth: 280,
+        maxWidth: 960,
+        minHeight: 420,
+        maxHeight: 2400,
+        flippingTime: EPUB_PAGE_FLIP_MS,
+        usePortrait: true,
+        maxShadowOpacity: 0.48,
+        drawShadow: true,
+        showPageCorners: false,
+        useMouseEvents: false,
+        disableFlipByClick: true,
+        mobileScrollSupport: false,
+        autoSize: true,
+        showCover: false,
+        startPage: props.dir === 'forward' ? 0 : 1,
+        startZIndex: 0,
+      });
+
+      pf.loadFromHTML([p0, p1]);
+
+      requestAnimationFrame(() => {
+        if (!pf) return;
+        if (props.dir === 'forward') {
+          pf.flipNext('top');
+        } else {
+          pf.flipPrev('top');
+        }
+      });
+
+      doneTimer = setTimeout(finish, EPUB_PAGE_FLIP_MS + 120);
+    } catch (e) {
+      console.error('StPageFlip failed:', e);
+      finish();
+    }
+  });
+
+  onCleanup(() => {
+    if (doneTimer !== undefined) clearTimeout(doneTimer);
+    if (pf) {
+      try {
+        pf.destroy();
+      } catch {
+        /* host may already be detached */
+      }
+      pf = undefined;
+    }
+  });
+
+  return (
+    <div
+      ref={(el) => {
+        host = el;
+      }}
+      class="epub-st-page-flip-host w-full min-h-[65vh] min-w-0"
+    />
+  );
+};
 
 // ============================================================================
 // Component
@@ -149,15 +277,104 @@ const Reader: Component = () => {
   const [chapterLoading, setChapterLoading] = createSignal(false);
   const [chapterHtml, setChapterHtml] = createSignal('');
 
+  /** EPUB: 3D page-turn — outgoing leaf over incoming page (both full HTML snapshots). */
+  const [epubTurnOutgoingHtml, setEpubTurnOutgoingHtml] = createSignal('');
+  const [epubTurnIncomingHtml, setEpubTurnIncomingHtml] = createSignal('');
+  const [epubTurnDir, setEpubTurnDir] = createSignal<'forward' | 'back'>('forward');
+  /** While turning, `currentChapter` is still the outgoing page; this is the incoming index. */
+  const [epubTurnTargetIndex, setEpubTurnTargetIndex] = createSignal<number | null>(null);
+
   // ---- PDF state (pdf.js) ----
   const [pdfDoc, setPdfDoc] = createSignal<any>(null);
   const [pdfCurrentPage, setPdfCurrentPage] = createSignal(1);
   const [pdfTotalPages, setPdfTotalPages] = createSignal(0);
   const [pdfZoom, setPdfZoom] = createSignal(1.5);
+  /** When not `actual`, zoom is derived from container vs page size. */
+  const [pdfFitMode, setPdfFitMode] = createSignal<PdfFitMode>('fitWidth');
+  const [pdfLayoutTick, setPdfLayoutTick] = createSignal(0);
   const [pdfLoading, setPdfLoading] = createSignal(false);
   const [pdfPageInputValue, setPdfPageInputValue] = createSignal('1');
   let pdfCanvasRef: HTMLCanvasElement | undefined;
   let pdfContainerRef: HTMLDivElement | undefined;
+  let pdfResizeObserver: ResizeObserver | undefined;
+  /** Parallel EPUB loads (prefetch + single chapter) share one loading indicator. */
+  let chapterLoadDepth = 0;
+  /** EPUB / text reader scroll root (for scroll-to-top + parallax). */
+  let textScrollContainerRef: HTMLDivElement | undefined;
+
+  // Apple Books–style scroll-linked depth (Option C)
+  let readScrollRafId = 0;
+  let pendingReadScrollTarget: HTMLElement | null = null;
+  let readScrollIdleTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const readingReducedMotion = () =>
+    typeof window !== 'undefined' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const flushReadScrollParallax = () => {
+    readScrollRafId = 0;
+    const el = pendingReadScrollTarget;
+    pendingReadScrollTarget = null;
+    if (!el || readingReducedMotion()) return;
+    const layer = el.querySelector('.apple-books-read-layer') as HTMLElement | null;
+    if (!layer) return;
+    const max = Math.max(1, el.scrollHeight - el.clientHeight);
+    const t = max <= 1 ? 0 : el.scrollTop / max;
+    const parallax = (t - 0.5) * 10;
+    layer.style.setProperty('--read-parallax-y', `${-parallax}px`);
+    layer.style.setProperty('--read-shadow-alpha', String(0.05 + Math.abs(t - 0.5) * 0.1));
+    layer.classList.add('read-layer-scrolling');
+    if (readScrollIdleTimer) clearTimeout(readScrollIdleTimer);
+    readScrollIdleTimer = setTimeout(() => {
+      layer.classList.remove('read-layer-scrolling');
+    }, 120);
+  };
+
+  const handleReadScroll = (e: Event) => {
+    if (readingReducedMotion()) return;
+    pendingReadScrollTarget = e.currentTarget as HTMLElement;
+    if (readScrollRafId) return;
+    readScrollRafId = requestAnimationFrame(flushReadScrollParallax);
+  };
+
+  /** Scroll EPUB/text reading pane to top (PDF uses `pdfContainerRef`). */
+  const scrollTextReadingToTop = () => {
+    if (textScrollContainerRef) textScrollContainerRef.scrollTop = 0;
+  };
+
+  // PDF page turn animation (prev/next / keyboard)
+  const [pdfNavBusy, setPdfNavBusy] = createSignal(false);
+  const [pdfPageSwapClass, setPdfPageSwapClass] = createSignal('');
+
+  const runPdfPageChange = async (targetPage: number, dir: 'forward' | 'back') => {
+    if (pdfNavBusy()) return;
+    const doc = pdfDoc();
+    if (!doc || !pdfCanvasRef) return;
+    const n = Math.max(1, Math.min(Math.floor(targetPage), doc.numPages));
+    if (n === pdfCurrentPage()) return;
+
+    setPdfNavBusy(true);
+    try {
+      if (readingReducedMotion()) {
+        await renderPdfPage(n);
+        savePdfProgress(n);
+        if (pdfContainerRef) pdfContainerRef.scrollTop = 0;
+        return;
+      }
+      const outCls = dir === 'forward' ? 'pdf-page-out-left' : 'pdf-page-out-right';
+      const inCls = dir === 'forward' ? 'pdf-page-in-right' : 'pdf-page-in-left';
+      setPdfPageSwapClass(outCls);
+      await new Promise<void>((r) => setTimeout(r, 200));
+      await renderPdfPage(n);
+      setPdfPageSwapClass(inCls);
+      await new Promise<void>((r) => setTimeout(r, 260));
+      setPdfPageSwapClass('');
+      savePdfProgress(n);
+      if (pdfContainerRef) pdfContainerRef.scrollTop = 0;
+    } finally {
+      setPdfNavBusy(false);
+    }
+  };
 
   // ============================================================================
   // Keyboard navigation
@@ -169,6 +386,7 @@ const Reader: Component = () => {
 
     const book = currentBook()!;
     const isPdf = book.format === 'pdf';
+    if (isPdf && pdfNavBusy()) return;
 
     if (e.key === 'ArrowRight') {
       e.preventDefault();
@@ -201,6 +419,9 @@ const Reader: Component = () => {
 
   onCleanup(() => {
     document.removeEventListener('keydown', handleKeyDown);
+    if (readScrollIdleTimer) clearTimeout(readScrollIdleTimer);
+    pdfResizeObserver?.disconnect();
+    pdfResizeObserver = undefined;
     // Clean up pdf.js document
     const doc = pdfDoc();
     if (doc) {
@@ -234,44 +455,165 @@ const Reader: Component = () => {
   // EPUB lazy chapter loading
   // ============================================================================
 
-  const loadChapter = async (index: number): Promise<string> => {
+  const fetchChapterIntoCache = async (index: number): Promise<string> => {
     const cache = chapterCache();
-    if (cache.has(index)) return cache.get(index)!;
-
     const book = currentBook();
-    if (!book || !book.file_path) return '<p>No content available.</p>';
+    if (!book?.file_path) return '<p>No content available.</p>';
 
-    setChapterLoading(true);
+    const chapter = await invoke<ChapterContent>('reader_get_chapter', {
+      path: book.file_path,
+      chapterIndex: index,
+    });
+    cache.set(index, chapter.content);
+    return chapter.content;
+  };
+
+  /** One `EpubDoc` open on the backend for several chapters — faster than repeated `reader_get_chapter`. */
+  const prefetchEpubChapters = async (indices: number[]) => {
+    const book = currentBook();
+    if (!book?.file_path || book.format !== 'epub') return;
+
+    const missing = [...new Set(indices)].filter(
+      i => i >= 0 && i < book.chapters.length && !chapterCache().has(i)
+    );
+    if (missing.length === 0) return;
+
+    chapterLoadDepth++;
+    if (chapterLoadDepth === 1) setChapterLoading(true);
     try {
-      const chapter = await invoke<ChapterContent>('reader_get_chapter', {
-        path: book.file_path,
-        chapterIndex: index,
-      });
-      cache.set(index, chapter.content);
-      return chapter.content;
-    } catch (e) {
-      console.error(`Failed to load chapter ${index}:`, e);
-      return `<p style="color:red;">Failed to load chapter: ${e}</p>`;
+      try {
+        const chapters = await invoke<ChapterContent[]>('reader_prefetch_epub_chapters', {
+          path: book.file_path,
+          indices: missing,
+        });
+        const cache = chapterCache();
+        for (const ch of chapters) {
+          cache.set(ch.index, ch.content);
+        }
+      } catch (e) {
+        console.warn('Batch EPUB prefetch failed, loading sequentially:', e);
+        for (const i of missing) {
+          try {
+            await fetchChapterIntoCache(i);
+          } catch (err) {
+            console.error(`Chapter ${i}:`, err);
+            chapterCache().set(
+              i,
+              `<p style="color:red;">Failed to load chapter: ${err}</p>`
+            );
+          }
+        }
+      }
     } finally {
-      setChapterLoading(false);
+      chapterLoadDepth--;
+      if (chapterLoadDepth === 0) setChapterLoading(false);
     }
   };
 
-  const preloadAdjacentChapters = (index: number) => {
+  const chapterTitleForIndex = (idx: number) => {
     const book = currentBook();
-    if (!book) return;
-    if (index + 1 < book.chapters.length) loadChapter(index + 1);
-    if (index - 1 >= 0) loadChapter(index - 1);
+    if (!book || idx < 0 || idx >= book.chapters.length) {
+      return `Chapter ${idx + 1}`;
+    }
+    return book.chapters[idx].title || `Chapter ${idx + 1}`;
   };
 
-  // When the current chapter changes for an EPUB, load the content
+  const completeEpubChapterTurn = (targetIndex: number, incoming: string) => {
+    setCurrentChapter(targetIndex);
+    setChapterHtml(incoming);
+    setEpubTurnOutgoingHtml('');
+    setEpubTurnIncomingHtml('');
+    setEpubTurnTargetIndex(null);
+    setPageTransitioning(false);
+    scrollTextReadingToTop();
+    saveProgress(targetIndex);
+    const book = currentBook();
+    if (book && book.format === 'epub') {
+      void prefetchEpubChapters(
+        [targetIndex - 1, targetIndex, targetIndex + 1, targetIndex + 2].filter(
+          i => i >= 0 && i < book.chapters.length
+        )
+      );
+    }
+  };
+
+  /**
+   * EPUB chapter change: StPageFlip soft curl (mesh + shadows), like Apple Books.
+   */
+  const runEpubPageTurn = async (targetIndex: number, dir: 'forward' | 'back') => {
+    const book = currentBook();
+    if (!book || book.format !== 'epub' || pageTransitioning()) return;
+    if (targetIndex < 0 || targetIndex >= book.chapters.length) return;
+    if (targetIndex === currentChapter()) return;
+    if (!chapterHtml()) return;
+
+    if (readingReducedMotion()) {
+      setPageTransitioning(true);
+      setPageDirection(dir === 'forward' ? 'left' : 'right');
+      await prefetchEpubChapters(
+        [targetIndex, targetIndex + 1, targetIndex - 1, targetIndex + 2].filter(
+          i => i >= 0 && i < book.chapters.length
+        )
+      );
+      let html = chapterCache().get(targetIndex);
+      if (!html) {
+        try {
+          html = await fetchChapterIntoCache(targetIndex);
+        } catch (e) {
+          console.error(e);
+          setPageTransitioning(false);
+          return;
+        }
+      }
+      setCurrentChapter(targetIndex);
+      setChapterHtml(html);
+      scrollTextReadingToTop();
+      saveProgress(targetIndex);
+      setPageTransitioning(false);
+      return;
+    }
+
+    setPageDirection(dir === 'forward' ? 'left' : 'right');
+    setPageTransitioning(true);
+
+    await prefetchEpubChapters(
+      [targetIndex, targetIndex + 1, targetIndex - 1, targetIndex + 2].filter(
+        i => i >= 0 && i < book.chapters.length
+      )
+    );
+
+    let incoming = chapterCache().get(targetIndex);
+    if (!incoming) {
+      try {
+        incoming = await fetchChapterIntoCache(targetIndex);
+      } catch (e) {
+        console.error('Failed to load chapter for page turn:', e);
+        setPageTransitioning(false);
+        return;
+      }
+    }
+
+    const outgoing = chapterHtml();
+    setEpubTurnDir(dir);
+    setEpubTurnTargetIndex(targetIndex);
+    setEpubTurnOutgoingHtml(outgoing);
+    setEpubTurnIncomingHtml(incoming);
+
+    scrollTextReadingToTop();
+  };
+
+  // When the current chapter changes for an EPUB, prefetch current + neighbors in one batch
   createEffect(on(
     () => [currentChapter(), currentBook()?.format] as const,
     async ([chapIdx, format]) => {
       if (format !== 'epub' || !currentBook()) return;
-      const html = await loadChapter(chapIdx);
-      setChapterHtml(html);
-      preloadAdjacentChapters(chapIdx);
+      const book = currentBook()!;
+      const max = book.chapters.length;
+      const indices = [chapIdx - 1, chapIdx, chapIdx + 1, chapIdx + 2].filter(
+        i => i >= 0 && i < max
+      );
+      await prefetchEpubChapters(indices);
+      setChapterHtml(chapterCache().get(chapIdx) || '');
     },
     { defer: true }
   ));
@@ -334,6 +676,20 @@ const Reader: Component = () => {
     // before refs run, so the canvas stayed blank.
   };
 
+  const getPdfRenderScale = async (page: { getViewport: (o: { scale: number }) => { width: number; height: number } }) => {
+    const mode = pdfFitMode();
+    if (mode === 'actual') return pdfZoom();
+    if (!pdfContainerRef) return pdfZoom();
+    const base = page.getViewport({ scale: 1 });
+    const padX = 40;
+    const cw = Math.max(80, pdfContainerRef.clientWidth - padX);
+    const ch = Math.max(80, pdfContainerRef.clientHeight - 48);
+    if (mode === 'fitWidth') {
+      return cw / base.width;
+    }
+    return Math.min(cw / base.width, ch / base.height);
+  };
+
   const renderPdfPage = async (pageNum: number) => {
     const doc = pdfDoc();
     if (!doc || !pdfCanvasRef) return;
@@ -341,7 +697,7 @@ const Reader: Component = () => {
     try {
       const n = Math.max(1, Math.min(Math.floor(Number(pageNum)) || 1, doc.numPages));
       const page = await doc.getPage(n);
-      const scale = pdfZoom();
+      const scale = await getPdfRenderScale(page);
       const viewport = page.getViewport({ scale });
 
       // Set canvas size accounting for device pixel ratio for crisp rendering
@@ -363,12 +719,12 @@ const Reader: Component = () => {
     }
   };
 
-  // Re-render when zoom changes
+  // Re-render PDF when zoom, fit mode, or container size changes
   createEffect(on(
-    () => pdfZoom(),
+    () => [pdfDoc(), pdfFitMode(), pdfZoom(), pdfLayoutTick()] as const,
     () => {
       if (pdfDoc()) {
-        renderPdfPage(pdfCurrentPage());
+        void renderPdfPage(pdfCurrentPage());
       }
     },
     { defer: true }
@@ -376,26 +732,19 @@ const Reader: Component = () => {
 
   const nextPdfPage = () => {
     if (pdfCurrentPage() >= pdfTotalPages()) return;
-    const next = pdfCurrentPage() + 1;
-    renderPdfPage(next);
-    savePdfProgress(next);
-    // Scroll canvas to top
-    if (pdfContainerRef) pdfContainerRef.scrollTop = 0;
+    void runPdfPageChange(pdfCurrentPage() + 1, 'forward');
   };
 
   const prevPdfPage = () => {
     if (pdfCurrentPage() <= 1) return;
-    const prev = pdfCurrentPage() - 1;
-    renderPdfPage(prev);
-    savePdfProgress(prev);
-    if (pdfContainerRef) pdfContainerRef.scrollTop = 0;
+    void runPdfPageChange(pdfCurrentPage() - 1, 'back');
   };
 
   const goToPdfPage = (page: number) => {
     if (page < 1 || page > pdfTotalPages()) return;
-    renderPdfPage(page);
-    savePdfProgress(page);
-    if (pdfContainerRef) pdfContainerRef.scrollTop = 0;
+    const cur = pdfCurrentPage();
+    if (page === cur) return;
+    void runPdfPageChange(page, page > cur ? 'forward' : 'back');
   };
 
   const handlePdfPageInput = (e: KeyboardEvent) => {
@@ -419,6 +768,30 @@ const Reader: Component = () => {
     } catch (e) {
       console.error('Failed to save PDF progress:', e);
     }
+  };
+
+  const toggleReaderFullscreen = async () => {
+    try {
+      const win = getCurrentWindow();
+      await win.setFullscreen(!(await win.isFullscreen()));
+    } catch {
+      try {
+        if (!document.fullscreenElement) {
+          await document.documentElement.requestFullscreen();
+        } else {
+          await document.exitFullscreen();
+        }
+      } catch (e) {
+        console.warn('Fullscreen not available:', e);
+      }
+    }
+  };
+
+  const pdfZoomLabel = () => {
+    const mode = pdfFitMode();
+    if (mode === 'fitWidth') return 'Fit width';
+    if (mode === 'fitPage') return 'Fit page';
+    return `${Math.round(pdfZoom() * 100)}%`;
   };
 
   // ============================================================================
@@ -477,10 +850,15 @@ const Reader: Component = () => {
     // Clear previous state
     chapterCache().clear();
     setChapterHtml('');
+    setEpubTurnOutgoingHtml('');
+    setEpubTurnIncomingHtml('');
+    setEpubTurnTargetIndex(null);
     setPdfDoc(null);
     setPdfCurrentPage(1);
     setPdfTotalPages(0);
     setPdfPageInputValue('1');
+    setPdfFitMode('fitWidth');
+    setPdfLayoutTick(0);
 
     try {
       // Import book to DB for metadata
@@ -551,10 +929,15 @@ const Reader: Component = () => {
       setCurrentBookId(null);
       setLoadingBookMeta(null);
       setChapterHtml('');
+      setEpubTurnOutgoingHtml('');
+      setEpubTurnIncomingHtml('');
+      setEpubTurnTargetIndex(null);
       chapterCache().clear();
       setView('library');
       setBookClosing(false);
       setShowToc(false);
+      setPdfPageSwapClass('');
+      setPdfFitMode('fitWidth');
       loadLibrary();
     }, 350);
   };
@@ -589,61 +972,65 @@ const Reader: Component = () => {
     if (!book || currentChapter() >= book.chapters.length - 1) return;
     if (pageTransitioning()) return;
 
-    setPageDirection('left');
-    setPageTransitioning(true);
-
     const newChapter = currentChapter() + 1;
-
-    setTimeout(() => {
-      setCurrentChapter(newChapter);
-      const contentEl = document.getElementById('reader-content-scroll');
-      if (contentEl) contentEl.scrollTop = 0;
-      saveProgress(newChapter);
-    }, 300);
-
-    setTimeout(() => {
-      setPageTransitioning(false);
-    }, 600);
+    if (isEpub()) {
+      void runEpubPageTurn(newChapter, 'forward');
+    } else {
+      setPageDirection('left');
+      setPageTransitioning(true);
+      setTimeout(() => {
+        setCurrentChapter(newChapter);
+        scrollTextReadingToTop();
+        saveProgress(newChapter);
+      }, 260);
+      setTimeout(() => {
+        setPageTransitioning(false);
+      }, 540);
+    }
   };
 
   const prevChapter = () => {
     if (currentChapter() <= 0) return;
     if (pageTransitioning()) return;
 
-    setPageDirection('right');
-    setPageTransitioning(true);
-
     const newChapter = currentChapter() - 1;
-
-    setTimeout(() => {
-      setCurrentChapter(newChapter);
-      const contentEl = document.getElementById('reader-content-scroll');
-      if (contentEl) contentEl.scrollTop = 0;
-      saveProgress(newChapter);
-    }, 300);
-
-    setTimeout(() => {
-      setPageTransitioning(false);
-    }, 600);
+    if (isEpub()) {
+      void runEpubPageTurn(newChapter, 'back');
+    } else {
+      setPageDirection('right');
+      setPageTransitioning(true);
+      setTimeout(() => {
+        setCurrentChapter(newChapter);
+        scrollTextReadingToTop();
+        saveProgress(newChapter);
+      }, 260);
+      setTimeout(() => {
+        setPageTransitioning(false);
+      }, 540);
+    }
   };
 
   const goToChapter = (index: number) => {
     if (pageTransitioning()) return;
-    const dir = index > currentChapter() ? 'left' : 'right';
-    setPageDirection(dir);
-    setPageTransitioning(true);
+    const cur = currentChapter();
+    if (index === cur) return;
 
-    setTimeout(() => {
-      setCurrentChapter(index);
+    if (isEpub()) {
+      void runEpubPageTurn(index, index > cur ? 'forward' : 'back');
       setShowToc(false);
-      const contentEl = document.getElementById('reader-content-scroll');
-      if (contentEl) contentEl.scrollTop = 0;
-      saveProgress(index);
-    }, 300);
-
-    setTimeout(() => {
-      setPageTransitioning(false);
-    }, 600);
+    } else {
+      setPageDirection(index > cur ? 'left' : 'right');
+      setPageTransitioning(true);
+      setTimeout(() => {
+        setCurrentChapter(index);
+        setShowToc(false);
+        scrollTextReadingToTop();
+        saveProgress(index);
+      }, 260);
+      setTimeout(() => {
+        setPageTransitioning(false);
+      }, 540);
+    }
   };
 
   // ============================================================================
@@ -1099,12 +1486,12 @@ const Reader: Component = () => {
         /* Page turn animations - Apple Books style smooth slide with depth */
         @keyframes pageExitLeft {
           0% {
-            transform: perspective(1200px) translateX(0) rotateY(0deg);
+            transform: perspective(1400px) translateX(0) translateZ(0) rotateY(0deg);
             opacity: 1;
             transform-origin: left center;
           }
           100% {
-            transform: perspective(1200px) translateX(-30px) rotateY(15deg);
+            transform: perspective(1400px) translateX(-42px) translateZ(-12px) rotateY(18deg);
             opacity: 0;
             transform-origin: left center;
           }
@@ -1112,12 +1499,12 @@ const Reader: Component = () => {
 
         @keyframes pageEnterRight {
           0% {
-            transform: perspective(1200px) translateX(50px) rotateY(-10deg);
+            transform: perspective(1400px) translateX(56px) translateZ(-8px) rotateY(-12deg);
             opacity: 0;
             transform-origin: right center;
           }
           100% {
-            transform: perspective(1200px) translateX(0) rotateY(0deg);
+            transform: perspective(1400px) translateX(0) translateZ(0) rotateY(0deg);
             opacity: 1;
             transform-origin: right center;
           }
@@ -1125,12 +1512,12 @@ const Reader: Component = () => {
 
         @keyframes pageExitRight {
           0% {
-            transform: perspective(1200px) translateX(0) rotateY(0deg);
+            transform: perspective(1400px) translateX(0) translateZ(0) rotateY(0deg);
             opacity: 1;
             transform-origin: right center;
           }
           100% {
-            transform: perspective(1200px) translateX(30px) rotateY(-15deg);
+            transform: perspective(1400px) translateX(42px) translateZ(-12px) rotateY(-18deg);
             opacity: 0;
             transform-origin: right center;
           }
@@ -1138,31 +1525,31 @@ const Reader: Component = () => {
 
         @keyframes pageEnterLeft {
           0% {
-            transform: perspective(1200px) translateX(-50px) rotateY(10deg);
+            transform: perspective(1400px) translateX(-56px) translateZ(-8px) rotateY(12deg);
             opacity: 0;
             transform-origin: left center;
           }
           100% {
-            transform: perspective(1200px) translateX(0) rotateY(0deg);
+            transform: perspective(1400px) translateX(0) translateZ(0) rotateY(0deg);
             opacity: 1;
             transform-origin: left center;
           }
         }
 
         .page-exit-left {
-          animation: pageExitLeft 0.35s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+          animation: pageExitLeft 0.42s cubic-bezier(0.22, 1, 0.36, 1) forwards;
         }
 
         .page-enter-right {
-          animation: pageEnterRight 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+          animation: pageEnterRight 0.48s cubic-bezier(0.22, 1, 0.36, 1) forwards;
         }
 
         .page-exit-right {
-          animation: pageExitRight 0.35s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+          animation: pageExitRight 0.42s cubic-bezier(0.22, 1, 0.36, 1) forwards;
         }
 
         .page-enter-left {
-          animation: pageEnterLeft 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+          animation: pageEnterLeft 0.48s cubic-bezier(0.22, 1, 0.36, 1) forwards;
         }
 
         /* Book open - zooms from card position with a page-unfold feel */
@@ -1331,9 +1718,9 @@ const Reader: Component = () => {
           background: rgba(0, 0, 0, 0.05);
         }
 
-        /* Shared prose improvements */
+        /* Shared prose improvements (Apple Books–like rhythm) */
         .sepia-prose, .dark-prose, .light-prose {
-          line-height: 1.85;
+          line-height: 1.78;
           letter-spacing: 0.01em;
         }
 
@@ -1418,9 +1805,109 @@ const Reader: Component = () => {
           overflow: hidden;
         }
 
-        /* Smooth scroll for reader content */
-        #reader-content-scroll {
-          scroll-behavior: smooth;
+        /* Scroll roots (EPUB + PDF): native momentum; avoid CSS smooth scroll (hurts trackpad). */
+        [data-reading-scroll] {
+          scroll-behavior: auto;
+          overscroll-behavior-y: contain;
+          -webkit-overflow-scrolling: touch;
+        }
+
+        /* Apple Books–style scroll-linked depth (Option C) */
+        .apple-books-read-layer {
+          transform: translate3d(0, var(--read-parallax-y, 0px), 0);
+          box-shadow:
+            0 1px 0 rgba(0, 0, 0, calc(var(--read-shadow-alpha, 0.06))),
+            0 16px 48px -20px rgba(0, 0, 0, calc(var(--read-shadow-alpha, 0.04)));
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .apple-books-read-layer {
+            transform: none !important;
+            box-shadow: none !important;
+          }
+        }
+
+        .read-layer-scrolling {
+          will-change: transform;
+        }
+
+        .reader-chapter-perspective {
+          perspective: 1400px;
+        }
+
+        .reader-chapter-stage {
+          overflow-x: hidden;
+        }
+
+        .reader-chapter-stage:has(.epub-page-turn-stage) {
+          overflow: visible;
+        }
+
+        /* EPUB: StPageFlip root (soft curl — library injects .stf__* layers + shadows) */
+        .epub-page-turn-stage {
+          position: relative;
+          overflow: visible;
+        }
+
+        .epub-page-turn-scroll {
+          overflow-x: visible !important;
+        }
+
+        /* PDF page turn (prev/next) — softer slide + scale like a turning sheet */
+        .pdf-page-swap {
+          display: inline-block;
+          transition:
+            transform 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+            opacity 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+        }
+
+        .pdf-page-swap.pdf-page-out-left {
+          transform: translateX(-28px) scale(0.97) rotateY(4deg);
+          opacity: 0.2;
+        }
+
+        .pdf-page-swap.pdf-page-out-right {
+          transform: translateX(28px) scale(0.97) rotateY(-4deg);
+          opacity: 0.2;
+        }
+
+        .pdf-page-swap.pdf-page-in-right {
+          animation: pdfPageInFromRight 0.34s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+        }
+
+        .pdf-page-swap.pdf-page-in-left {
+          animation: pdfPageInFromLeft 0.34s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+        }
+
+        @keyframes pdfPageInFromRight {
+          from {
+            opacity: 0;
+            transform: translateX(36px) scale(0.98);
+          }
+          to {
+            opacity: 1;
+            transform: translateX(0) scale(1);
+          }
+        }
+
+        @keyframes pdfPageInFromLeft {
+          from {
+            opacity: 0;
+            transform: translateX(-36px) scale(0.98);
+          }
+          to {
+            opacity: 1;
+            transform: translateX(0) scale(1);
+          }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .pdf-page-swap {
+            transition: none;
+            animation: none !important;
+            transform: none !important;
+            opacity: 1 !important;
+          }
         }
 
         /* Library card opening pulse */
@@ -2220,7 +2707,7 @@ const Reader: Component = () => {
                     : readingMode() === 'dark'
                       ? '#16213e'
                       : '#f3f4f6',
-                height: '3px',
+                height: '2px',
                 position: 'relative',
                 'flex-shrink': '0',
               }}
@@ -2239,9 +2726,9 @@ const Reader: Component = () => {
               />
             </div>
 
-            {/* Reader Header */}
+            {/* Reader Header (Apple Books–like: back | centered title | tools) */}
             <div
-              class="flex items-center justify-between px-4 py-2 border-b"
+              class="flex items-center gap-2 px-3 py-2.5 border-b"
               style={{
                 background: modeStyles().headerBg,
                 'border-color': modeStyles().headerBorder,
@@ -2249,51 +2736,53 @@ const Reader: Component = () => {
                 'flex-shrink': '0',
               }}
             >
-              <div class="flex items-center gap-4">
-                <button
-                  class="p-2 rounded-lg transition-colors"
-                  style={{
-                    color: modeStyles().text,
-                  }}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLElement).style.background = modeStyles().hoverBg;
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLElement).style.background = 'transparent';
-                  }}
-                  onClick={closeBook}
-                  title="Back to library (Esc)"
+              <button
+                class="p-2 rounded-lg transition-colors flex-shrink-0"
+                style={{
+                  color: modeStyles().text,
+                }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLElement).style.background = modeStyles().hoverBg;
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLElement).style.background = 'transparent';
+                }}
+                onClick={closeBook}
+                title="Back to library (Esc)"
+              >
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M15 19l-7-7 7-7"
+                  />
+                </svg>
+              </button>
+
+              <div class="flex-1 min-w-0 text-center px-1">
+                <h2
+                  class="text-lg font-semibold tracking-tight truncate"
+                  style={{ color: modeStyles().text }}
                 >
-                  <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M15 19l-7-7 7-7"
-                    />
-                  </svg>
-                </button>
-                <div>
-                  <h2 class="font-medium truncate max-w-md">
-                    {currentBook()?.metadata.title || loadingBookMeta()?.title || 'Loading...'}
-                  </h2>
-                  <p class="text-xs" style={{ color: modeStyles().mutedText }}>
-                    {currentBook()
-                      ? <>
-                          {currentBook()!.metadata.authors?.length > 0
-                            ? currentBook()!.metadata.authors.join(', ') + ' \u00B7 '
-                            : ''}
-                          {isPdf()
-                            ? `Page ${pdfCurrentPage()} of ${pdfTotalPages()}`
-                            : `Chapter ${currentChapter() + 1} of ${currentBook()!.chapters.length}`
-                          }
-                        </>
-                      : loadingBookMeta()?.author || 'Loading book content...'}
-                  </p>
-                </div>
+                  {currentBook()?.metadata.title || loadingBookMeta()?.title || 'Loading...'}
+                </h2>
+                <p class="text-[11px] sm:text-xs mt-0.5 truncate" style={{ color: modeStyles().mutedText }}>
+                  {currentBook()
+                    ? <>
+                        {currentBook()!.metadata.authors?.length > 0
+                          ? currentBook()!.metadata.authors.join(', ') + ' \u00B7 '
+                          : ''}
+                        {isPdf()
+                          ? `Page ${pdfCurrentPage()} of ${pdfTotalPages()}`
+                          : `Chapter ${currentChapter() + 1} of ${currentBook()!.chapters.length}`
+                        }
+                      </>
+                    : loadingBookMeta()?.author || 'Loading book content...'}
+                </p>
               </div>
 
-              <div class="flex items-center gap-2">
+              <div class="flex items-center gap-1.5 flex-shrink-0 justify-end">
                 {/* Reading mode toggles */}
                 <div class="flex items-center gap-1.5 mr-3">
                   <button
@@ -2358,22 +2847,67 @@ const Reader: Component = () => {
                   </button>
                 </Show>
 
-                {/* PDF Zoom controls */}
+                {/* PDF: fit modes, zoom (actual), fullscreen */}
                 <Show when={isPdf()}>
-                  <div class="flex items-center gap-1">
+                  <div class="flex items-center gap-1 flex-wrap justify-end max-w-[min(100%,420px)]">
+                    <button
+                      type="button"
+                      class={`text-[10px] sm:text-xs px-1.5 py-1 rounded-md transition-colors ${
+                        pdfFitMode() === 'fitWidth' ? 'ring-1 ring-sky-500/60' : ''
+                      }`}
+                      style={{
+                        background: modeStyles().hoverBg,
+                        color: modeStyles().text,
+                      }}
+                      onClick={() => setPdfFitMode('fitWidth')}
+                      title="Fit width"
+                    >
+                      Width
+                    </button>
+                    <button
+                      type="button"
+                      class={`text-[10px] sm:text-xs px-1.5 py-1 rounded-md transition-colors ${
+                        pdfFitMode() === 'fitPage' ? 'ring-1 ring-sky-500/60' : ''
+                      }`}
+                      style={{
+                        background: modeStyles().hoverBg,
+                        color: modeStyles().text,
+                      }}
+                      onClick={() => setPdfFitMode('fitPage')}
+                      title="Fit page"
+                    >
+                      Page
+                    </button>
+                    <button
+                      type="button"
+                      class={`text-[10px] sm:text-xs px-1.5 py-1 rounded-md transition-colors ${
+                        pdfFitMode() === 'actual' ? 'ring-1 ring-sky-500/60' : ''
+                      }`}
+                      style={{
+                        background: modeStyles().hoverBg,
+                        color: modeStyles().text,
+                      }}
+                      onClick={() => setPdfFitMode('actual')}
+                      title="Actual size (pinch-style zoom with +/-)"
+                    >
+                      100%
+                    </button>
                     <button
                       class="zoom-btn"
                       style={{
                         background: modeStyles().hoverBg,
                         color: modeStyles().text,
                       }}
-                      onClick={() => setPdfZoom(Math.max(0.5, pdfZoom() - 0.25))}
+                      onClick={() => {
+                        setPdfFitMode('actual');
+                        setPdfZoom(Math.max(0.5, pdfZoom() - 0.25));
+                      }}
                       title="Zoom out"
                     >
-                      -
+                      −
                     </button>
-                    <span class="text-xs min-w-[3rem] text-center" style={{ color: modeStyles().mutedText }}>
-                      {Math.round(pdfZoom() * 100)}%
+                    <span class="text-[10px] sm:text-xs min-w-[3.25rem] text-center tabular-nums" style={{ color: modeStyles().mutedText }}>
+                      {pdfZoomLabel()}
                     </span>
                     <button
                       class="zoom-btn"
@@ -2381,10 +2915,35 @@ const Reader: Component = () => {
                         background: modeStyles().hoverBg,
                         color: modeStyles().text,
                       }}
-                      onClick={() => setPdfZoom(Math.min(4, pdfZoom() + 0.25))}
+                      onClick={() => {
+                        setPdfFitMode('actual');
+                        setPdfZoom(Math.min(4, pdfZoom() + 0.25));
+                      }}
                       title="Zoom in"
                     >
                       +
+                    </button>
+                    <button
+                      type="button"
+                      class="p-2 rounded-lg transition-colors"
+                      style={{ color: modeStyles().text }}
+                      onMouseEnter={(e) => {
+                        (e.currentTarget as HTMLElement).style.background = modeStyles().hoverBg;
+                      }}
+                      onMouseLeave={(e) => {
+                        (e.currentTarget as HTMLElement).style.background = 'transparent';
+                      }}
+                      onClick={() => void toggleReaderFullscreen()}
+                      title="Fullscreen"
+                    >
+                      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"
+                        />
+                      </svg>
                     </button>
                   </div>
                 </Show>
@@ -2476,9 +3035,17 @@ const Reader: Component = () => {
                 <div
                   ref={(el) => {
                     pdfContainerRef = el;
+                    pdfResizeObserver?.disconnect();
+                    if (el) {
+                      pdfResizeObserver = new ResizeObserver(() => {
+                        setPdfLayoutTick(t => t + 1);
+                      });
+                      pdfResizeObserver.observe(el);
+                    }
                   }}
-                  id="reader-content-scroll"
-                  class="flex-1 overflow-auto"
+                  data-reading-scroll
+                  class="flex-1 overflow-auto overflow-x-hidden"
+                  onScroll={handleReadScroll}
                   style={{
                     background: readingMode() === 'dark' ? '#1a1a2e'
                       : readingMode() === 'sepia' ? '#f4ecd8'
@@ -2494,21 +3061,25 @@ const Reader: Component = () => {
                     </div>
                   </Show>
                   <Show when={!pdfLoading() && pdfDoc()}>
-                    <div class="pdf-canvas-container py-6 px-4">
-                      <canvas
-                        ref={(el) => {
-                          pdfCanvasRef = el;
-                          if (!el) return;
-                          // Defer paint so Solid has applied `pdfCurrentPage` / `pdfDoc` after `setPdfLoading(false)`.
-                          queueMicrotask(() => {
-                            void renderPdfPage(pdfCurrentPage());
-                          });
-                        }}
-                        style={{
-                          'max-width': '100%',
-                          'height': 'auto',
-                        }}
-                      />
+                    <div class="pdf-canvas-container py-6 px-4 flex justify-center">
+                      <div class="apple-books-read-layer rounded-md">
+                        <div class={`pdf-page-swap ${pdfPageSwapClass()}`}>
+                          <canvas
+                            ref={(el) => {
+                              pdfCanvasRef = el;
+                              if (!el) return;
+                              queueMicrotask(() => {
+                                void renderPdfPage(pdfCurrentPage());
+                              });
+                            }}
+                            style={{
+                              'max-width': '100%',
+                              'height': 'auto',
+                              display: 'block',
+                            }}
+                          />
+                        </div>
+                      </div>
                     </div>
                   </Show>
                   <Show when={!pdfLoading() && !pdfDoc()}>
@@ -2526,23 +3097,37 @@ const Reader: Component = () => {
               {/* ============================================================ */}
               <Show when={!isPdf()}>
                 <div
-                  id="reader-content-scroll"
-                  class="flex-1 overflow-y-auto"
+                  ref={(el) => {
+                    textScrollContainerRef = el;
+                  }}
+                  data-reading-scroll
+                  class="flex-1 overflow-y-auto font-sans"
+                  classList={{
+                    'overflow-x-hidden': !epubTurnOutgoingHtml(),
+                    'epub-page-turn-scroll': !!epubTurnOutgoingHtml(),
+                  }}
+                  onScroll={handleReadScroll}
                   style={{
                     background: modeStyles().contentBg,
                     color: modeStyles().text,
                   }}
                 >
-                  <div
-                    class="max-w-3xl mx-auto px-8 py-12"
-                    style={{ 'font-size': `${fontSize()}px` }}
-                    classList={{
-                      'page-exit-left': pageTransitioning() && pageDirection() === 'left',
-                      'page-enter-right': !pageTransitioning() && pageDirection() === 'left',
-                      'page-exit-right': pageTransitioning() && pageDirection() === 'right',
-                      'page-enter-left': !pageTransitioning() && pageDirection() === 'right',
-                    }}
-                  >
+                  <div class="reader-chapter-perspective reader-chapter-stage min-h-full px-3 sm:px-6 py-1">
+                    <div
+                      class="max-w-[min(68ch,42rem)] mx-auto px-5 sm:px-8 py-12 sm:py-14"
+                      style={{ 'font-size': `${fontSize()}px` }}
+                      classList={{
+                        'page-exit-left':
+                          !isEpub() && pageTransitioning() && pageDirection() === 'left',
+                        'page-enter-right':
+                          !isEpub() && !pageTransitioning() && pageDirection() === 'left',
+                        'page-exit-right':
+                          !isEpub() && pageTransitioning() && pageDirection() === 'right',
+                        'page-enter-left':
+                          !isEpub() && !pageTransitioning() && pageDirection() === 'right',
+                      }}
+                    >
+                      <div class="apple-books-read-layer rounded-sm">
                     <Show when={currentBook()} fallback={
                       /* Loading skeleton while book content loads */
                       <div class="animate-pulse space-y-6 py-4">
@@ -2566,9 +3151,9 @@ const Reader: Component = () => {
                         </p>
                       </div>
                     }>
-                      {/* EPUB content (lazy loaded) */}
+                      {/* EPUB content (lazy loaded) — 3D page turn between chapters */}
                       <Show when={isEpub()}>
-                        <Show when={chapterLoading() && !chapterHtml()}>
+                        <Show when={chapterLoading() && !chapterHtml() && !epubTurnOutgoingHtml()}>
                           <div class="flex flex-col items-center justify-center py-16">
                             <div class="chapter-spinner mb-4" />
                             <p class="text-sm" style={{ color: modeStyles().mutedText }}>
@@ -2576,7 +3161,26 @@ const Reader: Component = () => {
                             </p>
                           </div>
                         </Show>
-                        <Show when={chapterHtml()}>
+                        <Show when={!!(epubTurnOutgoingHtml() && epubTurnIncomingHtml())}>
+                          <div class="epub-page-turn-stage">
+                            <EpubStPageFlip
+                              dir={epubTurnDir()}
+                              outgoingTitle={chapterTitleForIndex(currentChapter())}
+                              incomingTitle={chapterTitleForIndex(epubTurnTargetIndex() ?? 0)}
+                              outgoingHtml={epubTurnOutgoingHtml()}
+                              incomingHtml={epubTurnIncomingHtml()}
+                              proseClass={modeStyles().prose}
+                              chapterTitleColor={modeStyles().chapterTitle}
+                              onComplete={() => {
+                                const t = epubTurnTargetIndex();
+                                const inc = epubTurnIncomingHtml();
+                                if (t === null || !inc) return;
+                                completeEpubChapterTurn(t, inc);
+                              }}
+                            />
+                          </div>
+                        </Show>
+                        <Show when={!epubTurnOutgoingHtml() && chapterHtml()}>
                           <h1
                             class="text-2xl font-bold mb-8"
                             style={{
@@ -2612,6 +3216,8 @@ const Reader: Component = () => {
                         />
                       </Show>
                     </Show>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </Show>
@@ -2637,12 +3243,12 @@ const Reader: Component = () => {
                         background: modeStyles().hoverBg,
                         color: modeStyles().text,
                         '--nav-hover-x': '-3px',
-                        opacity: pdfCurrentPage() <= 1 ? '0.35' : '1',
-                        cursor: pdfCurrentPage() <= 1 ? 'not-allowed' : 'pointer',
+                        opacity: pdfCurrentPage() <= 1 || pdfNavBusy() ? '0.35' : '1',
+                        cursor: pdfCurrentPage() <= 1 || pdfNavBusy() ? 'not-allowed' : 'pointer',
                       } as any
                     }
                     onClick={prevPdfPage}
-                    disabled={pdfCurrentPage() <= 1}
+                    disabled={pdfCurrentPage() <= 1 || pdfNavBusy()}
                   >
                     <span class="flex items-center gap-1.5">
                       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2689,12 +3295,12 @@ const Reader: Component = () => {
                         background: modeStyles().hoverBg,
                         color: modeStyles().text,
                         '--nav-hover-x': '3px',
-                        opacity: pdfCurrentPage() >= pdfTotalPages() ? '0.35' : '1',
-                        cursor: pdfCurrentPage() >= pdfTotalPages() ? 'not-allowed' : 'pointer',
+                        opacity: pdfCurrentPage() >= pdfTotalPages() || pdfNavBusy() ? '0.35' : '1',
+                        cursor: pdfCurrentPage() >= pdfTotalPages() || pdfNavBusy() ? 'not-allowed' : 'pointer',
                       } as any
                     }
                     onClick={nextPdfPage}
-                    disabled={pdfCurrentPage() >= pdfTotalPages()}
+                    disabled={pdfCurrentPage() >= pdfTotalPages() || pdfNavBusy()}
                   >
                     <span class="flex items-center gap-1.5">
                       Next

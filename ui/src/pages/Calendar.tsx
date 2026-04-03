@@ -91,10 +91,8 @@ const Calendar: Component = () => {
   const [events, setEvents] = createSignal<CalendarEvent[]>([]);
   const [showAddForm, setShowAddForm] = createSignal(false);
 
-  // Integration state
-  const [googleConnected, setGoogleConnected] = createSignal(false);
-  const [outlookConnected, setOutlookConnected] = createSignal(false);
-  void setOutlookConnected; // will be used once Outlook OAuth flow is complete
+  type CalendarAccountRow = { id: string; provider: string; email: string | null };
+  const [calAccounts, setCalAccounts] = createSignal<CalendarAccountRow[]>([]);
   const [syncStatus, setSyncStatus] = createSignal<'idle' | 'syncing' | 'success' | 'error'>('idle');
   const [syncMessage, setSyncMessage] = createSignal('');
 
@@ -125,16 +123,19 @@ const Calendar: Component = () => {
     }
   };
 
-  onMount(async () => {
-    setFormDate(toDateStr(new Date()));
-    await fetchEvents();
-    // Check Google connection (reuses Fit token)
+  const loadCalAccounts = async () => {
     try {
-      const connected = await invoke<boolean>('gfit_check_connected');
-      setGoogleConnected(connected);
+      const accounts = await invoke<CalendarAccountRow[]>('calendar_list_accounts');
+      setCalAccounts(accounts);
     } catch (_) {
       // ignore
     }
+  };
+
+  onMount(async () => {
+    setFormDate(toDateStr(new Date()));
+    await fetchEvents();
+    await loadCalAccounts();
   });
 
   // Refetch when month changes
@@ -257,25 +258,35 @@ const Calendar: Component = () => {
     }
   };
 
-  const syncGoogle = async () => {
+  const googleCount = () => calAccounts().filter((a) => a.provider === 'google').length;
+  const outlookCount = () => calAccounts().filter((a) => a.provider === 'outlook').length;
+
+  const syncGoogleAll = async () => {
     setSyncStatus('syncing');
     setSyncMessage('');
     try {
-      const result = await invoke<string>('calendar_sync_google');
+      const result = await invoke<string>('calendar_sync_google', { accountId: null });
       setSyncMessage(result);
       setSyncStatus('success');
       await fetchEvents();
+      await loadCalAccounts();
     } catch (e: any) {
       setSyncMessage(String(e));
       setSyncStatus('error');
     }
   };
 
-  const openOutlookAuth = async () => {
+  const syncOutlookAll = async () => {
+    setSyncStatus('syncing');
+    setSyncMessage('');
     try {
-      await invoke('calendar_open_outlook_auth');
+      const result = await invoke<string>('calendar_sync_outlook', { accountId: null });
+      setSyncMessage(result);
+      setSyncStatus('success');
+      await fetchEvents();
+      await loadCalAccounts();
     } catch (e: any) {
-      setSyncMessage('Failed to open Outlook auth: ' + String(e));
+      setSyncMessage(String(e));
       setSyncStatus('error');
     }
   };
@@ -300,38 +311,35 @@ const Calendar: Component = () => {
       <div class="card p-3 mb-4 flex items-center gap-4 flex-wrap">
         <span class="text-sm font-medium text-gray-500 dark:text-gray-400">Integrations:</span>
 
-        {/* Google Calendar */}
         <div class="flex items-center gap-2">
-          <span class="w-2 h-2 rounded-full" classList={{ 'bg-green-500': googleConnected(), 'bg-gray-400': !googleConnected() }} />
-          <span class="text-sm">Google Calendar</span>
-          <Show when={googleConnected()} fallback={
-            <span class="text-xs text-gray-400">Not connected</span>
-          }>
-            <button
-              class="text-xs px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-800"
-              disabled={syncStatus() === 'syncing'}
-              onClick={syncGoogle}
-            >
-              {syncStatus() === 'syncing' ? 'Syncing...' : 'Sync'}
-            </button>
-          </Show>
+          <span class="w-2 h-2 rounded-full" classList={{ 'bg-green-500': googleCount() > 0, 'bg-gray-400': googleCount() === 0 }} />
+          <span class="text-sm">Google ({googleCount()})</span>
+          <button
+            type="button"
+            class="text-xs px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-800 disabled:opacity-50"
+            disabled={syncStatus() === 'syncing' || googleCount() === 0}
+            onClick={syncGoogleAll}
+          >
+            {syncStatus() === 'syncing' ? 'Syncing...' : 'Sync all'}
+          </button>
         </div>
 
         <div class="w-px h-5 bg-gray-200 dark:bg-gray-700" />
 
-        {/* Outlook Calendar */}
         <div class="flex items-center gap-2">
-          <span class="w-2 h-2 rounded-full" classList={{ 'bg-green-500': outlookConnected(), 'bg-gray-400': !outlookConnected() }} />
-          <span class="text-sm">Outlook</span>
-          <Show when={!outlookConnected()}>
-            <button
-              class="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
-              onClick={openOutlookAuth}
-            >
-              Connect
-            </button>
-          </Show>
+          <span class="w-2 h-2 rounded-full" classList={{ 'bg-green-500': outlookCount() > 0, 'bg-gray-400': outlookCount() === 0 }} />
+          <span class="text-sm">Outlook ({outlookCount()})</span>
+          <button
+            type="button"
+            class="text-xs px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-800 disabled:opacity-50"
+            disabled={syncStatus() === 'syncing' || outlookCount() === 0}
+            onClick={syncOutlookAll}
+          >
+            {syncStatus() === 'syncing' ? 'Syncing...' : 'Sync all'}
+          </button>
         </div>
+
+        <span class="text-xs text-gray-400">Add accounts in Settings → Calendar.</span>
 
         <Show when={syncMessage()}>
           <span

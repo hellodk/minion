@@ -1757,61 +1757,6 @@ const NutritionTab: Component = () => {
 };
 
 // ---------------------------------------------------------------------------
-// Google Fit Onboarding
-// ---------------------------------------------------------------------------
-
-const GoogleFitOnboarding: Component<{ onConnect: () => void }> = (props) => {
-  return (
-    <div class="flex items-center justify-center min-h-[60vh]">
-      <div class="card p-8 max-w-md w-full text-center">
-        {/* Google Fit Logo Placeholder */}
-        <div class="mx-auto mb-6 w-20 h-20 rounded-full bg-gradient-to-br from-blue-400 via-green-400 to-red-400 flex items-center justify-center">
-          <svg class="w-10 h-10 text-white" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
-          </svg>
-        </div>
-
-        <h2 class="text-2xl font-bold text-gray-900 dark:text-white mb-2">
-          Connect Google Fit
-        </h2>
-        <p class="text-gray-500 dark:text-gray-400 mb-6 leading-relaxed">
-          Sync your health and fitness data from Google Fit to get personalized insights,
-          AI-powered health analysis, and comprehensive wellness tracking.
-        </p>
-
-        <div class="space-y-3 text-left mb-8">
-          {[
-            'Steps, heart rate, and activity data',
-            'Sleep tracking and analysis',
-            'AI-powered health recommendations',
-            'Personalized supplement and nutrition advice',
-          ].map((item) => (
-            <div class="flex items-center gap-3 text-sm text-gray-600 dark:text-gray-300">
-              <div class="w-5 h-5 rounded-full bg-green-100 dark:bg-green-900/40 text-green-500 flex items-center justify-center shrink-0">
-                <Icon name="check" class="w-3 h-3" />
-              </div>
-              <span>{item}</span>
-            </div>
-          ))}
-        </div>
-
-        <button
-          onClick={props.onConnect}
-          class="w-full px-6 py-3 rounded-lg bg-minion-600 text-white font-medium hover:bg-minion-700 transition-colors flex items-center justify-center gap-2"
-        >
-          <Icon name="google-fit" class="w-5 h-5" />
-          Connect Google Fit
-        </button>
-
-        <p class="text-xs text-gray-400 mt-4">
-          Your data is encrypted and stored locally. We never share your health data.
-        </p>
-      </div>
-    </div>
-  );
-};
-
-// ---------------------------------------------------------------------------
 // Main Fitness Component
 // ---------------------------------------------------------------------------
 
@@ -1827,7 +1772,6 @@ const TABS: { id: TabId; label: string }[] = [
 ];
 
 const Fitness: Component = () => {
-  const [connected, setConnected] = createSignal(true);
   const [activeTab, setActiveTab] = createSignal<TabId>('dashboard');
   const [habits, setHabits] = createSignal<Habit[]>(DEFAULT_HABITS);
 
@@ -1839,6 +1783,9 @@ const Fitness: Component = () => {
 
   // Google Fit connection status
   const [gfitConnected, setGfitConnected] = createSignal(false);
+  const [gfitClientId, setGfitClientId] = createSignal('');
+  const [gfitConnectBusy, setGfitConnectBusy] = createSignal(false);
+  const [gfitConnectMessage, setGfitConnectMessage] = createSignal('');
 
   // Log form state
   const [logFormOpen, setLogFormOpen] = createSignal(false);
@@ -1859,10 +1806,11 @@ const Fitness: Component = () => {
         invoke<FitnessHabitResponse[]>('fitness_list_habits'),
       ]);
 
-      // Check Google Fit connection
       try {
         const gfit = await invoke<boolean>('gfit_check_connected');
         setGfitConnected(gfit);
+        const savedId = await invoke<string | null>('gfit_get_client_id');
+        if (savedId) setGfitClientId(savedId);
       } catch (_) {
         // ignore
       }
@@ -1961,48 +1909,88 @@ const Fitness: Component = () => {
     <div class="p-6">
       <div class="flex items-center justify-between mb-6">
         <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Health &amp; Fitness</h1>
-        <Show when={connected()}>
+        <Show when={gfitConnected()}>
           <div class="flex items-center gap-2 text-sm text-green-500">
             <div class="w-2 h-2 rounded-full bg-green-500" />
-            Connected
+            Google Fit connected
           </div>
         </Show>
       </div>
 
-      {/* Google Fit badge */}
-      <div class="mb-4">
-        <Show
-          when={gfitConnected()}
-          fallback={
-            <a
-              href="/settings"
-              class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium
-                     bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400
-                     hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer"
-              onClick={(e) => {
-                e.preventDefault();
-                // Navigate to settings - use window location for SPA routing
-                window.location.hash = '#/settings';
-                window.dispatchEvent(new HashChangeEvent('hashchange'));
+      {/* Google Fit: connect on this page (same flow as Settings) */}
+      <Show when={!loading() && !gfitConnected()}>
+        <div class="card p-5 mb-6 max-w-xl">
+          <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-1">Google Fit</h2>
+          <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+            Enter your Desktop OAuth Client ID from Google Cloud Console, then use Connect Google Fit.
+            Add redirect URI{' '}
+            <code class="text-xs text-minion-600 dark:text-minion-400">http://127.0.0.1:8745/</code>
+            {' '}and enable the Fitness API.
+          </p>
+          <label class="block text-xs font-medium text-gray-500 mb-1">OAuth Client ID</label>
+          <input
+            type="text"
+            class="input w-full text-sm mb-3"
+            placeholder="your-id.apps.googleusercontent.com"
+            value={gfitClientId()}
+            onInput={(e) => setGfitClientId(e.currentTarget.value)}
+          />
+          <div class="flex flex-wrap gap-2">
+            <button
+              type="button"
+              class="btn btn-secondary"
+              disabled={!gfitClientId().trim() || gfitConnectBusy()}
+              onClick={async () => {
+                try {
+                  setGfitConnectMessage('');
+                  await invoke('gfit_save_client_id', { clientId: gfitClientId().trim() });
+                  setGfitConnectMessage('Client ID saved.');
+                } catch (e) {
+                  setGfitConnectMessage(String(e));
+                }
               }}
             >
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" />
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" />
-              </svg>
-              Connect Google Fit
-            </a>
-          }
-        >
+              Save Client ID
+            </button>
+            <button
+              type="button"
+              class="btn btn-primary inline-flex items-center gap-2"
+              disabled={!gfitClientId().trim() || gfitConnectBusy()}
+              onClick={async () => {
+                setGfitConnectBusy(true);
+                setGfitConnectMessage('');
+                try {
+                  await invoke('gfit_save_client_id', { clientId: gfitClientId().trim() });
+                  await invoke('gfit_open_auth');
+                  setGfitConnected(true);
+                  setGfitConnectMessage('Connected to Google Fit.');
+                  await loadData();
+                } catch (e) {
+                  setGfitConnectMessage(String(e));
+                } finally {
+                  setGfitConnectBusy(false);
+                }
+              }}
+            >
+              <Icon name="google-fit" class="w-4 h-4" />
+              {gfitConnectBusy() ? 'Connecting…' : 'Connect Google Fit'}
+            </button>
+          </div>
+          <Show when={gfitConnectMessage()}>
+            <p class="text-sm mt-3 text-gray-600 dark:text-gray-300">{gfitConnectMessage()}</p>
+          </Show>
+        </div>
+      </Show>
+
+      <Show when={gfitConnected()}>
+        <div class="mb-4">
           <span class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium
                        bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400">
             <div class="w-2 h-2 rounded-full bg-green-500" />
             Synced with Google Fit
           </span>
-        </Show>
-      </div>
+        </div>
+      </Show>
 
       {/* Demo data banner */}
       <Show when={!loading() && !hasRealData()}>
@@ -2112,27 +2100,8 @@ const Fitness: Component = () => {
         </Show>
       </div>
 
-      <Show when={!connected()}>
-        <GoogleFitOnboarding onConnect={async () => {
-          try {
-            await invoke('gfit_open_auth');
-            // After user completes auth in the webview, they need to paste the token
-            // For now, show a message
-            alert('Google Fit login window opened. After logging in, go to Settings > Google Fit to save your token, then come back here.');
-          } catch (e) {
-            alert(`Failed to open Google Fit auth: ${e}. Go to Settings > Google Fit to configure manually.`);
-          }
-          // Check if already connected (in case token was saved previously)
-          try {
-            const connected = await invoke<boolean>('gfit_check_connected');
-            if (connected) setConnected(true);
-          } catch (_) {}
-        }} />
-      </Show>
-
-      <Show when={connected()}>
-        {/* Tabs */}
-        <div class="flex border-b border-gray-200 dark:border-gray-700 mb-6 overflow-x-auto">
+      {/* Tabs */}
+      <div class="flex border-b border-gray-200 dark:border-gray-700 mb-6 overflow-x-auto">
           <For each={TABS}>
             {(tab) => (
               <button
@@ -2182,7 +2151,6 @@ const Fitness: Component = () => {
             />
           </Match>
         </Switch>
-      </Show>
     </div>
   );
 };

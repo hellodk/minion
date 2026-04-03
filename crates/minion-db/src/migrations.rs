@@ -22,6 +22,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("002_modules", migrate_002_modules),
         ("003_collections", migrate_003_collections),
         ("004_calendar", migrate_004_calendar),
+        ("005_calendar_accounts", migrate_005_calendar_accounts),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -422,6 +423,27 @@ fn migrate_004_calendar(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_005_calendar_accounts(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS calendar_accounts (
+            id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            email TEXT,
+            access_token TEXT NOT NULL,
+            refresh_token TEXT,
+            expires_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_cal_accounts_provider ON calendar_accounts(provider);
+
+        ALTER TABLE calendar_events ADD COLUMN account_id TEXT;
+        CREATE INDEX IF NOT EXISTS idx_cal_account ON calendar_events(account_id);
+    ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,7 +562,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn

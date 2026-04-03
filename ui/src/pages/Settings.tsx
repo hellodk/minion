@@ -1,4 +1,4 @@
-import { Component, createSignal, onMount, Show } from 'solid-js';
+import { Component, createSignal, For, onMount, Show } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import type { SystemInfo } from '../App';
 
@@ -14,9 +14,15 @@ const Settings: Component = () => {
 
   // Google Fit state
   const [gfitConnected, setGfitConnected] = createSignal(false);
-  const [gfitToken, setGfitToken] = createSignal('');
+  const [gfitClientId, setGfitClientId] = createSignal('');
+  const [gfitAuthCode, setGfitAuthCode] = createSignal('');
   const [gfitStatus, setGfitStatus] = createSignal<'idle' | 'saving' | 'syncing' | 'success' | 'error'>('idle');
   const [gfitMessage, setGfitMessage] = createSignal('');
+
+  type CalendarAccountRow = { id: string; provider: string; email: string | null };
+  const [calAccounts, setCalAccounts] = createSignal<CalendarAccountRow[]>([]);
+  const [outlookClientId, setOutlookClientId] = createSignal('');
+  const [calIntMessage, setCalIntMessage] = createSignal('');
 
   // Zerodha Kite state
   const [zdApiKey, setZdApiKey] = createSignal('');
@@ -38,10 +44,15 @@ const Settings: Component = () => {
       if (config.ai_ollama_url) setOllamaUrl(config.ai_ollama_url);
       if (config.ai_model) setAiModel(config.ai_model);
 
-      // Check Google Fit connection
       try {
         const connected = await invoke<boolean>('gfit_check_connected');
         setGfitConnected(connected);
+        const savedId = await invoke<string | null>('gfit_get_client_id');
+        if (savedId) setGfitClientId(savedId);
+        const oid = await invoke<string | null>('calendar_get_outlook_client_id');
+        if (oid) setOutlookClientId(oid);
+        const accounts = await invoke<CalendarAccountRow[]>('calendar_list_accounts');
+        setCalAccounts(accounts);
       } catch (_) {
         // ignore
       }
@@ -261,20 +272,22 @@ const Settings: Component = () => {
                   type="text"
                   class="input w-full text-sm"
                   placeholder="your-client-id.apps.googleusercontent.com"
-                  value={gfitToken()}
-                  onInput={(e) => setGfitToken(e.currentTarget.value)}
+                  value={gfitClientId()}
+                  onInput={(e) => setGfitClientId(e.currentTarget.value)}
                 />
                 <p class="text-xs text-gray-400 mt-1">
-                  Get one free: Google Cloud Console &gt; APIs &gt; Credentials &gt; Create OAuth Client ID (Desktop app). Enable Fitness API.
+                  Google Cloud Console → APIs &amp; Services → Credentials → Create OAuth client ID (Desktop app).
+                  Enable the Fitness API. Under Authorized redirect URIs add exactly{' '}
+                  <code class="text-minion-600 dark:text-minion-400">http://127.0.0.1:8745/</code>
                 </p>
               </div>
               <div class="flex gap-2">
                 <button
                   class="btn btn-secondary flex-1"
-                  disabled={!gfitToken().trim()}
+                  disabled={!gfitClientId().trim()}
                   onClick={async () => {
                     try {
-                      await invoke('gfit_save_client_id', { clientId: gfitToken() });
+                      await invoke('gfit_save_client_id', { clientId: gfitClientId().trim() });
                       setGfitMessage('Client ID saved.');
                       setGfitStatus('success');
                     } catch (e: any) {
@@ -287,10 +300,15 @@ const Settings: Component = () => {
                 </button>
                 <button
                   class="btn btn-primary flex-1"
+                  disabled={!gfitClientId().trim()}
                   onClick={async () => {
                     try {
+                      await invoke('gfit_save_client_id', { clientId: gfitClientId().trim() });
                       await invoke('gfit_open_auth');
-                      setGfitMessage('Complete login in the MINION window, then paste the auth code below.');
+                      setGfitConnected(true);
+                      setGfitAuthCode('');
+                      setGfitMessage('Connected to Google Fit.');
+                      setGfitStatus('success');
                     } catch (e: any) {
                       setGfitMessage(String(e));
                       setGfitStatus('error');
@@ -303,37 +321,37 @@ const Settings: Component = () => {
             </div>
           </Show>
 
-          {/* Token input */}
+          {/* Optional: paste authorization code if the browser flow did not complete */}
           <Show when={!gfitConnected()}>
             <div>
-              <label class="block text-sm font-medium mb-2">OAuth Token / Auth Code</label>
+              <label class="block text-sm font-medium mb-2">Authorization code (optional)</label>
               <input
                 type="text"
                 class="input w-full"
-                value={gfitToken()}
-                onInput={(e) => setGfitToken(e.currentTarget.value)}
-                placeholder="Paste the authorization code here"
+                value={gfitAuthCode()}
+                onInput={(e) => setGfitAuthCode(e.currentTarget.value)}
+                placeholder="Paste only if Connect did not finish automatically"
               />
             </div>
             <button
               class="btn btn-secondary"
-              disabled={gfitStatus() === 'saving' || !gfitToken()}
+              disabled={gfitStatus() === 'saving' || !gfitAuthCode().trim()}
               onClick={async () => {
                 setGfitStatus('saving');
                 setGfitMessage('');
                 try {
-                  await invoke('gfit_save_token', { token: gfitToken() });
+                  await invoke('gfit_exchange_auth_code', { code: gfitAuthCode().trim() });
                   setGfitConnected(true);
-                  setGfitToken('');
-                  setGfitMessage('Token saved successfully.');
+                  setGfitAuthCode('');
+                  setGfitMessage('Authorization code exchanged successfully.');
                   setGfitStatus('success');
                 } catch (e: any) {
-                  setGfitMessage('Failed to save token: ' + String(e));
+                  setGfitMessage('Failed: ' + String(e));
                   setGfitStatus('error');
                 }
               }}
             >
-              {gfitStatus() === 'saving' ? 'Saving...' : 'Save Token'}
+              {gfitStatus() === 'saving' ? 'Exchanging...' : 'Exchange authorization code'}
             </button>
           </Show>
 
@@ -397,73 +415,209 @@ const Settings: Component = () => {
       <section class="card p-4 mb-6">
         <h2 class="text-lg font-medium mb-4">Calendar Integrations</h2>
 
-        <div class="space-y-4">
-          {/* Google Calendar */}
-          <div class="flex items-center justify-between">
-            <div>
+        <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+          Add multiple Google and Outlook accounts. Google uses the same OAuth Client ID as Google Fit (must include
+          Calendar API scope and redirect <code class="text-xs">http://127.0.0.1:8747/</code>).
+          Outlook uses an Azure app with redirect <code class="text-xs">http://127.0.0.1:8748/</code> and PKCE.
+        </p>
+
+        <div class="space-y-6">
+          {/* Google Calendar accounts */}
+          <div>
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
               <p class="font-medium">Google Calendar</p>
-              <p class="text-sm text-gray-500 dark:text-gray-400">
-                Same Google account as Fit. Connect once, get both.
-              </p>
-            </div>
-            <Show
-              when={gfitConnected()}
-              fallback={
+              <div class="flex gap-2">
                 <button
+                  type="button"
                   class="btn btn-secondary text-sm"
                   onClick={async () => {
+                    setCalIntMessage('');
                     try {
-                      await invoke('gfit_open_auth');
+                      await invoke('calendar_google_open_auth');
+                      const accounts = await invoke<CalendarAccountRow[]>('calendar_list_accounts');
+                      setCalAccounts(accounts);
+                      setCalIntMessage('Google account added.');
                     } catch (e: any) {
-                      console.error('Failed to open Google auth:', e);
+                      setCalIntMessage(String(e));
                     }
                   }}
                 >
-                  Connect
+                  Add Google account
                 </button>
-              }
-            >
-              <div class="flex items-center gap-2">
-                <span class="px-2 py-1 text-xs bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded">
-                  Connected
-                </span>
                 <button
+                  type="button"
                   class="btn btn-secondary text-sm"
                   onClick={async () => {
+                    setCalIntMessage('');
                     try {
-                      await invoke('calendar_sync_google');
+                      const msg = await invoke<string>('calendar_sync_google', { accountId: null });
+                      setCalIntMessage(msg);
                     } catch (e: any) {
-                      console.error('Calendar sync failed:', e);
+                      setCalIntMessage(String(e));
                     }
                   }}
                 >
-                  Sync
+                  Sync all Google
                 </button>
               </div>
-            </Show>
+            </div>
+            <ul class="text-sm space-y-1 border border-gray-200 dark:border-gray-700 rounded px-3 py-2">
+              <For
+                each={calAccounts().filter((a) => a.provider === 'google')}
+                fallback={<li class="text-gray-400">No Google Calendar accounts yet.</li>}
+              >
+                {(a) => (
+                  <li class="flex flex-wrap items-center justify-between gap-2 py-1">
+                    <span>{a.email ?? a.id.slice(0, 8) + '…'}</span>
+                    <span class="flex gap-1">
+                      <button
+                        type="button"
+                        class="text-xs px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200"
+                        onClick={async () => {
+                          setCalIntMessage('');
+                          try {
+                            const msg = await invoke<string>('calendar_sync_google', { accountId: a.id });
+                            setCalIntMessage(msg);
+                          } catch (e: any) {
+                            setCalIntMessage(String(e));
+                          }
+                        }}
+                      >
+                        Sync
+                      </button>
+                      <button
+                        type="button"
+                        class="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300"
+                        onClick={async () => {
+                          try {
+                            await invoke('calendar_remove_account', { accountId: a.id });
+                            setCalAccounts((prev) => prev.filter((x) => x.id !== a.id));
+                          } catch (e: any) {
+                            setCalIntMessage(String(e));
+                          }
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </span>
+                  </li>
+                )}
+              </For>
+            </ul>
           </div>
 
-          {/* Outlook Calendar */}
-          <div class="flex items-center justify-between">
-            <div>
-              <p class="font-medium">Outlook Calendar</p>
-              <p class="text-sm text-gray-500 dark:text-gray-400">
-                Connect your Microsoft account for Outlook Calendar sync.
-              </p>
+          {/* Outlook */}
+          <div>
+            <p class="font-medium mb-2">Outlook Calendar</p>
+            <div class="flex flex-wrap gap-2 mb-2">
+              <input
+                type="text"
+                class="input flex-1 min-w-[200px]"
+                placeholder="Azure Application (client) ID"
+                value={outlookClientId()}
+                onInput={(e) => setOutlookClientId(e.currentTarget.value)}
+              />
+              <button
+                type="button"
+                class="btn btn-secondary text-sm"
+                onClick={async () => {
+                  setCalIntMessage('');
+                  try {
+                    await invoke('calendar_save_outlook_client_id', { clientId: outlookClientId() });
+                    setCalIntMessage('Outlook client ID saved.');
+                  } catch (e: any) {
+                    setCalIntMessage(String(e));
+                  }
+                }}
+              >
+                Save
+              </button>
             </div>
-            <button
-              class="btn btn-secondary text-sm"
-              onClick={async () => {
-                try {
-                  await invoke('calendar_open_outlook_auth');
-                } catch (e: any) {
-                  console.error('Failed to open Outlook auth:', e);
-                }
-              }}
-            >
-              Connect
-            </button>
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <span class="text-sm text-gray-500 dark:text-gray-400">Connected accounts</span>
+              <div class="flex gap-2">
+                <button
+                  type="button"
+                  class="btn btn-secondary text-sm"
+                  onClick={async () => {
+                    setCalIntMessage('');
+                    try {
+                      await invoke('calendar_outlook_open_auth');
+                      const accounts = await invoke<CalendarAccountRow[]>('calendar_list_accounts');
+                      setCalAccounts(accounts);
+                      setCalIntMessage('Outlook account added.');
+                    } catch (e: any) {
+                      setCalIntMessage(String(e));
+                    }
+                  }}
+                >
+                  Add Outlook account
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-secondary text-sm"
+                  onClick={async () => {
+                    setCalIntMessage('');
+                    try {
+                      const msg = await invoke<string>('calendar_sync_outlook', { accountId: null });
+                      setCalIntMessage(msg);
+                    } catch (e: any) {
+                      setCalIntMessage(String(e));
+                    }
+                  }}
+                >
+                  Sync all Outlook
+                </button>
+              </div>
+            </div>
+            <ul class="text-sm space-y-1 border border-gray-200 dark:border-gray-700 rounded px-3 py-2">
+              <For
+                each={calAccounts().filter((a) => a.provider === 'outlook')}
+                fallback={<li class="text-gray-400">No Outlook accounts yet.</li>}
+              >
+                {(a) => (
+                  <li class="flex flex-wrap items-center justify-between gap-2 py-1">
+                    <span>{a.email ?? a.id.slice(0, 8) + '…'}</span>
+                    <span class="flex gap-1">
+                      <button
+                        type="button"
+                        class="text-xs px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200"
+                        onClick={async () => {
+                          setCalIntMessage('');
+                          try {
+                            const msg = await invoke<string>('calendar_sync_outlook', { accountId: a.id });
+                            setCalIntMessage(msg);
+                          } catch (e: any) {
+                            setCalIntMessage(String(e));
+                          }
+                        }}
+                      >
+                        Sync
+                      </button>
+                      <button
+                        type="button"
+                        class="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300"
+                        onClick={async () => {
+                          try {
+                            await invoke('calendar_remove_account', { accountId: a.id });
+                            setCalAccounts((prev) => prev.filter((x) => x.id !== a.id));
+                          } catch (e: any) {
+                            setCalIntMessage(String(e));
+                          }
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </span>
+                  </li>
+                )}
+              </For>
+            </ul>
           </div>
+
+          <Show when={calIntMessage()}>
+            <p class="text-sm text-gray-600 dark:text-gray-400">{calIntMessage()}</p>
+          </Show>
         </div>
       </section>
 
