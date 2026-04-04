@@ -75,6 +75,51 @@ const Files: Component = () => {
   const [newExcludePattern, setNewExcludePattern] = createSignal('');
   const [videoMetadataCache, setVideoMetadataCache] = createSignal<Record<string, VideoMetadata>>({});
 
+  // Duplicate filter & sort
+  type DupeFilterMode = 'all' | 'exact' | 'fuzzy' | 'perceptual' | 'size';
+  type DupeSortMode = 'wasted' | 'size' | 'count' | 'date';
+  const [dupeFilter, setDupeFilter] = createSignal<DupeFilterMode>('all');
+  const [dupeSort, setDupeSort] = createSignal<DupeSortMode>('wasted');
+
+  const filteredAndSortedDuplicates = () => {
+    let groups = duplicates();
+
+    // Filter by detection method
+    const filter = dupeFilter();
+    if (filter !== 'all') {
+      const typeMap: Record<string, string> = {
+        exact: 'Exact',
+        fuzzy: 'Near',
+        perceptual: 'Perceptual',
+        size: 'Exact', // size-only shows exact matches (same hash = same content)
+      };
+      groups = groups.filter((g) => g.match_type === typeMap[filter]);
+    }
+
+    // Sort
+    const sort = dupeSort();
+    groups = [...groups].sort((a, b) => {
+      switch (sort) {
+        case 'wasted':
+          return b.wasted_space - a.wasted_space;
+        case 'size':
+          return b.total_size - a.total_size;
+        case 'count':
+          return b.file_count - a.file_count;
+        case 'date': {
+          // Sort by most recent file's modified date
+          const latestA = Math.max(...a.files.map((f) => new Date(f.modified).getTime()));
+          const latestB = Math.max(...b.files.map((f) => new Date(f.modified).getTime()));
+          return latestB - latestA;
+        }
+        default:
+          return 0;
+      }
+    });
+
+    return groups;
+  };
+
   const openFile = async (path: string) => {
     try {
       await invoke('files_open_file', { path });
@@ -806,8 +851,41 @@ const Files: Component = () => {
             </div>
           </div>
 
+          {/* Filter & Sort bar */}
+          <div class="flex items-center gap-3 mb-4">
+            <div class="flex items-center gap-2">
+              <label class="text-xs font-medium text-gray-500 dark:text-gray-400">Detection:</label>
+              <select
+                class="input text-sm py-1 px-2 pr-8 rounded-lg"
+                value={dupeFilter()}
+                onChange={(e) => setDupeFilter(e.currentTarget.value as DupeFilterMode)}
+              >
+                <option value="all">All Methods</option>
+                <option value="exact">SHA-256 (Exact Match)</option>
+                <option value="fuzzy">Fuzzy Filename</option>
+                <option value="perceptual">Perceptual Image</option>
+              </select>
+            </div>
+            <div class="flex items-center gap-2">
+              <label class="text-xs font-medium text-gray-500 dark:text-gray-400">Sort by:</label>
+              <select
+                class="input text-sm py-1 px-2 pr-8 rounded-lg"
+                value={dupeSort()}
+                onChange={(e) => setDupeSort(e.currentTarget.value as DupeSortMode)}
+              >
+                <option value="wasted">Wasted Space</option>
+                <option value="size">File Size</option>
+                <option value="count">File Count</option>
+                <option value="date">Date Modified</option>
+              </select>
+            </div>
+            <span class="text-xs text-gray-400 ml-auto">
+              Showing {filteredAndSortedDuplicates().length} of {duplicates().length} groups
+            </span>
+          </div>
+
           <div class="space-y-3">
-            <For each={duplicates()}>
+            <For each={filteredAndSortedDuplicates()}>
               {(group) => (
                 <div class="card overflow-hidden">
                   {/* Group header */}
