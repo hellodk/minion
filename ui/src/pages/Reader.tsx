@@ -235,6 +235,20 @@ const Reader: Component = () => {
   const [showToc, setShowToc] = createSignal(false);
   const [fontSize, setFontSize] = createSignal(16);
   const [readingMode, setReadingMode] = createSignal<ReadingMode>('light');
+  const [isFullscreen, setIsFullscreen] = createSignal(false);
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
+    } else {
+      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+    }
+  };
+
+  // Listen for fullscreen changes (e.g. Esc key exits fullscreen natively)
+  const onFullscreenChange = () => {
+    setIsFullscreen(!!document.fullscreenElement);
+  };
 
   // Animation signals
   const [pageDirection, setPageDirection] = createSignal<'left' | 'right'>('left');
@@ -404,7 +418,15 @@ const Reader: Component = () => {
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      closeBook();
+      if (isFullscreen()) {
+        document.exitFullscreen().catch(() => {});
+      } else {
+        closeBook();
+      }
+    } else if (e.key === 'F11' || (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey)) {
+      // F11 or 'f' key toggles fullscreen (like video players)
+      e.preventDefault();
+      toggleFullscreen();
     }
   };
 
@@ -414,11 +436,13 @@ const Reader: Component = () => {
 
   onMount(async () => {
     document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
     await Promise.all([loadLibrary(), loadCollections()]);
   });
 
   onCleanup(() => {
     document.removeEventListener('keydown', handleKeyDown);
+    document.removeEventListener('fullscreenchange', onFullscreenChange);
     if (readScrollIdleTimer) clearTimeout(readScrollIdleTimer);
     pdfResizeObserver?.disconnect();
     pdfResizeObserver = undefined;
@@ -2972,6 +2996,30 @@ const Reader: Component = () => {
                     </svg>
                   </button>
                 </Show>
+
+                {/* Fullscreen toggle */}
+                <button
+                  class="p-2 rounded-lg transition-colors"
+                  style={{ color: modeStyles().text }}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLElement).style.background = modeStyles().hoverBg;
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLElement).style.background = 'transparent';
+                  }}
+                  onClick={toggleFullscreen}
+                  title={isFullscreen() ? 'Exit fullscreen (Esc)' : 'Fullscreen (F11)'}
+                >
+                  <Show when={!isFullscreen()} fallback={
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 9L4 4m0 0v5m0-5h5m6 6l5 5m0 0v-5m0 5h-5M9 15l-5 5m0 0h5m-5 0v-5m11-6l5-5m0 0h-5m5 0v5" />
+                    </svg>
+                  }>
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-5h-4m4 0v4m0 0l-5-5m-7 14H4m0 0v-4m0 4l5-5m7 5h4m0 0v-4m0 4l-5-5" />
+                    </svg>
+                  </Show>
+                </button>
               </div>
             </div>
 
