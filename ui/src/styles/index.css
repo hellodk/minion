@@ -96,3 +96,17 @@
     transform: scale(1);
   }
 }
+
+/* Reader fullscreen mode: hide the app sidebar and let the reader
+   take the full width of the window. Activated by toggling
+   body.minion-reader-fullscreen from the Reader page. */
+body.minion-reader-fullscreen aside {
+  display: none !important;
+}
+body.minion-reader-fullscreen main {
+  width: 100vw !important;
+  max-width: 100vw !important;
+}
+body.minion-reader-fullscreen .sidebar-item {
+  display: none;
+}

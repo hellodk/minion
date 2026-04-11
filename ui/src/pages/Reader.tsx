@@ -237,18 +237,29 @@ const Reader: Component = () => {
   const [readingMode, setReadingMode] = createSignal<ReadingMode>('light');
   const [isFullscreen, setIsFullscreen] = createSignal(false);
 
+  // CSS-based fullscreen: adds a class to <body> that hides the app sidebar
+  // and expands the reader to fill the entire window. Esc exits.
+  const enterFullscreen = () => {
+    document.body.classList.add('minion-reader-fullscreen');
+    setIsFullscreen(true);
+  };
+
+  const exitFullscreen = () => {
+    document.body.classList.remove('minion-reader-fullscreen');
+    setIsFullscreen(false);
+  };
+
   const toggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
+    if (isFullscreen()) {
+      exitFullscreen();
     } else {
-      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+      enterFullscreen();
     }
   };
 
-  // Listen for fullscreen changes (e.g. Esc key exits fullscreen natively)
-  const onFullscreenChange = () => {
-    setIsFullscreen(!!document.fullscreenElement);
-  };
+  // No native fullscreenchange - we use our own CSS approach.
+  // But keep the handler so onCleanup doesn't error out.
+  const onFullscreenChange = () => {};
 
   // Animation signals
   const [pageDirection, setPageDirection] = createSignal<'left' | 'right'>('left');
@@ -275,6 +286,11 @@ const Reader: Component = () => {
 
   // "Add to Collection" dropdown
   const [addToCollectionBookId, setAddToCollectionBookId] = createSignal<string | null>(null);
+
+  // "Add existing books to collection" picker
+  const [addBooksCollectionId, setAddBooksCollectionId] = createSignal<string | null>(null);
+  const [addBooksSelected, setAddBooksSelected] = createSignal<Set<string>>(new Set<string>());
+  const [addBooksFilter, setAddBooksFilter] = createSignal('');
 
   // Folder import modal (checkbox-based selection)
   interface FolderFileCandidate {
@@ -436,7 +452,7 @@ const Reader: Component = () => {
     } else if (e.key === 'Escape') {
       e.preventDefault();
       if (isFullscreen()) {
-        document.exitFullscreen().catch(() => {});
+        exitFullscreen();
       } else {
         closeBook();
       }
@@ -460,6 +476,8 @@ const Reader: Component = () => {
   onCleanup(() => {
     document.removeEventListener('keydown', handleKeyDown);
     document.removeEventListener('fullscreenchange', onFullscreenChange);
+    // Make sure fullscreen class is removed when leaving the Reader page
+    document.body.classList.remove('minion-reader-fullscreen');
     if (readScrollIdleTimer) clearTimeout(readScrollIdleTimer);
     pdfResizeObserver?.disconnect();
     pdfResizeObserver = undefined;
@@ -1096,6 +1114,8 @@ const Reader: Component = () => {
 
   const closeBook = () => {
     if (bookClosing()) return;
+    // Always exit fullscreen when closing book
+    if (isFullscreen()) exitFullscreen();
     setBookClosing(true);
     setTimeout(() => {
       // Clean up PDF doc
@@ -1321,6 +1341,66 @@ const Reader: Component = () => {
       }
     } catch (e) {
       console.error('Failed to remove book from collection:', e);
+    }
+  };
+
+  // Open the "add existing books" picker for a collection
+  const openAddBooksPicker = (collectionId: string) => {
+    setAddBooksCollectionId(collectionId);
+    setAddBooksSelected(new Set<string>());
+    setAddBooksFilter('');
+  };
+
+  const closeAddBooksPicker = () => {
+    setAddBooksCollectionId(null);
+    setAddBooksSelected(new Set<string>());
+    setAddBooksFilter('');
+  };
+
+  const toggleAddBookSelection = (bookId: string) => {
+    const next = new Set<string>(addBooksSelected());
+    if (next.has(bookId)) next.delete(bookId);
+    else next.add(bookId);
+    setAddBooksSelected(next);
+  };
+
+  const booksNotInCollection = () => {
+    const inCollection = new Set(collectionBooks().map((b) => b.id));
+    const q = addBooksFilter().trim().toLowerCase();
+    return libraryBooks().filter((b) => {
+      if (inCollection.has(b.id)) return false;
+      if (!q) return true;
+      return (
+        (b.title || '').toLowerCase().includes(q) ||
+        (b.authors || '').toLowerCase().includes(q) ||
+        (b.file_path || '').toLowerCase().includes(q)
+      );
+    });
+  };
+
+  const confirmAddBooksToCollection = async () => {
+    const collectionId = addBooksCollectionId();
+    if (!collectionId) return;
+    const ids = Array.from(addBooksSelected());
+    if (ids.length === 0) {
+      closeAddBooksPicker();
+      return;
+    }
+    try {
+      for (const bookId of ids) {
+        await invoke('reader_add_to_collection', { collectionId, bookId });
+      }
+      await loadCollections();
+      if (expandedCollection() === collectionId) {
+        const books = await invoke<LibraryBook[]>('reader_get_collection_books', {
+          collectionId,
+        });
+        setCollectionBooks(books);
+      }
+      closeAddBooksPicker();
+    } catch (e) {
+      console.error('Failed to add books to collection:', e);
+      alert(`Failed to add books: ${e}`);
     }
   };
 
@@ -2564,6 +2644,80 @@ const Reader: Component = () => {
                             class="border-t border-gray-100 dark:border-gray-700 p-4"
                             style={{ 'border-top-color': col.color + '30' }}
                           >
+                            {/* Action bar inside collection */}
+                            <div class="flex gap-2 mb-4">
+                              <button
+                                class="btn btn-primary text-xs"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openAddBooksPicker(col.id);
+                                }}
+                                title="Add books already in your library to this collection"
+                              >
+                                <svg class="w-4 h-4 mr-1.5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                                </svg>
+                                Add Books
+                              </button>
+                              <button
+                                class="btn btn-secondary text-xs"
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  // Pre-set target collection then open the import-folder modal
+                                  setImportTargetCollection(col.id);
+                                  await browseForFolderWithSelection();
+                                }}
+                                title="Import new books from a folder into this collection"
+                              >
+                                <svg class="w-4 h-4 mr-1.5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                                </svg>
+                                Import Folder
+                              </button>
+                              <button
+                                class="btn btn-secondary text-xs"
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  // File picker then import to this collection
+                                  try {
+                                    const selected = await open({
+                                      multiple: true,
+                                      filters: [
+                                        {
+                                          name: 'Books',
+                                          extensions: ['epub', 'pdf', 'mobi', 'azw3', 'fb2', 'txt', 'md', 'markdown', 'html', 'htm'],
+                                        },
+                                      ],
+                                    });
+                                    if (selected && Array.isArray(selected) && selected.length > 0) {
+                                      const paths = selected as string[];
+                                      setImporting(true);
+                                      try {
+                                        await invoke<{ imported: number; skipped: number; failed: number }>(
+                                          'reader_import_paths',
+                                          { paths, collectionId: col.id }
+                                        );
+                                        await loadLibrary();
+                                        await loadCollections();
+                                        const books = await invoke<LibraryBook[]>('reader_get_collection_books', { collectionId: col.id });
+                                        setCollectionBooks(books);
+                                      } finally {
+                                        setImporting(false);
+                                      }
+                                    }
+                                  } catch (err) {
+                                    console.error(err);
+                                  }
+                                }}
+                                title="Pick individual book files and add them to this collection"
+                              >
+                                <svg class="w-4 h-4 mr-1.5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+                                </svg>
+                                Add Files
+                              </button>
+                            </div>
+
                             <Show
                               when={!loadingCollectionBooks()}
                               fallback={
@@ -2575,10 +2729,15 @@ const Reader: Component = () => {
                               <Show
                                 when={collectionBooks().length > 0}
                                 fallback={
-                                  <p class="text-sm text-gray-500 py-4 text-center">
-                                    No books in this collection yet. Use the "+" button on book
-                                    cards to add them.
-                                  </p>
+                                  <div class="text-center py-8">
+                                    <svg class="w-12 h-12 mx-auto mb-2 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                                    </svg>
+                                    <p class="text-sm text-gray-500">This collection is empty.</p>
+                                    <p class="text-xs text-gray-400 mt-1">
+                                      Use the buttons above to add books.
+                                    </p>
+                                  </div>
                                 }
                               >
                                 <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
@@ -2865,6 +3024,110 @@ const Reader: Component = () => {
                 </Show>
               </div>
             </Show>
+          </div>
+        </Show>
+
+        {/* ================================================================ */}
+        {/* ADD EXISTING BOOKS TO COLLECTION MODAL                          */}
+        {/* ================================================================ */}
+        <Show when={addBooksCollectionId()}>
+          <div
+            class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) closeAddBooksPicker();
+            }}
+          >
+            <div class="card w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl">
+              <div class="p-5 border-b border-gray-200 dark:border-gray-700">
+                <div class="flex items-start justify-between mb-3">
+                  <div>
+                    <h2 class="text-xl font-bold">Add Books to Collection</h2>
+                    <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                      Select existing books from your library to add to{' '}
+                      <span class="font-medium">
+                        {collections().find((c) => c.id === addBooksCollectionId())?.name}
+                      </span>
+                    </p>
+                  </div>
+                  <button
+                    class="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
+                    onClick={closeAddBooksPicker}
+                  >
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  class="input text-sm w-full"
+                  placeholder="Search by title, author, or path..."
+                  value={addBooksFilter()}
+                  onInput={(e) => setAddBooksFilter(e.currentTarget.value)}
+                />
+              </div>
+
+              <div class="flex-1 overflow-auto p-2">
+                <Show
+                  when={booksNotInCollection().length > 0}
+                  fallback={
+                    <div class="text-center py-12 text-gray-500">
+                      <Show when={libraryBooks().length === 0} fallback={
+                        <p>All books are already in this collection, or no matches for your search.</p>
+                      }>
+                        <p>Your library is empty.</p>
+                        <p class="text-xs mt-1">Add books via "Add Files" or "Add Folder" first.</p>
+                      </Show>
+                    </div>
+                  }
+                >
+                  <div class="space-y-0.5">
+                    <For each={booksNotInCollection()}>
+                      {(book) => (
+                        <label class="flex items-center gap-3 px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            class="w-4 h-4 rounded"
+                            checked={addBooksSelected().has(book.id)}
+                            onChange={() => toggleAddBookSelection(book.id)}
+                          />
+                          <span class="text-xs font-mono uppercase bg-gray-200 dark:bg-gray-700 rounded px-1.5 py-0.5 min-w-[40px] text-center">
+                            {book.format || '?'}
+                          </span>
+                          <div class="flex-1 min-w-0">
+                            <p class="text-sm truncate font-medium">
+                              {book.title || book.file_path.split('/').pop() || 'Untitled'}
+                            </p>
+                            <Show when={book.authors}>
+                              <p class="text-xs text-gray-500 truncate">{book.authors}</p>
+                            </Show>
+                          </div>
+                        </label>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+
+              <div class="p-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/30 flex justify-between items-center">
+                <span class="text-xs text-gray-500">
+                  {addBooksSelected().size} selected
+                </span>
+                <div class="flex gap-2">
+                  <button class="btn btn-secondary text-sm" onClick={closeAddBooksPicker}>
+                    Cancel
+                  </button>
+                  <button
+                    class="btn btn-primary text-sm"
+                    onClick={confirmAddBooksToCollection}
+                    disabled={addBooksSelected().size === 0}
+                  >
+                    Add {addBooksSelected().size > 0 ? `${addBooksSelected().size} ` : ''}
+                    book{addBooksSelected().size === 1 ? '' : 's'}
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </Show>
 
