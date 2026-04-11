@@ -7,6 +7,7 @@ import Files from './pages/Files';
 import Reader from './pages/Reader';
 import Finance from './pages/Finance';
 import Fitness from './pages/Fitness';
+import Health from './pages/Health';
 import Media from './pages/Media';
 import Calendar from './pages/Calendar';
 import Blog from './pages/Blog';
@@ -27,6 +28,7 @@ render(
       <Route path="/reader" component={Reader} />
       <Route path="/finance" component={Finance} />
       <Route path="/fitness" component={Fitness} />
+      <Route path="/health" component={Health} />
       <Route path="/media" component={Media} />
       <Route path="/calendar" component={Calendar} />
       <Route path="/blog" component={Blog} />

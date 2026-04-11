@@ -4,6 +4,7 @@
 
 mod calendar_integration;
 mod commands;
+mod health_commands;
 mod state;
 
 #[cfg(test)]
@@ -177,6 +178,39 @@ pub fn run() {
             commands::blog_delete_post,
             commands::blog_analyze_seo,
             commands::blog_generate_slug,
+            // Health Vault commands (week 1)
+            health_commands::health_get_consent,
+            health_commands::health_accept_consent,
+            health_commands::health_create_patient,
+            health_commands::health_list_patients,
+            health_commands::health_get_primary_patient,
+            health_commands::health_delete_patient,
+            health_commands::health_create_record,
+            health_commands::health_list_records,
+            health_commands::health_delete_record,
+            health_commands::health_create_lab_test,
+            health_commands::health_list_lab_tests,
+            health_commands::health_list_test_names,
+            health_commands::health_delete_lab_test,
+            health_commands::health_create_medication,
+            health_commands::health_list_medications,
+            health_commands::health_delete_medication,
+            health_commands::health_create_condition,
+            health_commands::health_list_conditions,
+            health_commands::health_delete_condition,
+            health_commands::health_create_vital,
+            health_commands::health_list_vitals,
+            health_commands::health_delete_vital,
+            health_commands::health_create_family_history,
+            health_commands::health_list_family_history,
+            health_commands::health_delete_family_history,
+            health_commands::health_create_life_event,
+            health_commands::health_list_life_events,
+            health_commands::health_delete_life_event,
+            health_commands::health_create_symptom,
+            health_commands::health_list_symptoms,
+            health_commands::health_resolve_symptom,
+            health_commands::health_delete_symptom,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

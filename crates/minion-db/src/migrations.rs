@@ -23,6 +23,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("003_collections", migrate_003_collections),
         ("004_calendar", migrate_004_calendar),
         ("005_calendar_accounts", migrate_005_calendar_accounts),
+        ("006_health_vault", migrate_006_health_vault),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -444,6 +445,246 @@ fn migrate_005_calendar_accounts(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Health Vault: longitudinal clinical records.
+/// Supports multiple patients (primary user + family members) keyed by
+/// phone number. Covers medical records, lab tests, medications,
+/// conditions, vitals, life events, symptoms, and family history.
+fn migrate_006_health_vault(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        -- =====================================================
+        -- PATIENTS (multi-user support)
+        -- =====================================================
+        CREATE TABLE IF NOT EXISTS patients (
+            id TEXT PRIMARY KEY,
+            phone_number TEXT UNIQUE NOT NULL,
+            full_name TEXT NOT NULL,
+            date_of_birth TEXT,
+            sex TEXT,
+            blood_group TEXT,
+            relationship TEXT NOT NULL,
+            is_primary INTEGER DEFAULT 0,
+            avatar_color TEXT,
+            notes TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_primary_patient
+            ON patients(is_primary) WHERE is_primary = 1;
+        CREATE INDEX IF NOT EXISTS idx_patient_phone ON patients(phone_number);
+
+        -- =====================================================
+        -- CONSENT
+        -- =====================================================
+        CREATE TABLE IF NOT EXISTS health_consent (
+            id INTEGER PRIMARY KEY,
+            accepted_at TEXT NOT NULL,
+            version TEXT NOT NULL,
+            local_only_mode INTEGER DEFAULT 1,
+            drive_sync_enabled INTEGER DEFAULT 0,
+            cloud_llm_allowed INTEGER DEFAULT 0,
+            user_signature TEXT
+        );
+
+        -- =====================================================
+        -- NORMALIZED ENTITIES (doctors, labs, meds, tests)
+        -- =====================================================
+        CREATE TABLE IF NOT EXISTS health_entities (
+            id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            canonical_name TEXT NOT NULL,
+            aliases TEXT,
+            metadata TEXT,
+            first_seen_at TEXT,
+            UNIQUE(entity_type, canonical_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_entity_type ON health_entities(entity_type);
+
+        -- =====================================================
+        -- EPISODES (groups of related events)
+        -- =====================================================
+        CREATE TABLE IF NOT EXISTS episodes (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            description TEXT,
+            start_date TEXT NOT NULL,
+            end_date TEXT,
+            primary_condition TEXT,
+            ai_generated INTEGER DEFAULT 0,
+            user_confirmed INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_episodes_patient ON episodes(patient_id, start_date DESC);
+
+        -- =====================================================
+        -- MEDICAL RECORDS (visits, diagnoses, procedures)
+        -- =====================================================
+        CREATE TABLE IF NOT EXISTS medical_records (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            record_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            doctor_id TEXT REFERENCES health_entities(id),
+            facility_id TEXT REFERENCES health_entities(id),
+            date TEXT NOT NULL,
+            tags TEXT,
+            document_file_id TEXT,
+            episode_id TEXT REFERENCES episodes(id),
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_medical_patient_date
+            ON medical_records(patient_id, date DESC);
+        CREATE INDEX IF NOT EXISTS idx_medical_type
+            ON medical_records(patient_id, record_type);
+
+        -- =====================================================
+        -- LAB TESTS
+        -- =====================================================
+        CREATE TABLE IF NOT EXISTS lab_tests (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            record_id TEXT REFERENCES medical_records(id),
+            test_name TEXT NOT NULL,
+            canonical_name TEXT,
+            test_category TEXT,
+            value REAL NOT NULL,
+            unit TEXT,
+            reference_low REAL,
+            reference_high REAL,
+            reference_text TEXT,
+            flag TEXT,
+            lab_entity_id TEXT REFERENCES health_entities(id),
+            collected_at TEXT NOT NULL,
+            reported_at TEXT,
+            source TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_lab_patient_name_date
+            ON lab_tests(patient_id, canonical_name, collected_at);
+        CREATE INDEX IF NOT EXISTS idx_lab_category
+            ON lab_tests(patient_id, test_category);
+        CREATE INDEX IF NOT EXISTS idx_lab_date
+            ON lab_tests(patient_id, collected_at DESC);
+
+        -- =====================================================
+        -- MEDICATIONS
+        -- =====================================================
+        CREATE TABLE IF NOT EXISTS medications_v2 (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            generic_name TEXT,
+            dose TEXT,
+            frequency TEXT,
+            route TEXT,
+            start_date TEXT,
+            end_date TEXT,
+            prescribing_doctor_id TEXT REFERENCES health_entities(id),
+            indication TEXT,
+            notes TEXT,
+            record_id TEXT REFERENCES medical_records(id),
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_meds_v2_patient
+            ON medications_v2(patient_id, start_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_meds_v2_active
+            ON medications_v2(patient_id) WHERE end_date IS NULL;
+
+        -- =====================================================
+        -- CONDITIONS (chronic, allergies, surgeries)
+        -- =====================================================
+        CREATE TABLE IF NOT EXISTS health_conditions (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            condition_type TEXT,
+            severity TEXT,
+            diagnosed_at TEXT,
+            resolved_at TEXT,
+            notes TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_conditions_patient
+            ON health_conditions(patient_id);
+
+        -- =====================================================
+        -- VITALS (BP, glucose, temperature, etc.)
+        -- =====================================================
+        CREATE TABLE IF NOT EXISTS vitals (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            measurement_type TEXT NOT NULL,
+            value REAL NOT NULL,
+            unit TEXT,
+            measured_at TEXT NOT NULL,
+            context TEXT,
+            notes TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_vitals_patient_type_date
+            ON vitals(patient_id, measurement_type, measured_at DESC);
+
+        -- =====================================================
+        -- FAMILY HISTORY
+        -- =====================================================
+        CREATE TABLE IF NOT EXISTS family_history (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            relation TEXT NOT NULL,
+            condition TEXT NOT NULL,
+            age_at_diagnosis INTEGER,
+            notes TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_family_patient ON family_history(patient_id);
+
+        -- =====================================================
+        -- LIFE EVENTS (correlation layer)
+        -- =====================================================
+        CREATE TABLE IF NOT EXISTS life_events (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            category TEXT NOT NULL,
+            subcategory TEXT,
+            title TEXT NOT NULL,
+            description TEXT,
+            intensity INTEGER,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            tags TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_life_patient_dates
+            ON life_events(patient_id, started_at, ended_at);
+        CREATE INDEX IF NOT EXISTS idx_life_category
+            ON life_events(patient_id, category);
+
+        -- =====================================================
+        -- SYMPTOMS (free text with LLM classification)
+        -- =====================================================
+        CREATE TABLE IF NOT EXISTS symptoms (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            description TEXT NOT NULL,
+            canonical_name TEXT,
+            body_part TEXT,
+            laterality TEXT,
+            severity INTEGER,
+            first_noticed TEXT NOT NULL,
+            resolved_at TEXT,
+            frequency TEXT,
+            triggers TEXT,
+            llm_metadata TEXT,
+            notes TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_symptoms_patient_date
+            ON symptoms(patient_id, first_noticed DESC);
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,7 +803,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 5);
+        assert_eq!(count, 6);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn
