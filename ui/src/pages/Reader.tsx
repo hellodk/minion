@@ -276,6 +276,23 @@ const Reader: Component = () => {
   // "Add to Collection" dropdown
   const [addToCollectionBookId, setAddToCollectionBookId] = createSignal<string | null>(null);
 
+  // Folder import modal (checkbox-based selection)
+  interface FolderFileCandidate {
+    path: string;
+    name: string;
+    extension: string;
+    size: number;
+    already_imported: boolean;
+  }
+  const [showImportModal, setShowImportModal] = createSignal(false);
+  const [importModalPath, setImportModalPath] = createSignal('');
+  const [importCandidates, setImportCandidates] = createSignal<FolderFileCandidate[]>([]);
+  const [importSelected, setImportSelected] = createSignal<Set<string>>(new Set<string>());
+  const [importLoading, setImportLoading] = createSignal(false);
+  const [importFilter, setImportFilter] = createSignal('');
+  const [importTargetCollection, setImportTargetCollection] = createSignal<string>('');
+  const [importing, setImporting] = createSignal(false);
+
   // O'Reilly state
   const [oreillyEmail, setOreillyEmail] = createSignal('');
   const [oreillyPassword, setOreillyPassword] = createSignal('');
@@ -867,6 +884,144 @@ const Reader: Component = () => {
     }
   };
 
+  // Open folder picker, then show a modal with checkbox list of files to import
+  const browseForFolderWithSelection = async () => {
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (selected && typeof selected === 'string') {
+        setImportModalPath(selected);
+        setShowImportModal(true);
+        setImportLoading(true);
+        setImportCandidates([]);
+        setImportSelected(new Set<string>());
+        setImportFilter('');
+        setImportTargetCollection('');
+        try {
+          const files = await invoke<FolderFileCandidate[]>('reader_list_folder_files', {
+            path: selected,
+          });
+          setImportCandidates(files);
+          // Pre-select all files that aren't already imported
+          const preSelected = new Set(
+            files.filter((f) => !f.already_imported).map((f) => f.path)
+          );
+          setImportSelected(preSelected);
+        } catch (e) {
+          console.error('Failed to list folder files:', e);
+          alert(`Failed to scan folder: ${e}`);
+          setShowImportModal(false);
+        } finally {
+          setImportLoading(false);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to open folder dialog:', e);
+      alert(`Error: ${e}`);
+    }
+  };
+
+  // Also let user add files (multi-select) from file picker
+  const browseForMultipleFiles = async () => {
+    try {
+      const selected = await open({
+        multiple: true,
+        filters: [
+          {
+            name: 'Books',
+            extensions: ['epub', 'pdf', 'mobi', 'azw3', 'fb2', 'txt', 'md', 'markdown', 'html', 'htm'],
+          },
+        ],
+      });
+      if (selected && Array.isArray(selected) && selected.length > 0) {
+        const paths = selected as string[];
+        setImporting(true);
+        try {
+          const result = await invoke<{ imported: number; skipped: number; failed: number }>(
+            'reader_import_paths',
+            { paths, collectionId: null }
+          );
+          await loadLibrary();
+          alert(
+            `Imported: ${result.imported}, Skipped (already exists): ${result.skipped}, Failed: ${result.failed}`
+          );
+        } catch (e) {
+          alert(`Import failed: ${e}`);
+        } finally {
+          setImporting(false);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to open file dialog:', e);
+    }
+  };
+
+  const toggleImportSelection = (path: string) => {
+    const current = importSelected();
+    const next = new Set<string>(current);
+    if (next.has(path)) {
+      next.delete(path);
+    } else {
+      next.add(path);
+    }
+    setImportSelected(next);
+  };
+
+  const selectAllImport = () => {
+    const newSet = new Set<string>(
+      importCandidates().filter((c) => !c.already_imported).map((c) => c.path)
+    );
+    setImportSelected(newSet);
+  };
+
+  const deselectAllImport = () => {
+    setImportSelected(new Set<string>());
+  };
+
+  const filteredImportCandidates = () => {
+    const q = importFilter().trim().toLowerCase();
+    if (!q) return importCandidates();
+    return importCandidates().filter(
+      (c) => c.name.toLowerCase().includes(q) || c.extension.toLowerCase().includes(q)
+    );
+  };
+
+  const confirmImportSelection = async () => {
+    const paths = Array.from(importSelected());
+    if (paths.length === 0) {
+      alert('No files selected');
+      return;
+    }
+    setImporting(true);
+    try {
+      const result = await invoke<{ imported: number; skipped: number; failed: number }>(
+        'reader_import_paths',
+        {
+          paths,
+          collectionId: importTargetCollection() || null,
+        }
+      );
+      await loadLibrary();
+      await loadCollections();
+      setShowImportModal(false);
+      alert(
+        `Imported: ${result.imported}\nSkipped (already exists): ${result.skipped}\nFailed: ${result.failed}`
+      );
+    } catch (e) {
+      alert(`Import failed: ${e}`);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const formatBytes = (bytes: number): string => {
+    if (bytes < 1024) return `${bytes} B`;
+    const kb = bytes / 1024;
+    if (kb < 1024) return `${kb.toFixed(1)} KB`;
+    const mb = kb / 1024;
+    if (mb < 1024) return `${mb.toFixed(1)} MB`;
+    return `${(mb / 1024).toFixed(2)} GB`;
+  };
+
   const openBookByPath = async (path: string, cardIndex?: number) => {
     if (loading() || bookClosing()) return;
     setLoading(true);
@@ -1327,9 +1482,9 @@ const Reader: Component = () => {
           </Show>
         </div>
 
-        {/* Add to Collection button */}
+        {/* Add to Collection button - always visible */}
         <div
-          class="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+          class="absolute top-1 right-1 z-10"
           onClick={(e) => e.stopPropagation()}
         >
           <Show
@@ -1355,7 +1510,7 @@ const Reader: Component = () => {
             }
           >
             <button
-              class="w-6 h-6 rounded-full bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300 flex items-center justify-center text-xs shadow hover:bg-sky-50 dark:hover:bg-sky-900 hover:border-sky-300 transition-colors"
+              class="w-7 h-7 rounded-full bg-sky-500 text-white flex items-center justify-center text-xs shadow-md hover:bg-sky-600 transition-all hover:scale-110"
               title="Add to collection"
               onClick={(e) => {
                 e.stopPropagation();
@@ -1364,11 +1519,11 @@ const Reader: Component = () => {
                 );
               }}
             >
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path
                   stroke-linecap="round"
                   stroke-linejoin="round"
-                  stroke-width="2"
+                  stroke-width="2.5"
                   d="M12 4v16m8-8H4"
                 />
               </svg>
@@ -2061,27 +2216,39 @@ const Reader: Component = () => {
             {/* Header */}
             <div class="flex items-center justify-between mb-6">
               <h1 class="text-2xl font-bold">Book Reader</h1>
-              <div class="flex gap-2">
+              <div class="flex gap-2 flex-wrap">
+                <button
+                  class="btn btn-secondary text-sm"
+                  onClick={browseForMultipleFiles}
+                  disabled={loading() || importing()}
+                  title="Pick multiple book files to add to the library"
+                >
+                  <svg class="w-4 h-4 mr-1.5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+                  </svg>
+                  Add Files
+                </button>
+                <button
+                  class="btn btn-secondary text-sm"
+                  onClick={browseForFolderWithSelection}
+                  disabled={loading() || importing()}
+                  title="Pick a folder and choose which files to import"
+                >
+                  <svg class="w-4 h-4 mr-1.5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-3-3v6m-9 1V7a2 2 0 012-2h5l2 2h5a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+                  </svg>
+                  Add Folder
+                </button>
                 <button
                   class="btn btn-secondary text-sm"
                   onClick={browseForLibraryFolder}
                   disabled={loading()}
-                  title="Scan a folder for books and import them"
+                  title="Scan a folder and import all books automatically"
                 >
-                  <svg
-                    class="w-4 h-4 mr-1.5 inline-block"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
-                    />
+                  <svg class="w-4 h-4 mr-1.5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                   </svg>
-                  Import Folder
+                  Quick Scan
                 </button>
                 <button
                   class="btn btn-primary text-sm"
@@ -2089,18 +2256,8 @@ const Reader: Component = () => {
                   disabled={loading()}
                   title="Open a single book file"
                 >
-                  <svg
-                    class="w-4 h-4 mr-1.5 inline-block"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M12 6v6m0 0v6m0-6h6m-6 0H6"
-                    />
+                  <svg class="w-4 h-4 mr-1.5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
                   </svg>
                   Open Book
                 </button>
@@ -2708,6 +2865,148 @@ const Reader: Component = () => {
                 </Show>
               </div>
             </Show>
+          </div>
+        </Show>
+
+        {/* ================================================================ */}
+        {/* IMPORT MODAL (checkbox file selection)                           */}
+        {/* ================================================================ */}
+        <Show when={showImportModal()}>
+          <div
+            class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowImportModal(false);
+            }}
+          >
+            <div class="card w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl">
+              {/* Modal header */}
+              <div class="p-5 border-b border-gray-200 dark:border-gray-700">
+                <div class="flex items-start justify-between mb-2">
+                  <div>
+                    <h2 class="text-xl font-bold">Import Books from Folder</h2>
+                    <p class="text-sm text-gray-500 dark:text-gray-400 mt-1 truncate max-w-xl" title={importModalPath()}>
+                      {importModalPath()}
+                    </p>
+                  </div>
+                  <button
+                    class="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
+                    onClick={() => setShowImportModal(false)}
+                  >
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+
+                <Show when={!importLoading() && importCandidates().length > 0}>
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <input
+                      type="text"
+                      class="input text-sm flex-1 min-w-[180px]"
+                      placeholder="Filter by filename or extension..."
+                      value={importFilter()}
+                      onInput={(e) => setImportFilter(e.currentTarget.value)}
+                    />
+                    <button class="btn btn-secondary text-xs" onClick={selectAllImport}>
+                      Select All
+                    </button>
+                    <button class="btn btn-secondary text-xs" onClick={deselectAllImport}>
+                      Clear
+                    </button>
+                    <span class="text-xs text-gray-500 ml-1">
+                      {importSelected().size} / {importCandidates().filter((c) => !c.already_imported).length} selected
+                    </span>
+                  </div>
+                </Show>
+              </div>
+
+              {/* Modal body: file list */}
+              <div class="flex-1 overflow-auto p-2">
+                <Show when={importLoading()}>
+                  <div class="text-center py-12 text-gray-500">
+                    <div class="w-8 h-8 mx-auto mb-3 rounded-full border-2 border-gray-200 dark:border-gray-700 border-t-minion-500" style={{ animation: 'spin 1s linear infinite' }} />
+                    Scanning folder...
+                  </div>
+                </Show>
+
+                <Show when={!importLoading() && importCandidates().length === 0}>
+                  <div class="text-center py-12 text-gray-500">
+                    <p>No supported book files found in this folder.</p>
+                    <p class="text-xs mt-1">Supported: EPUB, PDF, MOBI, TXT, MD, HTML</p>
+                  </div>
+                </Show>
+
+                <Show when={!importLoading() && importCandidates().length > 0}>
+                  <div class="space-y-0.5">
+                    <For each={filteredImportCandidates()}>
+                      {(file) => (
+                        <label
+                          class="flex items-center gap-3 px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer"
+                          classList={{
+                            'opacity-50': file.already_imported,
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            class="w-4 h-4 rounded"
+                            checked={importSelected().has(file.path)}
+                            disabled={file.already_imported}
+                            onChange={() => toggleImportSelection(file.path)}
+                          />
+                          <span class="text-xs font-mono uppercase bg-gray-200 dark:bg-gray-700 rounded px-1.5 py-0.5 min-w-[44px] text-center">
+                            {file.extension}
+                          </span>
+                          <div class="flex-1 min-w-0">
+                            <p class="text-sm truncate" title={file.path}>
+                              {file.name}
+                            </p>
+                            <Show when={file.already_imported}>
+                              <p class="text-xs text-amber-600 dark:text-amber-400">Already in library</p>
+                            </Show>
+                          </div>
+                          <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                            {formatBytes(file.size)}
+                          </span>
+                        </label>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+
+              {/* Modal footer */}
+              <div class="p-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/30">
+                <div class="flex items-center gap-3 mb-3">
+                  <label class="text-sm text-gray-600 dark:text-gray-300 whitespace-nowrap">Add to collection:</label>
+                  <select
+                    class="input text-sm flex-1"
+                    value={importTargetCollection()}
+                    onChange={(e) => setImportTargetCollection(e.currentTarget.value)}
+                  >
+                    <option value="">— None —</option>
+                    <For each={collections()}>
+                      {(col) => <option value={col.id}>{col.name}</option>}
+                    </For>
+                  </select>
+                </div>
+                <div class="flex justify-end gap-2">
+                  <button
+                    class="btn btn-secondary text-sm"
+                    onClick={() => setShowImportModal(false)}
+                    disabled={importing()}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    class="btn btn-primary text-sm"
+                    onClick={confirmImportSelection}
+                    disabled={importing() || importSelected().size === 0}
+                  >
+                    {importing() ? 'Importing...' : `Import ${importSelected().size} file${importSelected().size === 1 ? '' : 's'}`}
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </Show>
 

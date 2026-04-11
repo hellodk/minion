@@ -1921,30 +1921,51 @@ pub async fn reader_get_pdf_bytes(path: String) -> Result<Vec<u8>, String> {
 
 /// Simple markdown to HTML conversion
 fn markdown_to_html(md: &str) -> String {
-    let mut html = String::new();
+    use pulldown_cmark::{html, Options, Parser};
 
-    for line in md.lines() {
-        let trimmed = line.trim();
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_SMART_PUNCTUATION);
+    options.insert(Options::ENABLE_HEADING_ATTRIBUTES);
 
-        if let Some(h1) = trimmed.strip_prefix("# ") {
-            html.push_str(&format!("<h1>{}</h1>\n", h1));
-        } else if let Some(h2) = trimmed.strip_prefix("## ") {
-            html.push_str(&format!("<h2>{}</h2>\n", h2));
-        } else if let Some(h3) = trimmed.strip_prefix("### ") {
-            html.push_str(&format!("<h3>{}</h3>\n", h3));
-        } else if let Some(li) = trimmed
-            .strip_prefix("- ")
-            .or_else(|| trimmed.strip_prefix("* "))
-        {
-            html.push_str(&format!("<li>{}</li>\n", li));
-        } else if trimmed.is_empty() {
-            html.push_str("<br/>\n");
-        } else {
-            html.push_str(&format!("<p>{}</p>\n", trimmed));
-        }
-    }
+    let parser = Parser::new_ext(md, options);
+    let mut html_output = String::with_capacity(md.len() * 2);
+    html::push_html(&mut html_output, parser);
 
-    html
+    // Wrap in a styled container so tables, code blocks, and lists render nicely
+    format!(
+        "<div class=\"minion-md\">\
+         <style>\
+         .minion-md h1{{font-size:2em;font-weight:700;margin:1em 0 0.5em;line-height:1.2;}}\
+         .minion-md h2{{font-size:1.5em;font-weight:700;margin:1em 0 0.5em;line-height:1.3;}}\
+         .minion-md h3{{font-size:1.25em;font-weight:600;margin:1em 0 0.4em;}}\
+         .minion-md h4{{font-size:1.1em;font-weight:600;margin:0.8em 0 0.3em;}}\
+         .minion-md p{{margin:0.8em 0;line-height:1.75;}}\
+         .minion-md ul,.minion-md ol{{margin:0.8em 0;padding-left:1.8em;}}\
+         .minion-md li{{margin:0.3em 0;line-height:1.6;}}\
+         .minion-md li>p{{margin:0.3em 0;}}\
+         .minion-md blockquote{{border-left:4px solid #9ca3af;padding:0.2em 1em;margin:1em 0;color:#6b7280;font-style:italic;}}\
+         .minion-md code{{background:rgba(0,0,0,0.08);padding:0.1em 0.4em;border-radius:3px;font-family:'Monaco','Menlo','Consolas',monospace;font-size:0.92em;}}\
+         .minion-md pre{{background:#1e293b;color:#e2e8f0;padding:1em;border-radius:6px;overflow-x:auto;margin:1em 0;line-height:1.5;}}\
+         .minion-md pre code{{background:transparent;color:inherit;padding:0;}}\
+         .minion-md table{{border-collapse:collapse;margin:1em 0;width:100%;}}\
+         .minion-md th,.minion-md td{{border:1px solid #d1d5db;padding:0.5em 0.8em;text-align:left;}}\
+         .minion-md th{{background:rgba(0,0,0,0.05);font-weight:600;}}\
+         .minion-md a{{color:#0ea5e9;text-decoration:underline;}}\
+         .minion-md a:hover{{color:#0284c7;}}\
+         .minion-md img{{max-width:100%;height:auto;border-radius:4px;margin:0.5em 0;}}\
+         .minion-md hr{{border:none;border-top:1px solid #d1d5db;margin:2em 0;}}\
+         .minion-md strong{{font-weight:700;}}\
+         .minion-md em{{font-style:italic;}}\
+         .minion-md input[type=\"checkbox\"]{{margin-right:0.4em;}}\
+         </style>\
+         {}\
+         </div>",
+        html_output
+    )
 }
 
 #[tauri::command]
@@ -4064,6 +4085,209 @@ pub async fn reader_delete_collection(
     .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FolderFileCandidate {
+    pub path: String,
+    pub name: String,
+    pub extension: String,
+    pub size: u64,
+    pub already_imported: bool,
+}
+
+/// List all book files in a directory (without importing them).
+/// Used by the Reader UI to show a checkbox list for selective import.
+#[tauri::command]
+pub async fn reader_list_folder_files(
+    state: State<'_, AppStateHandle>,
+    path: String,
+) -> Result<Vec<FolderFileCandidate>, String> {
+    let dir = PathBuf::from(&path);
+    if !dir.is_dir() {
+        return Err(format!("Not a directory: {}", path));
+    }
+
+    let book_extensions = [
+        "epub", "pdf", "mobi", "azw3", "fb2", "djvu", "cbz", "cbr", "txt", "md", "markdown",
+        "html", "htm",
+    ];
+    let mut candidates: Vec<FolderFileCandidate> = Vec::new();
+
+    fn collect_files(
+        dir: &PathBuf,
+        exts: &[&str],
+        out: &mut Vec<FolderFileCandidate>,
+    ) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_files(&path, exts, out);
+                } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    let ext_lower = ext.to_lowercase();
+                    if exts.contains(&ext_lower.as_str()) {
+                        let name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        out.push(FolderFileCandidate {
+                            path: path.to_string_lossy().to_string(),
+                            name,
+                            extension: ext_lower,
+                            size,
+                            already_imported: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    collect_files(&dir, &book_extensions, &mut candidates);
+
+    // Mark files that are already in the library
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    for c in candidates.iter_mut() {
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM reader_books WHERE file_path = ?1)",
+                rusqlite::params![c.path],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        c.already_imported = exists;
+    }
+
+    // Sort by path for stable display
+    candidates.sort_by(|a, b| a.path.cmp(&b.path));
+
+    Ok(candidates)
+}
+
+/// Import a specific list of file paths into the library, optionally adding
+/// them all to a collection.
+#[tauri::command]
+pub async fn reader_import_paths(
+    state: State<'_, AppStateHandle>,
+    paths: Vec<String>,
+    collection_id: Option<String>,
+) -> Result<ImportPathsResult, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+
+    for p in &paths {
+        let book_path = PathBuf::from(p);
+        if !book_path.exists() {
+            failed += 1;
+            continue;
+        }
+
+        // If already exists, skip insertion but still attach to collection
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM reader_books WHERE file_path = ?1",
+                rusqlite::params![p],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let book_id = if let Some(id) = existing {
+            skipped += 1;
+            id
+        } else {
+            let ext = book_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            let (title, authors) = if ext == "epub" {
+                match epub::doc::EpubDoc::new(&book_path) {
+                    Ok(doc) => {
+                        let title = doc
+                            .mdata("title")
+                            .map(|m| m.value.clone())
+                            .unwrap_or_else(|| {
+                                book_path
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("Unknown")
+                                    .to_string()
+                            });
+                        let authors = doc
+                            .mdata("creator")
+                            .map(|m| m.value.clone())
+                            .unwrap_or_default();
+                        (title, authors)
+                    }
+                    Err(_) => (
+                        book_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Unknown")
+                            .to_string(),
+                        String::new(),
+                    ),
+                }
+            } else {
+                (
+                    book_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Unknown")
+                        .to_string(),
+                    String::new(),
+                )
+            };
+
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+
+            if conn
+                .execute(
+                    "INSERT INTO reader_books (id, title, authors, file_path, format, progress, added_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                    rusqlite::params![id, title, authors, p, ext, now],
+                )
+                .is_err()
+            {
+                failed += 1;
+                continue;
+            }
+            imported += 1;
+            id
+        };
+
+        // Add to collection if requested
+        if let Some(ref cid) = collection_id {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO reader_collection_books (collection_id, book_id, added_at)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![cid, book_id, chrono::Utc::now().to_rfc3339()],
+            );
+        }
+    }
+
+    Ok(ImportPathsResult {
+        imported,
+        skipped,
+        failed,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportPathsResult {
+    pub imported: usize,
+    pub skipped: usize,
+    pub failed: usize,
 }
 
 #[tauri::command]

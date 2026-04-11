@@ -135,6 +135,8 @@ pub fn run() {
             commands::reader_get_collection_books,
             commands::reader_delete_collection,
             commands::reader_scan_directory,
+            commands::reader_list_folder_files,
+            commands::reader_import_paths,
             // AI commands
             commands::ai_test_connection,
             commands::ai_analyze_health,
