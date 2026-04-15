@@ -1,5 +1,8 @@
 import { Component, createSignal, createEffect, For, Show, onMount } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
+import ImportTab from './health/ImportTab';
+import ReviewTab from './health/ReviewTab';
+import DocumentsTab from './health/DocumentsTab';
 
 // =====================================================================
 // Types
@@ -136,7 +139,10 @@ type HealthTab =
   | 'vitals'
   | 'life_events'
   | 'symptoms'
-  | 'family';
+  | 'family'
+  | 'import'
+  | 'review'
+  | 'documents';
 
 // =====================================================================
 // Life event categories (including yoga/meditation/spiritual)
@@ -773,6 +779,9 @@ const Health: Component = () => {
               ['life_events', 'Life Events'],
               ['symptoms', 'Symptoms'],
               ['family', 'Family History'],
+              ['import', 'Import'],
+              ['review', 'Review'],
+              ['documents', 'Documents'],
             ] as const
           ).map(([tab, label]) => (
             <button
@@ -915,6 +924,24 @@ const Health: Component = () => {
             entries={familyHistory()}
             onReload={loadPatientData}
           />
+        </Show>
+
+        {/* ============== IMPORT ============== */}
+        <Show when={activeTab() === 'import'}>
+          <ImportTab
+            activePatient={activePatient()!}
+            onGoToReview={() => setActiveTab('review')}
+          />
+        </Show>
+
+        {/* ============== REVIEW ============== */}
+        <Show when={activeTab() === 'review'}>
+          <ReviewTab activePatient={activePatient()!} />
+        </Show>
+
+        {/* ============== DOCUMENTS ============== */}
+        <Show when={activeTab() === 'documents'}>
+          <DocumentsTab activePatient={activePatient()!} />
         </Show>
 
         {/* Add patient modal */}

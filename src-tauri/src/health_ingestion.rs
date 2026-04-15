@@ -306,6 +306,19 @@ pub async fn health_start_ingestion(
         let mut skipped = 0i64;
         let mut failed = 0i64;
 
+        // Check once up-front if an extraction endpoint is configured + healthy.
+        // If it is, we auto-classify each file inline (Option A). Otherwise we
+        // just persist raw_text and the user can trigger classification later.
+        let auto_classify =
+            crate::health_classify::is_extract_endpoint_healthy(&state_bg).await;
+        if auto_classify {
+            tracing::info!("health ingestion: auto-classification enabled");
+        } else {
+            tracing::info!(
+                "health ingestion: no healthy LLM endpoint — skipping auto-classify"
+            );
+        }
+
         for path_str in &selected_paths {
             let path = PathBuf::from(path_str);
 
@@ -433,8 +446,9 @@ pub async fn health_start_ingestion(
                 }
             };
 
-            // Persist raw text. Classification + structured extraction land
-            // in week 3 when the LLM layer is wired.
+            // Persist raw text. If an LLM endpoint is configured we also
+            // classify + extract right now (Option A); otherwise the user
+            // can run `health_classify_pending` later.
             let extraction_id = uuid::Uuid::new_v4().to_string();
             {
                 let st = state_bg.read().await;
@@ -453,6 +467,19 @@ pub async fn health_start_ingestion(
                         "UPDATE file_manifest SET status = 'extracted' WHERE id = ?1",
                         rusqlite::params![file_id],
                     );
+                }
+            }
+
+            if auto_classify {
+                if let Err(e) = crate::health_classify::process_document(
+                    &state_bg,
+                    &file_id,
+                    &text,
+                    Some("health_extract"),
+                )
+                .await
+                {
+                    tracing::warn!("auto-classify failed for {}: {}", file_id, e);
                 }
             }
 

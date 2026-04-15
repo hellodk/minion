@@ -31,6 +31,108 @@ const Settings: Component = () => {
   const [zdStatus, setZdStatus] = createSignal<'idle' | 'saving' | 'syncing' | 'success' | 'error'>('idle');
   const [zdMessage, setZdMessage] = createSignal('');
 
+  // LLM endpoints state
+  type LlmEndpoint = {
+    id: string;
+    name: string;
+    provider_type: string;
+    base_url: string;
+    api_key: string | null;
+    default_model: string | null;
+    enabled: boolean;
+  };
+  const [llmEndpoints, setLlmEndpoints] = createSignal<LlmEndpoint[]>([]);
+  const [llmTestStatus, setLlmTestStatus] = createSignal<Record<string, 'idle' | 'testing' | 'success' | 'error'>>({});
+  const [showAddLlm, setShowAddLlm] = createSignal(false);
+  const [newLlmName, setNewLlmName] = createSignal('');
+  const [newLlmProvider, setNewLlmProvider] = createSignal('ollama');
+  const [newLlmBaseUrl, setNewLlmBaseUrl] = createSignal('');
+  const [newLlmApiKey, setNewLlmApiKey] = createSignal('');
+  const [newLlmModel, setNewLlmModel] = createSignal('');
+  const [llmFormSaving, setLlmFormSaving] = createSignal(false);
+  const [llmFormError, setLlmFormError] = createSignal<string | null>(null);
+
+  const LLM_PROVIDER_HINTS: Record<string, { url: string; model: string }> = {
+    ollama: { url: 'http://localhost:11434', model: 'llama3.2:3b' },
+    openai_compatible: { url: 'http://localhost:8080/v1', model: 'gpt-oss' },
+    anthropic: { url: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-20241022' },
+    openai: { url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+    google_gemini: { url: 'https://generativelanguage.googleapis.com', model: 'gemini-1.5-flash' },
+    airllm: { url: 'http://localhost:8081/v1', model: 'llama-3.1-70b' },
+  };
+
+  const loadLlmEndpoints = async () => {
+    try {
+      const list = await invoke<LlmEndpoint[]>('llm_list_endpoints');
+      setLlmEndpoints(list);
+    } catch (e) {
+      console.error('Failed to load LLM endpoints', e);
+    }
+  };
+
+  const testLlmEndpoint = async (id: string) => {
+    setLlmTestStatus((s) => ({ ...s, [id]: 'testing' }));
+    try {
+      const ok = await invoke<boolean>('llm_test_endpoint', { endpointId: id });
+      setLlmTestStatus((s) => ({ ...s, [id]: ok ? 'success' : 'error' }));
+    } catch (e) {
+      console.error('LLM test failed', e);
+      setLlmTestStatus((s) => ({ ...s, [id]: 'error' }));
+    }
+  };
+
+  const deleteLlmEndpoint = async (id: string) => {
+    if (!confirm('Delete this endpoint?')) return;
+    try {
+      await invoke('llm_delete_endpoint', { endpointId: id });
+      await loadLlmEndpoints();
+    } catch (e) {
+      alert(String(e));
+    }
+  };
+
+  const resetLlmForm = () => {
+    setShowAddLlm(false);
+    setNewLlmName('');
+    setNewLlmProvider('ollama');
+    setNewLlmBaseUrl('');
+    setNewLlmApiKey('');
+    setNewLlmModel('');
+    setLlmFormError(null);
+  };
+
+  const saveLlmEndpoint = async () => {
+    if (!newLlmName().trim() || !newLlmBaseUrl().trim()) {
+      setLlmFormError('Name and Base URL are required.');
+      return;
+    }
+    setLlmFormSaving(true);
+    setLlmFormError(null);
+    try {
+      const created = await invoke<LlmEndpoint>('llm_create_endpoint', {
+        request: {
+          name: newLlmName().trim(),
+          provider_type: newLlmProvider(),
+          base_url: newLlmBaseUrl().trim(),
+          api_key: newLlmApiKey().trim() || null,
+          default_model: newLlmModel().trim() || null,
+        },
+      });
+      // Try to test it so the user sees immediate feedback
+      try {
+        await testLlmEndpoint(created.id);
+      } catch (_) {
+        // ignore
+      }
+      await loadLlmEndpoints();
+      resetLlmForm();
+    } catch (e) {
+      setLlmFormError(String(e));
+    } finally {
+      setLlmFormSaving(false);
+    }
+  };
+
   onMount(async () => {
     try {
       const info = await invoke<SystemInfo>('get_system_info');
@@ -53,6 +155,12 @@ const Settings: Component = () => {
         if (oid) setOutlookClientId(oid);
         const accounts = await invoke<CalendarAccountRow[]>('calendar_list_accounts');
         setCalAccounts(accounts);
+      } catch (_) {
+        // ignore
+      }
+
+      try {
+        await loadLlmEndpoints();
       } catch (_) {
         // ignore
       }
@@ -237,6 +345,171 @@ const Settings: Component = () => {
             </p>
           </Show>
         </div>
+      </section>
+
+      {/* LLM Endpoints */}
+      <section class="card p-4 mb-6">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="text-lg font-medium">LLM Endpoints</h2>
+            <p class="text-xs text-gray-500">
+              Configure multiple local or cloud LLMs for classification, extraction, and chat.
+            </p>
+          </div>
+          <button
+            class="btn btn-primary text-sm"
+            onClick={() => setShowAddLlm(true)}
+            disabled={showAddLlm()}
+          >
+            + Add Endpoint
+          </button>
+        </div>
+
+        <Show when={llmEndpoints().length === 0 && !showAddLlm()}>
+          <p class="text-sm text-gray-500 py-4 text-center">
+            No LLM endpoints configured yet.
+          </p>
+        </Show>
+
+        <Show when={llmEndpoints().length > 0}>
+          <div class="space-y-2">
+            <For each={llmEndpoints()}>
+              {(ep) => (
+                <div class="card p-3">
+                  <div class="flex items-center justify-between gap-3">
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center gap-2 mb-1">
+                        <span class="font-semibold text-sm">{ep.name}</span>
+                        <span class="px-2 py-0.5 bg-minion-100 dark:bg-minion-900/40 text-minion-700 dark:text-minion-300 text-xs rounded">
+                          {ep.provider_type}
+                        </span>
+                        <Show when={!ep.enabled}>
+                          <span class="px-2 py-0.5 bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-xs rounded">
+                            disabled
+                          </span>
+                        </Show>
+                      </div>
+                      <div class="text-xs text-gray-500 font-mono truncate">
+                        {ep.base_url}
+                      </div>
+                      <Show when={ep.default_model}>
+                        <div class="text-xs text-gray-500">
+                          Model: <span class="font-mono">{ep.default_model}</span>
+                        </div>
+                      </Show>
+                    </div>
+                    <div class="flex items-center gap-2 flex-shrink-0">
+                      <Show when={llmTestStatus()[ep.id] === 'success'}>
+                        <span class="text-green-500" title="Last test: OK">✓</span>
+                      </Show>
+                      <Show when={llmTestStatus()[ep.id] === 'error'}>
+                        <span class="text-red-500" title="Last test: failed">✗</span>
+                      </Show>
+                      <button
+                        class="btn btn-secondary text-xs"
+                        onClick={() => testLlmEndpoint(ep.id)}
+                        disabled={llmTestStatus()[ep.id] === 'testing'}
+                      >
+                        {llmTestStatus()[ep.id] === 'testing' ? 'Testing…' : 'Test'}
+                      </button>
+                      <button
+                        class="btn btn-secondary text-xs text-red-600"
+                        onClick={() => deleteLlmEndpoint(ep.id)}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </For>
+          </div>
+        </Show>
+
+        {/* Add endpoint modal */}
+        <Show when={showAddLlm()}>
+          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+            <div class="card w-full max-w-lg shadow-2xl">
+              <div class="p-6">
+                <h3 class="text-lg font-bold mb-4">Add LLM Endpoint</h3>
+                <div class="space-y-3">
+                  <div>
+                    <label class="block text-xs font-medium mb-1">Name *</label>
+                    <input
+                      type="text"
+                      class="input w-full"
+                      placeholder="e.g. Local Ollama"
+                      value={newLlmName()}
+                      onInput={(e) => setNewLlmName(e.currentTarget.value)}
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium mb-1">Provider type *</label>
+                    <select
+                      class="input w-full"
+                      value={newLlmProvider()}
+                      onChange={(e) => setNewLlmProvider(e.currentTarget.value)}
+                    >
+                      <option value="ollama">Ollama</option>
+                      <option value="openai_compatible">OpenAI-compatible</option>
+                      <option value="anthropic">Anthropic</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="google_gemini">Google Gemini</option>
+                      <option value="airllm">AirLLM</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium mb-1">Base URL *</label>
+                    <input
+                      type="text"
+                      class="input w-full"
+                      placeholder={LLM_PROVIDER_HINTS[newLlmProvider()]?.url || ''}
+                      value={newLlmBaseUrl()}
+                      onInput={(e) => setNewLlmBaseUrl(e.currentTarget.value)}
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium mb-1">API key (optional)</label>
+                    <input
+                      type="password"
+                      class="input w-full"
+                      placeholder="sk-… (leave blank for local servers)"
+                      value={newLlmApiKey()}
+                      onInput={(e) => setNewLlmApiKey(e.currentTarget.value)}
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium mb-1">Default model</label>
+                    <input
+                      type="text"
+                      class="input w-full"
+                      placeholder={LLM_PROVIDER_HINTS[newLlmProvider()]?.model || ''}
+                      value={newLlmModel()}
+                      onInput={(e) => setNewLlmModel(e.currentTarget.value)}
+                    />
+                  </div>
+                </div>
+                <Show when={llmFormError()}>
+                  <div class="mt-3 p-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded">
+                    <p class="text-xs text-red-700 dark:text-red-300">{llmFormError()}</p>
+                  </div>
+                </Show>
+                <div class="flex gap-2 justify-end mt-6">
+                  <button class="btn btn-secondary" onClick={resetLlmForm} disabled={llmFormSaving()}>
+                    Cancel
+                  </button>
+                  <button
+                    class="btn btn-primary"
+                    onClick={saveLlmEndpoint}
+                    disabled={llmFormSaving()}
+                  >
+                    {llmFormSaving() ? 'Saving…' : 'Test & Save'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </Show>
       </section>
 
       {/* Google Fit */}

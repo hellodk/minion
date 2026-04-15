@@ -4,7 +4,9 @@
 
 mod calendar_integration;
 mod commands;
+mod health_classify;
 mod health_commands;
+mod health_entities;
 mod health_ingestion;
 mod llm_commands;
 mod state;
@@ -225,6 +227,13 @@ pub fn run() {
             llm_commands::llm_create_endpoint,
             llm_commands::llm_delete_endpoint,
             llm_commands::llm_test_endpoint,
+            // Health Vault classification + extraction (week 3)
+            health_classify::health_classify_pending,
+            health_classify::health_list_pending_review,
+            health_classify::health_save_review,
+            // Health Vault entity resolution (week 3)
+            health_entities::health_list_entities,
+            health_entities::health_merge_entities,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
