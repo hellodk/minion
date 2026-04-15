@@ -26,6 +26,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("006_health_vault", migrate_006_health_vault),
         ("007_health_ingestion", migrate_007_health_ingestion),
         ("008_llm_endpoints", migrate_008_llm_endpoints),
+        ("009_health_timeline", migrate_009_health_timeline),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -770,6 +771,52 @@ fn migrate_008_llm_endpoints(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Health Vault week 4: episode foreign keys on per-event tables, drive
+/// sync state placeholder for week 5, and a precomputed correlation cache.
+fn migrate_009_health_timeline(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        ALTER TABLE lab_tests ADD COLUMN episode_id TEXT REFERENCES episodes(id);
+        ALTER TABLE medications_v2 ADD COLUMN episode_id TEXT REFERENCES episodes(id);
+        ALTER TABLE health_conditions ADD COLUMN episode_id TEXT REFERENCES episodes(id);
+        ALTER TABLE vitals ADD COLUMN episode_id TEXT REFERENCES episodes(id);
+        ALTER TABLE life_events ADD COLUMN episode_id TEXT REFERENCES episodes(id);
+        ALTER TABLE symptoms ADD COLUMN episode_id TEXT REFERENCES episodes(id);
+
+        CREATE TABLE IF NOT EXISTS drive_sync_state (
+            id INTEGER PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            account_id TEXT,
+            file_id_remote TEXT,
+            last_synced_at TEXT,
+            last_remote_etag TEXT,
+            sync_cursor TEXT,
+            error TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS health_correlations (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            source_kind TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            target_kind TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            relation TEXT NOT NULL,
+            confidence REAL,
+            delta_days INTEGER,
+            notes TEXT,
+            computed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(patient_id, source_kind, source_id, target_kind, target_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_corr_patient_src
+            ON health_correlations(patient_id, source_kind, source_id);
+        CREATE INDEX IF NOT EXISTS idx_corr_patient_tgt
+            ON health_correlations(patient_id, target_kind, target_id);
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -888,7 +935,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 8);
+        assert_eq!(count, 9);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn

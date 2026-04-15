@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import ImportTab from './health/ImportTab';
 import ReviewTab from './health/ReviewTab';
 import DocumentsTab from './health/DocumentsTab';
+import TimelineTab from './health/TimelineTab';
+import EpisodesTab from './health/EpisodesTab';
 
 // =====================================================================
 // Types
@@ -139,6 +141,8 @@ type HealthTab =
   | 'vitals'
   | 'life_events'
   | 'symptoms'
+  | 'timeline'
+  | 'episodes'
   | 'family'
   | 'import'
   | 'review'
@@ -778,6 +782,8 @@ const Health: Component = () => {
               ['vitals', 'Vitals'],
               ['life_events', 'Life Events'],
               ['symptoms', 'Symptoms'],
+              ['timeline', 'Timeline'],
+              ['episodes', 'Episodes'],
               ['family', 'Family History'],
               ['import', 'Import'],
               ['review', 'Review'],
@@ -915,6 +921,16 @@ const Health: Component = () => {
             symptoms={symptoms()}
             onReload={loadPatientData}
           />
+        </Show>
+
+        {/* ============== TIMELINE ============== */}
+        <Show when={activeTab() === 'timeline'}>
+          <TimelineTab patientId={activePatient()!.id} />
+        </Show>
+
+        {/* ============== EPISODES ============== */}
+        <Show when={activeTab() === 'episodes'}>
+          <EpisodesTab patientId={activePatient()!.id} />
         </Show>
 
         {/* ============== FAMILY HISTORY ============== */}
@@ -2017,6 +2033,15 @@ const LifeEventsTab: Component<{
   );
 };
 
+interface SymptomClassification {
+  canonical_name?: string;
+  body_part?: string;
+  laterality?: string;
+  severity?: number;
+  category?: string;
+  keywords: string[];
+}
+
 const SymptomsTab: Component<{
   patientId: string;
   symptoms: Symptom[];
@@ -2027,6 +2052,45 @@ const SymptomsTab: Component<{
   const [severity, setSeverity] = createSignal(5);
   const [firstNoticed, setFirstNoticed] = createSignal(new Date().toISOString().slice(0, 10));
   const [frequency, setFrequency] = createSignal('intermittent');
+  const [classifyingId, setClassifyingId] = createSignal<string | null>(null);
+  const [classification, setClassification] = createSignal<{
+    id: string;
+    data: SymptomClassification;
+  } | null>(null);
+  const [applying, setApplying] = createSignal(false);
+
+  const classify = async (s: Symptom) => {
+    setClassifyingId(s.id);
+    setClassification(null);
+    try {
+      const data = await invoke<SymptomClassification>('health_classify_symptom', {
+        text: s.description,
+      });
+      setClassification({ id: s.id, data });
+    } catch (e) {
+      alert(`Classification failed: ${e}`);
+    } finally {
+      setClassifyingId(null);
+    }
+  };
+
+  const applyClassification = async () => {
+    const c = classification();
+    if (!c) return;
+    setApplying(true);
+    try {
+      await invoke('health_apply_symptom_classification', {
+        symptom_id: c.id,
+        classification: c.data,
+      });
+      setClassification(null);
+      props.onReload();
+    } catch (e) {
+      alert(`Apply failed: ${e}`);
+    } finally {
+      setApplying(false);
+    }
+  };
 
   const save = async () => {
     if (!description().trim()) return;
@@ -2149,6 +2213,13 @@ const SymptomsTab: Component<{
                     </div>
                   </div>
                   <div class="flex gap-2 ml-2">
+                    <button
+                      class="text-xs text-minion-600 dark:text-minion-400 hover:underline disabled:opacity-50"
+                      onClick={() => classify(s)}
+                      disabled={classifyingId() === s.id}
+                    >
+                      {classifyingId() === s.id ? 'Classifying…' : 'AI Classify'}
+                    </button>
                     <Show when={!s.resolved_at}>
                       <button
                         class="text-xs text-green-600 hover:underline"
@@ -2165,6 +2236,72 @@ const SymptomsTab: Component<{
                     </button>
                   </div>
                 </div>
+                <Show when={classification()?.id === s.id}>
+                  <div class="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700 bg-minion-50/50 dark:bg-minion-900/10 -mx-3 -mb-3 px-3 pb-3 rounded-b">
+                    <div class="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">
+                      AI classification
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-xs">
+                      <Show when={classification()!.data.canonical_name}>
+                        <div>
+                          <span class="text-gray-500">Canonical name:</span>{' '}
+                          <span class="font-medium">{classification()!.data.canonical_name}</span>
+                        </div>
+                      </Show>
+                      <Show when={classification()!.data.body_part}>
+                        <div>
+                          <span class="text-gray-500">Body part:</span>{' '}
+                          <span class="font-medium">{classification()!.data.body_part}</span>
+                        </div>
+                      </Show>
+                      <Show when={classification()!.data.laterality}>
+                        <div>
+                          <span class="text-gray-500">Laterality:</span>{' '}
+                          <span class="font-medium">{classification()!.data.laterality}</span>
+                        </div>
+                      </Show>
+                      <Show when={classification()!.data.severity !== undefined}>
+                        <div>
+                          <span class="text-gray-500">Severity:</span>{' '}
+                          <span class="font-medium">{classification()!.data.severity}/10</span>
+                        </div>
+                      </Show>
+                      <Show when={classification()!.data.category}>
+                        <div>
+                          <span class="text-gray-500">Category:</span>{' '}
+                          <span class="font-medium">{classification()!.data.category}</span>
+                        </div>
+                      </Show>
+                    </div>
+                    <Show when={classification()!.data.keywords.length > 0}>
+                      <div class="mt-2 flex flex-wrap gap-1">
+                        <For each={classification()!.data.keywords}>
+                          {(k) => (
+                            <span class="px-2 py-0.5 rounded-full bg-gray-200 dark:bg-gray-700 text-[10px]">
+                              {k}
+                            </span>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
+                    <div class="flex gap-2 justify-end mt-3">
+                      <button
+                        class="btn btn-secondary text-xs"
+                        onClick={() => setClassification(null)}
+                        disabled={applying()}
+                      >
+                        Dismiss
+                      </button>
+                      <button
+                        class="btn btn-primary text-xs"
+                        onClick={applyClassification}
+                        disabled={applying()}
+                      >
+                        {applying() ? 'Applying…' : 'Apply'}
+                      </button>
+                    </div>
+                  </div>
+                </Show>
               </div>
             )}
           </For>

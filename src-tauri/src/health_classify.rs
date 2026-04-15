@@ -549,6 +549,28 @@ fn build_config(stored: &StoredEndpoint) -> Result<EndpointConfig, String> {
     })
 }
 
+/// Stable handle that other modules (e.g. `health_timeline`) hold onto.
+pub type EndpointHandle = EndpointConfig;
+
+/// Look up the endpoint bound to `feature` (or any enabled fallback) and
+/// return an [`EndpointConfig`] ready for `create_provider`. Returns `None`
+/// when no endpoint exists, which lets callers decide whether to error or
+/// degrade silently.
+pub async fn classify_endpoint_for_feature(
+    state: &AppStateHandle,
+    feature: &str,
+) -> Result<Option<EndpointConfig>, String> {
+    let stored = {
+        let st = state.read().await;
+        let conn = st.db.get().map_err(|e| e.to_string())?;
+        get_extract_endpoint(&conn, feature)
+    };
+    match stored {
+        Some(s) => build_config(&s).map(Some),
+        None => Ok(None),
+    }
+}
+
 /// True if a default extraction endpoint exists and passes a health check.
 /// Used by the ingestion loop to decide whether to auto-classify.
 pub async fn is_extract_endpoint_healthy(state: &AppStateHandle) -> bool {

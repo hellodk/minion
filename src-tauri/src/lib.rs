@@ -8,6 +8,7 @@ mod health_classify;
 mod health_commands;
 mod health_entities;
 mod health_ingestion;
+mod health_timeline;
 mod llm_commands;
 mod state;
 
@@ -234,6 +235,18 @@ pub fn run() {
             // Health Vault entity resolution (week 3)
             health_entities::health_list_entities,
             health_entities::health_merge_entities,
+            // Health Vault timeline + episodes + correlations (week 4)
+            health_timeline::health_timeline_get,
+            health_timeline::health_episode_list,
+            health_timeline::health_episode_create,
+            health_timeline::health_episode_update,
+            health_timeline::health_episode_delete,
+            health_timeline::health_episode_attach,
+            health_timeline::health_episode_autolink,
+            health_timeline::health_classify_symptom,
+            health_timeline::health_apply_symptom_classification,
+            health_timeline::health_correlate,
+            health_timeline::health_list_correlations,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
