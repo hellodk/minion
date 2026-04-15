@@ -29,6 +29,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("009_health_timeline", migrate_009_health_timeline),
         ("010_health_analysis", migrate_010_health_analysis),
         ("011_health_fk_repair", migrate_011_health_fk_repair),
+        ("012_blog_v2", migrate_012_blog_v2),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -898,6 +899,79 @@ fn migrate_011_health_fk_repair(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Blog module v2: bulk import with tagging, image asset registry
+/// (content-addressed via SHA-256), and per-platform publishing state.
+/// See docs/BLOG_MODULE_V2.md.
+fn migrate_012_blog_v2(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS blog_tags (
+            id TEXT PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            color TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS blog_post_tags (
+            post_id TEXT NOT NULL REFERENCES blog_posts(id) ON DELETE CASCADE,
+            tag_id TEXT NOT NULL REFERENCES blog_tags(id) ON DELETE CASCADE,
+            PRIMARY KEY (post_id, tag_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_blog_tags_post ON blog_post_tags(post_id);
+
+        CREATE TABLE IF NOT EXISTS blog_assets (
+            id TEXT PRIMARY KEY,
+            sha256 TEXT UNIQUE NOT NULL,
+            stored_path TEXT NOT NULL,
+            original_filename TEXT,
+            mime_type TEXT,
+            width INTEGER,
+            height INTEGER,
+            size_bytes INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS blog_post_assets (
+            post_id TEXT NOT NULL REFERENCES blog_posts(id) ON DELETE CASCADE,
+            asset_id TEXT NOT NULL REFERENCES blog_assets(id) ON DELETE CASCADE,
+            referenced_as TEXT,
+            PRIMARY KEY (post_id, asset_id, referenced_as)
+        );
+        CREATE INDEX IF NOT EXISTS idx_blog_asset_post ON blog_post_assets(post_id);
+
+        CREATE TABLE IF NOT EXISTS blog_platform_accounts (
+            id TEXT PRIMARY KEY,
+            platform TEXT NOT NULL,
+            account_label TEXT,
+            base_url TEXT,
+            api_key_encrypted TEXT,
+            publication_id TEXT,
+            default_tags TEXT,
+            enabled INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS blog_platform_publications (
+            id TEXT PRIMARY KEY,
+            post_id TEXT NOT NULL REFERENCES blog_posts(id) ON DELETE CASCADE,
+            platform TEXT NOT NULL,
+            account_id TEXT REFERENCES blog_platform_accounts(id) ON DELETE SET NULL,
+            status TEXT,
+            remote_id TEXT,
+            remote_url TEXT,
+            canonical_url TEXT,
+            published_at TEXT,
+            last_synced_at TEXT,
+            error TEXT,
+            metadata TEXT,
+            UNIQUE(post_id, platform, account_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_blog_pub_post ON blog_platform_publications(post_id);
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1016,7 +1090,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 11);
+        assert_eq!(count, 12);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn

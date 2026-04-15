@@ -2,6 +2,9 @@
 //!
 //! Main entry point for the Tauri desktop application.
 
+mod blog_assets;
+mod blog_import;
+mod blog_publish;
 mod calendar_integration;
 mod commands;
 mod health_classify;
@@ -185,6 +188,29 @@ pub fn run() {
             commands::blog_delete_post,
             commands::blog_analyze_seo,
             commands::blog_generate_slug,
+            // Blog v2 — import + tags + assets
+            blog_import::blog_import_files,
+            blog_import::blog_import_folder,
+            blog_import::blog_confirm_import,
+            blog_assets::blog_list_assets,
+            blog_assets::blog_get_asset_usage,
+            blog_assets::blog_upload_asset,
+            blog_assets::blog_delete_orphan_assets,
+            blog_assets::blog_get_asset_path,
+            blog_assets::blog_list_tags,
+            blog_assets::blog_create_tag,
+            blog_assets::blog_set_post_tags,
+            blog_assets::blog_get_post_tags,
+            // Blog v2 — publishing
+            blog_publish::blog_list_platform_accounts,
+            blog_publish::blog_create_platform_account,
+            blog_publish::blog_delete_platform_account,
+            blog_publish::blog_list_publications,
+            blog_publish::blog_unpublish,
+            blog_publish::blog_publish_to_platform,
+            blog_publish::blog_test_platform_connection,
+            blog_publish::blog_export_for_platform,
+            blog_publish::blog_mark_exported,
             // Health Vault commands (week 1)
             health_commands::health_get_consent,
             health_commands::health_accept_consent,
