@@ -232,6 +232,7 @@ pub fn run() {
             llm_commands::llm_test_endpoint,
             // Health Vault classification + extraction (week 3)
             health_classify::health_classify_pending,
+            health_classify::health_reclassify_file,
             health_classify::health_list_pending_review,
             health_classify::health_save_review,
             // Health Vault entity resolution (week 3)

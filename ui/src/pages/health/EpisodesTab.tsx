@@ -114,7 +114,10 @@ const EpisodesTab: Component<{ patientId: string }> = (props) => {
 
   const confirm_ = async (ep: Episode) => {
     try {
-      await invoke('health_episode_update', { id: ep.id, user_confirmed: true });
+      await invoke('health_episode_update', {
+        id: ep.id,
+        update: { user_confirmed: true },
+      });
       load();
     } catch (e) {
       showToast(`Error: ${e}`);
@@ -350,10 +353,12 @@ const EpisodeFormModal: Component<{
       } else {
         await invoke('health_episode_update', {
           id: props.episode!.id,
-          name: name().trim(),
-          description: description().trim() || null,
-          end_date: endDate() || null,
-          primary_condition: primaryCondition().trim() || null,
+          update: {
+            name: name().trim(),
+            description: description().trim() || null,
+            end_date: endDate() || null,
+            primary_condition: primaryCondition().trim() || null,
+          },
         });
       }
       props.onSaved();

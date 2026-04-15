@@ -124,7 +124,7 @@ pub fn build_brief(events: &[TimelineEvent]) -> String {
             let inline: Vec<String> = series
                 .iter()
                 .map(|e| {
-                    let val = e.value.map(|v| format_value(v)).unwrap_or_default();
+                    let val = e.value.map(format_value).unwrap_or_default();
                     let unit = e.unit.clone().unwrap_or_default();
                     let flag = e
                         .flag
@@ -323,6 +323,18 @@ fn instruction_for(mode: &str) -> &'static str {
 /// device. Local providers are Ollama, llama.cpp via OpenAI-compat on
 /// 127.0.0.1, and AirLLM. Anything else is treated as cloud and gated by
 /// `allow_cloud`.
+/// Canonical lowercase tag matching what the database / settings UI use.
+fn provider_type_tag(p: ProviderType) -> &'static str {
+    match p {
+        ProviderType::Ollama => "ollama",
+        ProviderType::OpenaiCompatible => "openai_compatible",
+        ProviderType::Openai => "openai",
+        ProviderType::Anthropic => "anthropic",
+        ProviderType::GoogleGemini => "google_gemini",
+        ProviderType::Airllm => "airllm",
+    }
+}
+
 fn is_cloud_provider(provider: ProviderType, base_url: &str) -> bool {
     match provider {
         ProviderType::Ollama => false,
@@ -566,7 +578,7 @@ pub async fn health_analysis_endpoint_status(
     Ok(match cfg {
         Some(c) => AnalysisEndpointStatus {
             configured: true,
-            provider_type: Some(format!("{:?}", c.provider_type).to_lowercase()),
+            provider_type: Some(provider_type_tag(c.provider_type).into()),
             base_url: Some(c.base_url.clone()),
             model: Some(c.default_model.clone()),
             is_cloud: is_cloud_provider(c.provider_type, &c.base_url),

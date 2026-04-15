@@ -287,8 +287,11 @@ pub async fn health_drive_save_client_id(
     )
     .map_err(|e| e.to_string())?;
     if let Some(secret) = client_secret {
+        // Stored plaintext for now — at-rest encryption of secrets requires
+        // a session/master key which week-5 doesn't introduce. The local DB
+        // lives in the user's encrypted home directory.
         conn.execute(
-            "INSERT OR REPLACE INTO config (key, value, encrypted) VALUES ('health_drive_client_secret', ?1, 1)",
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('health_drive_client_secret', ?1)",
             rusqlite::params![secret.trim()],
         )
         .map_err(|e| e.to_string())?;
@@ -521,7 +524,7 @@ pub async fn health_drive_connect(
     .map_err(|e| e.to_string())?;
     if let Some(rt) = tokens.refresh_token {
         conn.execute(
-            "INSERT OR REPLACE INTO config (key, value, encrypted) VALUES ('health_drive_refresh_token', ?1, 1)",
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('health_drive_refresh_token', ?1)",
             rusqlite::params![rt],
         )
         .map_err(|e| e.to_string())?;
@@ -570,27 +573,121 @@ pub async fn health_drive_disconnect(
 // =====================================================================
 
 async fn get_access_token(state: &AppStateHandle) -> Result<String, String> {
+    // Read current token + expiry + refresh token + client credentials.
+    let (token, expires_at, refresh_token, client_id, client_secret) = {
+        let st = state.read().await;
+        let conn = st.db.get().map_err(|e| e.to_string())?;
+        let token: String = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = 'health_drive_access_token'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|_| "Drive not connected. Run health_drive_connect first.".to_string())?;
+        let exp: Option<String> = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = 'health_drive_token_expires_at'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        let rt: Option<String> = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = 'health_drive_refresh_token'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        let cid: Option<String> = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = 'health_drive_client_id'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        let csec: Option<String> = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = 'health_drive_client_secret'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        (token, exp, rt, cid, csec)
+    };
+
+    // If we have an expiry and it's in the past (or within 60s), refresh.
+    let needs_refresh = expires_at
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc) <= Utc::now())
+        .unwrap_or(false);
+    if !needs_refresh {
+        return Ok(token);
+    }
+    let Some(rt) = refresh_token else {
+        return Err("Drive session expired and no refresh token is stored — click Reconnect.".into());
+    };
+    let Some(cid) = client_id else {
+        return Err("Drive client_id missing — re-run setup.".into());
+    };
+
+    let client = reqwest::Client::new();
+    let mut form = vec![
+        ("client_id", cid),
+        ("refresh_token", rt),
+        ("grant_type", "refresh_token".to_string()),
+    ];
+    if let Some(s) = client_secret {
+        form.push(("client_secret", s));
+    }
+    let resp = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| format!("token refresh failed: {e}"))?;
+    if !resp.status().is_success() {
+        let s = resp.status();
+        let b = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Drive session expired and refresh failed ({}): {} — click Reconnect.",
+            s, b
+        ));
+    }
+    let tokens: TokenSet = resp.json().await.map_err(|e| e.to_string())?;
+    let new_token = tokens.access_token.clone();
+    let new_expires = tokens
+        .expires_in
+        .map(|e| (Utc::now() + chrono::Duration::seconds(e - 30)).to_rfc3339());
+
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
-    conn.query_row(
-        "SELECT value FROM config WHERE key = 'health_drive_access_token'",
-        [],
-        |r| r.get::<_, String>(0),
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('health_drive_access_token', ?1)",
+        rusqlite::params![new_token],
     )
-    .map_err(|_| "Drive not connected. Run health_drive_connect first.".to_string())
+    .map_err(|e| e.to_string())?;
+    if let Some(e) = new_expires {
+        conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('health_drive_token_expires_at', ?1)",
+            rusqlite::params![e],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(new_token)
 }
 
 /// Look up an existing backup file in drive.appdata. Returns its file_id
 /// when found.
 async fn find_existing_backup(token: &str) -> Result<Option<String>, String> {
     let client = reqwest::Client::new();
-    let url = format!(
-        "https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name%3D'{}'&\
-         fields=files(id,name,modifiedTime,md5Checksum)",
-        BACKUP_FILENAME
-    );
     let resp = client
-        .get(&url)
+        .get("https://www.googleapis.com/drive/v3/files")
+        .query(&[
+            ("spaces", "appDataFolder"),
+            ("q", &format!("name='{}'", BACKUP_FILENAME)),
+            ("fields", "files(id,name,modifiedTime,md5Checksum)"),
+        ])
         .bearer_auth(token)
         .send()
         .await

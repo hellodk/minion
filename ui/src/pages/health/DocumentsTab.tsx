@@ -176,10 +176,7 @@ const DocumentsTab: Component<{
   const reclassify = async (file: FileEntry) => {
     setReclassifyingId(file.id);
     try {
-      // The backend accepts an optional feature filter. A specific file id
-      // isn't supported in the spec, so we re-run over all pending — that's
-      // fine and idempotent.
-      await invoke('health_classify_pending', { feature: null });
+      await invoke('health_reclassify_file', { file_id: file.id, feature: null });
       await loadFiles();
     } catch (e) {
       alert(String(e));

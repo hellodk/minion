@@ -296,7 +296,13 @@ pub async fn health_start_ingestion(
     let state_bg = state.inner().clone();
     let app_bg = app.clone();
 
-    tokio::spawn(async move {
+    // Supervisor: catches panics from the worker so a partial failure
+    // doesn't leave the row stuck at status='running'. The inner task
+    // does its own status='completed' write on the happy path; only the
+    // panic path is patched up here.
+    let job_id_supervised = job_id.clone();
+    let state_supervised = state.inner().clone();
+    let worker = tokio::spawn(async move {
         let app_data_dir = app_bg
             .path()
             .app_data_dir()
@@ -305,6 +311,31 @@ pub async fn health_start_ingestion(
         let mut processed = 0i64;
         let mut skipped = 0i64;
         let mut failed = 0i64;
+
+        // Helper closure: bump the counter, persist, and emit progress
+        // event in one shot. Used by every loop branch (success + each
+        // failure mode) so the UI never sees a stalled bar.
+        let emit_progress = |state: Arc<RwLock<crate::state::AppState>>,
+                             app: tauri::AppHandle,
+                             job_id: String,
+                             processed: i64,
+                             skipped: i64,
+                             failed: i64,
+                             total: i64,
+                             current: String| async move {
+            let _ = update_progress(&state, &job_id, processed, skipped, failed).await;
+            let _ = app.emit(
+                "health-ingestion-progress",
+                serde_json::json!({
+                    "job_id": job_id,
+                    "processed": processed,
+                    "total": total,
+                    "skipped": skipped,
+                    "failed": failed,
+                    "current": current,
+                }),
+            );
+        };
 
         // Check once up-front if an extraction endpoint is configured + healthy.
         // If it is, we auto-classify each file inline (Option A). Otherwise we
@@ -327,7 +358,19 @@ pub async fn health_start_ingestion(
                 Ok(s) => s,
                 Err(e) => {
                     failed += 1;
+                    processed += 1;
                     tracing::warn!("hash failed for {}: {}", path_str, e);
+                    emit_progress(
+                        state_bg.clone(),
+                        app_bg.clone(),
+                        job_id_bg.clone(),
+                        processed,
+                        skipped,
+                        failed,
+                        total,
+                        path_str.clone(),
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -339,7 +382,20 @@ pub async fn health_start_ingestion(
                     Ok(c) => c,
                     Err(e) => {
                         failed += 1;
+                        processed += 1;
                         tracing::warn!("db conn failed: {}", e);
+                        drop(st);
+                        emit_progress(
+                            state_bg.clone(),
+                            app_bg.clone(),
+                            job_id_bg.clone(),
+                            processed,
+                            skipped,
+                            failed,
+                            total,
+                            path_str.clone(),
+                        )
+                        .await;
                         continue;
                     }
                 };
@@ -354,18 +410,17 @@ pub async fn health_start_ingestion(
             if exists {
                 skipped += 1;
                 processed += 1;
-                let _ = update_progress(&state_bg, &job_id_bg, processed, skipped, failed).await;
-                let _ = app_bg.emit(
-                    "health-ingestion-progress",
-                    serde_json::json!({
-                        "job_id": job_id_bg,
-                        "processed": processed,
-                        "total": total,
-                        "skipped": skipped,
-                        "failed": failed,
-                        "current": path_str,
-                    }),
-                );
+                emit_progress(
+                    state_bg.clone(),
+                    app_bg.clone(),
+                    job_id_bg.clone(),
+                    processed,
+                    skipped,
+                    failed,
+                    total,
+                    path_str.clone(),
+                )
+                .await;
                 continue;
             }
 
@@ -374,7 +429,19 @@ pub async fn health_start_ingestion(
                 Ok(p) => p,
                 Err(e) => {
                     failed += 1;
+                    processed += 1;
                     tracing::warn!("vault copy failed: {}", e);
+                    emit_progress(
+                        state_bg.clone(),
+                        app_bg.clone(),
+                        job_id_bg.clone(),
+                        processed,
+                        skipped,
+                        failed,
+                        total,
+                        path_str.clone(),
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -393,7 +460,20 @@ pub async fn health_start_ingestion(
                     Ok(c) => c,
                     Err(e) => {
                         failed += 1;
+                        processed += 1;
                         tracing::warn!("db conn failed: {}", e);
+                        drop(st);
+                        emit_progress(
+                            state_bg.clone(),
+                            app_bg.clone(),
+                            job_id_bg.clone(),
+                            processed,
+                            skipped,
+                            failed,
+                            total,
+                            path_str.clone(),
+                        )
+                        .await;
                         continue;
                     }
                 };
@@ -429,19 +509,17 @@ pub async fn health_start_ingestion(
                     drop(st);
                     failed += 1;
                     processed += 1;
-                    let _ =
-                        update_progress(&state_bg, &job_id_bg, processed, skipped, failed).await;
-                    let _ = app_bg.emit(
-                        "health-ingestion-progress",
-                        serde_json::json!({
-                            "job_id": job_id_bg,
-                            "processed": processed,
-                            "total": total,
-                            "skipped": skipped,
-                            "failed": failed,
-                            "current": path_str,
-                        }),
-                    );
+                    emit_progress(
+                        state_bg.clone(),
+                        app_bg.clone(),
+                        job_id_bg.clone(),
+                        processed,
+                        skipped,
+                        failed,
+                        total,
+                        path_str.clone(),
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -484,21 +562,23 @@ pub async fn health_start_ingestion(
             }
 
             processed += 1;
-            let _ = update_progress(&state_bg, &job_id_bg, processed, skipped, failed).await;
-            let _ = app_bg.emit(
-                "health-ingestion-progress",
-                serde_json::json!({
-                    "job_id": job_id_bg,
-                    "processed": processed,
-                    "total": total,
-                    "skipped": skipped,
-                    "failed": failed,
-                    "current": path_str,
-                }),
-            );
+            emit_progress(
+                state_bg.clone(),
+                app_bg.clone(),
+                job_id_bg.clone(),
+                processed,
+                skipped,
+                failed,
+                total,
+                path_str.clone(),
+            )
+            .await;
         }
 
-        // Mark job done
+        // Mark job done. We always reach this; a panic inside the loop
+        // would skip past, so the supervisor wrapper installed on the
+        // spawn handle below converts a panic into a `status='failed'`
+        // update so the row never sticks at `running`.
         {
             let st = state_bg.read().await;
             if let Ok(conn) = st.db.get() {
@@ -526,6 +606,26 @@ pub async fn health_start_ingestion(
                 "failed": failed,
             }),
         );
+    });
+
+    // Watch the worker; if it panics, mark the job as failed so it isn't
+    // stuck on `running` forever.
+    tokio::spawn(async move {
+        if let Err(join_err) = worker.await {
+            let st = state_supervised.read().await;
+            if let Ok(conn) = st.db.get() {
+                let msg = format!("worker panicked: {}", join_err);
+                let _ = conn.execute(
+                    "UPDATE ingestion_jobs SET status = 'failed',
+                     completed_at = ?1, error = ?2 WHERE id = ?3 AND status = 'running'",
+                    rusqlite::params![
+                        chrono::Utc::now().to_rfc3339(),
+                        msg,
+                        job_id_supervised
+                    ],
+                );
+            }
+        }
     });
 
     Ok(job_id)

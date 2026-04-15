@@ -141,18 +141,20 @@ pub async fn health_create_patient(
     request: CreatePatientRequest,
 ) -> Result<Patient, String> {
     let st = state.read().await;
-    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let mut conn = st.db.get().map_err(|e| e.to_string())?;
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
-    // If this is set as primary, unset the current primary
+    // Wrap the unset-old-primary + insert in a single transaction so two
+    // racing "add as primary" requests can't both win the unique
+    // is_primary index.
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
     if request.is_primary {
-        conn.execute("UPDATE patients SET is_primary = 0", [])
+        tx.execute("UPDATE patients SET is_primary = 0", [])
             .map_err(|e| e.to_string())?;
     }
-
-    conn.execute(
+    tx.execute(
         "INSERT INTO patients (id, phone_number, full_name, date_of_birth, sex,
          blood_group, relationship, is_primary, avatar_color, notes,
          created_at, updated_at)
@@ -172,6 +174,7 @@ pub async fn health_create_patient(
         ],
     )
     .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
 
     let q = format!("SELECT {} FROM patients WHERE id = ?1", PATIENT_COLUMNS);
     conn.query_row(&q, rusqlite::params![id], row_to_patient)

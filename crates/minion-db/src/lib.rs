@@ -34,14 +34,19 @@ pub struct Database {
 impl Database {
     /// Create a new database connection pool
     pub fn new(path: &Path, pool_size: u32) -> Result<Self> {
-        let manager = SqliteConnectionManager::file(path);
+        // foreign_keys is per-connection in SQLite, so install it via the
+        // pool's connection initializer or every fresh checkout reverts to
+        // the default (off) and ON DELETE CASCADE silently no-ops.
+        let manager = SqliteConnectionManager::file(path).with_init(|c| {
+            c.execute_batch("PRAGMA foreign_keys = ON;")
+        });
 
         let pool = Pool::builder()
             .max_size(pool_size)
             .min_idle(Some(1))
             .build(manager)?;
 
-        // Initialize with optimizations
+        // Database-wide pragmas only need to be set once.
         {
             let conn = pool.get()?;
             conn.execute_batch(
@@ -73,7 +78,8 @@ impl Database {
 
 /// In-memory database for testing
 pub fn in_memory() -> Result<Database> {
-    let manager = SqliteConnectionManager::memory();
+    let manager = SqliteConnectionManager::memory()
+        .with_init(|c| c.execute_batch("PRAGMA foreign_keys = ON;"));
     let pool = Pool::builder().max_size(1).build(manager)?;
 
     Ok(Database { pool })
@@ -185,7 +191,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 10);
+        assert_eq!(count, 11);
     }
 
     #[test]

@@ -60,30 +60,35 @@ pub async fn health_timeline_get(
     from: Option<String>,
     to: Option<String>,
 ) -> Result<Vec<TimelineEvent>, String> {
-    let from_clause = from
-        .as_ref()
-        .map(|d| format!(" AND date(?) >= date('{}')", d))
-        .unwrap_or_default();
-    let to_clause = to
-        .as_ref()
-        .map(|d| format!(" AND date(?) <= date('{}')", d))
-        .unwrap_or_default();
-    drop(from_clause);
-    drop(to_clause);
-
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
     let mut events: Vec<TimelineEvent> = Vec::new();
 
-    // Helper: optional date range in WHERE clause. SQLite stores ISO-8601
-    // strings so lexicographic comparison works.
+    // Validate date inputs once. Any non-`YYYY-MM-DD` value is dropped
+    // rather than passed through to SQL — this is the boundary where we
+    // refuse to interpolate user input. (Inline interpolation is only
+    // safe AFTER validation.)
+    fn validate_iso_date(s: &str) -> Option<String> {
+        if s.len() == 10 && chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok() {
+            Some(s.to_string())
+        } else if s.len() >= 10
+            && chrono::NaiveDate::parse_from_str(&s[..10], "%Y-%m-%d").is_ok()
+        {
+            Some(s[..10].to_string())
+        } else {
+            None
+        }
+    }
+    let from = from.as_deref().and_then(validate_iso_date);
+    let to = to.as_deref().and_then(validate_iso_date);
+
     let date_filter = |col: &str| -> String {
         let mut s = String::new();
         if let Some(d) = &from {
-            s.push_str(&format!(" AND {} >= '{}'", col, d.replace('\'', "")));
+            s.push_str(&format!(" AND {} >= '{}'", col, d));
         }
         if let Some(d) = &to {
-            s.push_str(&format!(" AND {} <= '{}'", col, d.replace('\'', "")));
+            s.push_str(&format!(" AND {} <= '{}'", col, d));
         }
         s
     };
@@ -460,47 +465,67 @@ pub async fn health_episode_create(
     Ok(id)
 }
 
+/// Single field-update payload. The frontend sends only the fields that
+/// were actually edited; nullable fields use `Some(None)` (after JSON
+/// round-trip via `serde_json::Value`) to mean "clear", `None` to mean
+/// "leave alone". To keep the wire format simple we use a single struct
+/// instead of a wide function signature.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct EpisodeUpdate {
+    pub name: Option<String>,
+    pub description: Option<serde_json::Value>,
+    pub end_date: Option<serde_json::Value>,
+    pub primary_condition: Option<serde_json::Value>,
+    pub user_confirmed: Option<bool>,
+}
+
+fn json_to_opt_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::String(_) => None,
+        other => Some(other.to_string()),
+    }
+}
+
 #[tauri::command]
 pub async fn health_episode_update(
     state: State<'_, AppStateHandle>,
     id: String,
-    name: Option<String>,
-    description: Option<String>,
-    end_date: Option<String>,
-    primary_condition: Option<String>,
-    user_confirmed: Option<bool>,
+    update: EpisodeUpdate,
 ) -> Result<(), String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
-    if let Some(n) = name {
+    if let Some(n) = update.name {
         conn.execute(
             "UPDATE episodes SET name = ?1 WHERE id = ?2",
             rusqlite::params![n, id],
         )
         .map_err(|e| e.to_string())?;
     }
-    if description.is_some() {
+    if let Some(v) = update.description {
         conn.execute(
             "UPDATE episodes SET description = ?1 WHERE id = ?2",
-            rusqlite::params![description, id],
+            rusqlite::params![json_to_opt_string(&v), id],
         )
         .map_err(|e| e.to_string())?;
     }
-    if end_date.is_some() {
+    if let Some(v) = update.end_date {
         conn.execute(
             "UPDATE episodes SET end_date = ?1 WHERE id = ?2",
-            rusqlite::params![end_date, id],
+            rusqlite::params![json_to_opt_string(&v), id],
         )
         .map_err(|e| e.to_string())?;
     }
-    if primary_condition.is_some() {
+    if let Some(v) = update.primary_condition {
         conn.execute(
             "UPDATE episodes SET primary_condition = ?1 WHERE id = ?2",
-            rusqlite::params![primary_condition, id],
+            rusqlite::params![json_to_opt_string(&v), id],
         )
         .map_err(|e| e.to_string())?;
     }
-    if let Some(uc) = user_confirmed {
+    if let Some(uc) = update.user_confirmed {
         conn.execute(
             "UPDATE episodes SET user_confirmed = ?1 WHERE id = ?2",
             rusqlite::params![uc as i64, id],

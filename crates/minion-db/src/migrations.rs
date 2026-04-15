@@ -28,6 +28,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("008_llm_endpoints", migrate_008_llm_endpoints),
         ("009_health_timeline", migrate_009_health_timeline),
         ("010_health_analysis", migrate_010_health_analysis),
+        ("011_health_fk_repair", migrate_011_health_fk_repair),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -845,6 +846,58 @@ fn migrate_010_health_analysis(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Health Vault week-5 polish: recreate ingestion_jobs + file_manifest
+/// with proper ON DELETE CASCADE/SET NULL semantics so deleting a patient
+/// or job doesn't fail with FK violations now that PRAGMA foreign_keys
+/// is on. Uses the SQLite "12-step" pattern (rename → recreate → copy →
+/// drop) wrapped in defer_foreign_keys.
+fn migrate_011_health_fk_repair(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        PRAGMA defer_foreign_keys = ON;
+
+        ALTER TABLE ingestion_jobs RENAME TO ingestion_jobs_old;
+        CREATE TABLE ingestion_jobs (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT REFERENCES patients(id) ON DELETE CASCADE,
+            source_folder TEXT,
+            started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT,
+            status TEXT DEFAULT 'running',
+            total_files INTEGER DEFAULT 0,
+            processed_files INTEGER DEFAULT 0,
+            skipped_files INTEGER DEFAULT 0,
+            failed_files INTEGER DEFAULT 0,
+            model_used TEXT,
+            error TEXT
+        );
+        INSERT INTO ingestion_jobs SELECT * FROM ingestion_jobs_old;
+        DROP TABLE ingestion_jobs_old;
+
+        ALTER TABLE file_manifest RENAME TO file_manifest_old;
+        CREATE TABLE file_manifest (
+            id TEXT PRIMARY KEY,
+            sha256 TEXT NOT NULL UNIQUE,
+            original_path TEXT NOT NULL,
+            stored_path TEXT,
+            mime_type TEXT,
+            size_bytes INTEGER,
+            status TEXT DEFAULT 'pending',
+            patient_id TEXT REFERENCES patients(id) ON DELETE CASCADE,
+            job_id TEXT REFERENCES ingestion_jobs(id) ON DELETE SET NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            error TEXT
+        );
+        INSERT INTO file_manifest SELECT * FROM file_manifest_old;
+        DROP TABLE file_manifest_old;
+
+        CREATE INDEX IF NOT EXISTS idx_file_status ON file_manifest(status);
+        CREATE INDEX IF NOT EXISTS idx_file_patient ON file_manifest(patient_id);
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,7 +1016,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 10);
+        assert_eq!(count, 11);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn
@@ -989,6 +1042,56 @@ mod tests {
             )
             .expect("Failed to check index");
         assert!(index_exists);
+    }
+
+    #[test]
+    fn test_patient_delete_cascades_health_data() {
+        // Verifies BLOCKER 1 fix: PRAGMA foreign_keys is ON and the
+        // ON DELETE CASCADE rules from migration 006/011 actually fire.
+        let conn = setup_test_db();
+        // Enable manually since this isolated Connection skips the pool init.
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        run(&conn).expect("Failed to run migrations");
+
+        conn.execute(
+            "INSERT INTO patients (id, phone_number, full_name, relationship, is_primary)
+             VALUES ('p1', '+19', 'Jane', 'self', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lab_tests (id, patient_id, test_name, value, collected_at)
+             VALUES ('l1', 'p1', 'HbA1c', 6.5, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ingestion_jobs (id, patient_id) VALUES ('j1', 'p1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO file_manifest (id, sha256, original_path, patient_id, job_id)
+             VALUES ('f1', 'abc', '/tmp/x.pdf', 'p1', 'j1')",
+            [],
+        )
+        .unwrap();
+
+        // Delete the patient; everything pointing at them should disappear.
+        conn.execute("DELETE FROM patients WHERE id = 'p1'", []).unwrap();
+
+        let labs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM lab_tests", [], |r| r.get(0))
+            .unwrap();
+        let jobs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ingestion_jobs", [], |r| r.get(0))
+            .unwrap();
+        let files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM file_manifest", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(labs, 0, "lab_tests should cascade on patient delete");
+        assert_eq!(jobs, 0, "ingestion_jobs should cascade on patient delete");
+        assert_eq!(files, 0, "file_manifest should cascade on patient delete");
     }
 
     #[test]

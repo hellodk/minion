@@ -777,6 +777,50 @@ pub async fn health_classify_pending(
     })
 }
 
+/// Force re-classification of a single file. Wipes the existing
+/// classification so the standard pipeline re-runs from scratch — used
+/// by the Documents tab when the user disagrees with an LLM's label or
+/// changes the bound endpoint.
+#[tauri::command]
+pub async fn health_reclassify_file(
+    state: State<'_, AppStateHandle>,
+    file_id: String,
+    feature: Option<String>,
+) -> Result<(), String> {
+    let raw_text: String = {
+        let st = state.read().await;
+        let conn = st.db.get().map_err(|e| e.to_string())?;
+        // Reset existing extraction so process_document writes a clean row.
+        conn.execute(
+            "UPDATE document_extractions
+             SET document_type = NULL,
+                 classification_confidence = NULL,
+                 extracted_json = NULL,
+                 user_reviewed = 0,
+                 user_corrections = NULL
+             WHERE file_id = ?1",
+            rusqlite::params![file_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE file_manifest SET status = 'extracted' WHERE id = ?1",
+            rusqlite::params![file_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT COALESCE(raw_text, '') FROM document_extractions WHERE file_id = ?1",
+            rusqlite::params![file_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| e.to_string())?
+    };
+    if raw_text.trim().is_empty() {
+        return Err("file has no extracted text to classify".into());
+    }
+    let feature = feature.unwrap_or_else(|| "health_extract".to_string());
+    process_document(&state, &file_id, &raw_text, Some(&feature)).await
+}
+
 // ---------------------------------------------------------------------
 // Pending review listing
 // ---------------------------------------------------------------------
