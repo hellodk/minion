@@ -24,6 +24,8 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("004_calendar", migrate_004_calendar),
         ("005_calendar_accounts", migrate_005_calendar_accounts),
         ("006_health_vault", migrate_006_health_vault),
+        ("007_health_ingestion", migrate_007_health_ingestion),
+        ("008_llm_endpoints", migrate_008_llm_endpoints),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -685,6 +687,89 @@ fn migrate_006_health_vault(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Health Vault ingestion pipeline: file manifest, ingestion jobs,
+/// and document extraction results.
+fn migrate_007_health_ingestion(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS ingestion_jobs (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT REFERENCES patients(id),
+            source_folder TEXT,
+            started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT,
+            status TEXT DEFAULT 'running',
+            total_files INTEGER DEFAULT 0,
+            processed_files INTEGER DEFAULT 0,
+            skipped_files INTEGER DEFAULT 0,
+            failed_files INTEGER DEFAULT 0,
+            model_used TEXT,
+            error TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS file_manifest (
+            id TEXT PRIMARY KEY,
+            sha256 TEXT NOT NULL UNIQUE,
+            original_path TEXT NOT NULL,
+            stored_path TEXT,
+            mime_type TEXT,
+            size_bytes INTEGER,
+            status TEXT DEFAULT 'pending',
+            patient_id TEXT REFERENCES patients(id),
+            job_id TEXT REFERENCES ingestion_jobs(id),
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            error TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_file_status ON file_manifest(status);
+        CREATE INDEX IF NOT EXISTS idx_file_patient ON file_manifest(patient_id);
+
+        CREATE TABLE IF NOT EXISTS document_extractions (
+            id TEXT PRIMARY KEY,
+            file_id TEXT NOT NULL REFERENCES file_manifest(id) ON DELETE CASCADE,
+            document_type TEXT,
+            classification_confidence REAL,
+            raw_text TEXT,
+            extracted_json TEXT,
+            extraction_model TEXT,
+            extraction_prompt_version TEXT,
+            extracted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            user_reviewed INTEGER DEFAULT 0,
+            user_corrections TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_extraction_file ON document_extractions(file_id);
+        CREATE INDEX IF NOT EXISTS idx_extraction_review ON document_extractions(user_reviewed);
+        ",
+    )?;
+    Ok(())
+}
+
+/// LLM endpoint registry: user-configurable providers (Ollama, OpenAI,
+/// Anthropic, Gemini, etc.) and per-feature bindings.
+fn migrate_008_llm_endpoints(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS llm_endpoints (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            provider_type TEXT NOT NULL,
+            base_url TEXT NOT NULL,
+            api_key_encrypted TEXT,
+            default_model TEXT,
+            extra_headers TEXT,
+            enabled INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS llm_feature_bindings (
+            feature TEXT PRIMARY KEY,
+            endpoint_id TEXT REFERENCES llm_endpoints(id),
+            model_override TEXT
+        );
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -803,7 +888,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 6);
+        assert_eq!(count, 8);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn

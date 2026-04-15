@@ -32,6 +32,7 @@ minion-reader = { path = "../crates/minion-reader" }
 minion-finance = { path = "../crates/minion-finance" }
 minion-media = { path = "../crates/minion-media" }
 minion-blog = { path = "../crates/minion-blog" }
+minion-llm = { path = "../crates/minion-llm" }
 
 # SQLite (re-exported for direct use in commands)
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -48,6 +49,8 @@ urlencoding = "2.1"
 base64ct = "=1.6.0"
 base64 = "0.22"
 sha2 = "0.10"
+tempfile = "3.10"
+pdf-extract = "0.10.0"
 
 [dev-dependencies]
 tempfile = "3.10"

@@ -5,6 +5,8 @@
 mod calendar_integration;
 mod commands;
 mod health_commands;
+mod health_ingestion;
+mod llm_commands;
 mod state;
 
 #[cfg(test)]
@@ -211,6 +213,18 @@ pub fn run() {
             health_commands::health_list_symptoms,
             health_commands::health_resolve_symptom,
             health_commands::health_delete_symptom,
+            // Health Vault ingestion (week 2)
+            health_ingestion::health_discover_folder,
+            health_ingestion::health_start_ingestion,
+            health_ingestion::health_get_ingestion_job,
+            health_ingestion::health_list_files,
+            health_ingestion::health_get_extraction,
+            health_ingestion::health_delete_file,
+            // LLM endpoint management
+            llm_commands::llm_list_endpoints,
+            llm_commands::llm_create_endpoint,
+            llm_commands::llm_delete_endpoint,
+            llm_commands::llm_test_endpoint,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

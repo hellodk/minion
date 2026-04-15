@@ -115,6 +115,7 @@ mod tests {
             size: 1024,
             modified: "2024-01-01T00:00:00Z".to_string(),
             extension: Some("txt".to_string()),
+            is_video: false,
         };
 
         let json = serde_json::to_string(&info).expect("Serialization failed");

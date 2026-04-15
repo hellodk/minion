@@ -287,21 +287,30 @@ mod tests {
     #[test]
     fn test_normalize_filename_copy_suffix() {
         // "video (1).mp4" and "video.mp4" -> same normalized name
-        assert_eq!(normalize_filename("video (1).mp4"), normalize_filename("video.mp4"));
+        assert_eq!(
+            normalize_filename("video (1).mp4"),
+            normalize_filename("video.mp4")
+        );
         assert_eq!(normalize_filename("video (1).mp4"), "video");
     }
 
     #[test]
     fn test_normalize_filename_underscore_copy() {
         // "photo_copy.jpg" and "photo.jpg" -> same
-        assert_eq!(normalize_filename("photo_copy.jpg"), normalize_filename("photo.jpg"));
+        assert_eq!(
+            normalize_filename("photo_copy.jpg"),
+            normalize_filename("photo.jpg")
+        );
         assert_eq!(normalize_filename("photo_copy.jpg"), "photo");
     }
 
     #[test]
     fn test_normalize_filename_trailing_number() {
         // "document_2.pdf" and "document.pdf" -> same
-        assert_eq!(normalize_filename("document_2.pdf"), normalize_filename("document.pdf"));
+        assert_eq!(
+            normalize_filename("document_2.pdf"),
+            normalize_filename("document.pdf")
+        );
         assert_eq!(normalize_filename("document_2.pdf"), "document");
     }
 
@@ -336,8 +345,14 @@ mod tests {
     #[test]
     fn test_normalize_filename_distinct_files() {
         // Truly different files should not match
-        assert_ne!(normalize_filename("report.pdf"), normalize_filename("invoice.pdf"));
-        assert_ne!(normalize_filename("photo1.jpg"), normalize_filename("photo2.jpg"));
+        assert_ne!(
+            normalize_filename("report.pdf"),
+            normalize_filename("invoice.pdf")
+        );
+        assert_ne!(
+            normalize_filename("photo1.jpg"),
+            normalize_filename("photo2.jpg")
+        );
     }
 
     #[test]

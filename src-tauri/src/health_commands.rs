@@ -853,14 +853,13 @@ pub async fn health_list_vitals(
             notes: row.get(7)?,
         })
     };
-    let result: Result<Vec<Vital>, rusqlite::Error> =
-        if let Some(ref mt) = measurement_type {
-            stmt.query_map(rusqlite::params![patient_id, mt], map_row)
-                .and_then(|rows| rows.collect())
-        } else {
-            stmt.query_map(rusqlite::params![patient_id], map_row)
-                .and_then(|rows| rows.collect())
-        };
+    let result: Result<Vec<Vital>, rusqlite::Error> = if let Some(ref mt) = measurement_type {
+        stmt.query_map(rusqlite::params![patient_id, mt], map_row)
+            .and_then(|rows| rows.collect())
+    } else {
+        stmt.query_map(rusqlite::params![patient_id], map_row)
+            .and_then(|rows| rows.collect())
+    };
     result.map_err(|e| e.to_string())
 }
 

@@ -1044,8 +1044,7 @@ pub async fn files_list_duplicates(
                                 .map(|ext| {
                                     matches!(
                                         ext.to_lowercase().as_str(),
-                                        "mp4" | "mkv" | "webm" | "avi"
-                                            | "mov" | "wmv" | "flv"
+                                        "mp4" | "mkv" | "webm" | "avi" | "mov" | "wmv" | "flv"
                                     )
                                 })
                                 .unwrap_or(false);
@@ -4114,11 +4113,7 @@ pub async fn reader_list_folder_files(
     ];
     let mut candidates: Vec<FolderFileCandidate> = Vec::new();
 
-    fn collect_files(
-        dir: &PathBuf,
-        exts: &[&str],
-        out: &mut Vec<FolderFileCandidate>,
-    ) {
+    fn collect_files(dir: &PathBuf, exts: &[&str], out: &mut Vec<FolderFileCandidate>) {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -4212,16 +4207,16 @@ pub async fn reader_import_paths(
             let (title, authors) = if ext == "epub" {
                 match epub::doc::EpubDoc::new(&book_path) {
                     Ok(doc) => {
-                        let title = doc
-                            .mdata("title")
-                            .map(|m| m.value.clone())
-                            .unwrap_or_else(|| {
-                                book_path
-                                    .file_stem()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("Unknown")
-                                    .to_string()
-                            });
+                        let title =
+                            doc.mdata("title")
+                                .map(|m| m.value.clone())
+                                .unwrap_or_else(|| {
+                                    book_path
+                                        .file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("Unknown")
+                                        .to_string()
+                                });
                         let authors = doc
                             .mdata("creator")
                             .map(|m| m.value.clone())
