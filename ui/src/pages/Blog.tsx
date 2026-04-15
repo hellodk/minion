@@ -1,11 +1,15 @@
 import { Component, createSignal, createMemo, For, Show, Switch, Match, onMount } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
+import ImportTab from './blog/ImportTab';
+import AssetsTab from './blog/AssetsTab';
+import PublishTab from './blog/PublishTab';
+import PlatformsTab from './blog/PlatformsTab';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type TabId = 'posts' | 'editor' | 'seo';
+type TabId = 'posts' | 'editor' | 'seo' | 'import' | 'assets' | 'publish' | 'platforms';
 
 interface BlogPost {
   id: string;
@@ -256,6 +260,10 @@ const Blog: Component = () => {
     { id: 'posts', label: 'Posts' },
     { id: 'editor', label: 'Editor' },
     { id: 'seo', label: 'SEO Tools' },
+    { id: 'import', label: 'Import' },
+    { id: 'publish', label: 'Publish' },
+    { id: 'platforms', label: 'Platforms' },
+    { id: 'assets', label: 'Assets' },
   ];
 
   // ---------------------------------------------------------------------------
@@ -735,6 +743,26 @@ const Blog: Component = () => {
                 </div>
               </Show>
             </div>
+          </Match>
+
+          {/* ==================== IMPORT TAB ==================== */}
+          <Match when={tab() === 'import'}>
+            <ImportTab onDone={() => { setTab('posts'); loadPosts(); }} />
+          </Match>
+
+          {/* ==================== PUBLISH TAB ==================== */}
+          <Match when={tab() === 'publish'}>
+            <PublishTab />
+          </Match>
+
+          {/* ==================== PLATFORMS TAB ==================== */}
+          <Match when={tab() === 'platforms'}>
+            <PlatformsTab />
+          </Match>
+
+          {/* ==================== ASSETS TAB ==================== */}
+          <Match when={tab() === 'assets'}>
+            <AssetsTab />
           </Match>
         </Switch>
       </div>
