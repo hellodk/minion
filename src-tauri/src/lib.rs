@@ -45,7 +45,13 @@ pub fn run() {
         .setup(|app| {
             // Initialize application state
             let state = AppState::new()?;
-            app.manage(Arc::new(RwLock::new(state)));
+            let db_handle = state.db.clone();
+            let state_arc = Arc::new(RwLock::new(state));
+            app.manage(state_arc.clone());
+
+            // Background worker: flips blog_platform_publications from
+            // scheduled → published when their scheduled_at fires.
+            blog_publish::spawn_scheduled_publisher(state_arc, db_handle);
 
             // Open DevTools in debug builds
             #[cfg(debug_assertions)]
@@ -211,6 +217,10 @@ pub fn run() {
             blog_publish::blog_test_platform_connection,
             blog_publish::blog_export_for_platform,
             blog_publish::blog_mark_exported,
+            blog_publish::blog_schedule_publish,
+            blog_publish::blog_cancel_scheduled,
+            blog_publish::blog_regenerate_social_snippet,
+            blog_publish::blog_get_social_snippet,
             // Health Vault commands (week 1)
             health_commands::health_get_consent,
             health_commands::health_accept_consent,

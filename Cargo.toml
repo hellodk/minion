@@ -6,6 +6,7 @@ members = [
     "crates/minion-crypto",
     "crates/minion-ai",
     "crates/minion-llm",
+    "crates/minion-rag",
     "crates/minion-plugins",
     "crates/minion-search",
     "crates/minion-media",

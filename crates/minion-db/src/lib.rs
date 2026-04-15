@@ -26,7 +26,11 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Database connection pool
+/// Database connection pool. Cheap to clone — the underlying r2d2 pool
+/// is already Arc-based, so each clone shares the same connections.
+/// This lets background tasks hold a handle without sitting on the app's
+/// global RwLock.
+#[derive(Clone)]
 pub struct Database {
     pool: Pool<SqliteConnectionManager>,
 }
@@ -74,6 +78,31 @@ impl Database {
         migrations::run(&conn)?;
         Ok(())
     }
+}
+
+/// Open a pooled SQLite connection WITHOUT running migrations. Useful
+/// for crates that own their own schema (e.g. `minion-rag`) and just
+/// want the pool + PRAGMA settings. Callers are responsible for running
+/// their own `CREATE TABLE` statements before use.
+pub fn open_bare(path: &Path, pool_size: u32) -> Result<Database> {
+    let manager = SqliteConnectionManager::file(path)
+        .with_init(|c| c.execute_batch("PRAGMA foreign_keys = ON;"));
+    let pool = Pool::builder()
+        .max_size(pool_size)
+        .min_idle(Some(1))
+        .build(manager)?;
+    {
+        let conn = pool.get()?;
+        conn.execute_batch(
+            "
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA cache_size = -64000;
+            PRAGMA temp_store = MEMORY;
+            ",
+        )?;
+    }
+    Ok(Database { pool })
 }
 
 /// In-memory database for testing
@@ -191,7 +220,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 12);
+        assert_eq!(count, 14);
     }
 
     #[test]

@@ -30,6 +30,8 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("010_health_analysis", migrate_010_health_analysis),
         ("011_health_fk_repair", migrate_011_health_fk_repair),
         ("012_blog_v2", migrate_012_blog_v2),
+        ("013_health_entity_fk_set_null", migrate_013_health_entity_fk_set_null),
+        ("014_blog_scheduling_snippets", migrate_014_blog_scheduling_snippets),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -972,6 +974,116 @@ fn migrate_012_blog_v2(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Health Vault entity FK repair: recreate medical_records, lab_tests,
+/// and medications_v2 so deleting a health_entities row (or a merged
+/// entity) does not fail with a FK violation. Previously the FKs had
+/// no ON DELETE clause, defaulting to RESTRICT — fine while nothing
+/// ever deleted entities, but it makes the merge command fragile.
+fn migrate_013_health_entity_fk_set_null(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        PRAGMA defer_foreign_keys = ON;
+
+        ALTER TABLE medical_records RENAME TO medical_records_old;
+        CREATE TABLE medical_records (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            record_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            doctor_id TEXT REFERENCES health_entities(id) ON DELETE SET NULL,
+            facility_id TEXT REFERENCES health_entities(id) ON DELETE SET NULL,
+            date TEXT NOT NULL,
+            tags TEXT,
+            document_file_id TEXT,
+            episode_id TEXT REFERENCES episodes(id) ON DELETE SET NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO medical_records SELECT * FROM medical_records_old;
+        DROP TABLE medical_records_old;
+        CREATE INDEX IF NOT EXISTS idx_medical_patient_date
+            ON medical_records(patient_id, date DESC);
+        CREATE INDEX IF NOT EXISTS idx_medical_type
+            ON medical_records(patient_id, record_type);
+
+        ALTER TABLE lab_tests RENAME TO lab_tests_old;
+        CREATE TABLE lab_tests (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            record_id TEXT REFERENCES medical_records(id) ON DELETE SET NULL,
+            test_name TEXT NOT NULL,
+            canonical_name TEXT,
+            test_category TEXT,
+            value REAL NOT NULL,
+            unit TEXT,
+            reference_low REAL,
+            reference_high REAL,
+            reference_text TEXT,
+            flag TEXT,
+            lab_entity_id TEXT REFERENCES health_entities(id) ON DELETE SET NULL,
+            collected_at TEXT NOT NULL,
+            reported_at TEXT,
+            source TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            episode_id TEXT REFERENCES episodes(id) ON DELETE SET NULL
+        );
+        INSERT INTO lab_tests SELECT * FROM lab_tests_old;
+        DROP TABLE lab_tests_old;
+        CREATE INDEX IF NOT EXISTS idx_lab_patient_name_date
+            ON lab_tests(patient_id, canonical_name, collected_at);
+        CREATE INDEX IF NOT EXISTS idx_lab_category
+            ON lab_tests(patient_id, test_category);
+        CREATE INDEX IF NOT EXISTS idx_lab_date
+            ON lab_tests(patient_id, collected_at DESC);
+
+        ALTER TABLE medications_v2 RENAME TO medications_v2_old;
+        CREATE TABLE medications_v2 (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            generic_name TEXT,
+            dose TEXT,
+            frequency TEXT,
+            route TEXT,
+            start_date TEXT,
+            end_date TEXT,
+            prescribing_doctor_id TEXT REFERENCES health_entities(id) ON DELETE SET NULL,
+            indication TEXT,
+            notes TEXT,
+            record_id TEXT REFERENCES medical_records(id) ON DELETE SET NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            episode_id TEXT REFERENCES episodes(id) ON DELETE SET NULL
+        );
+        INSERT INTO medications_v2 SELECT * FROM medications_v2_old;
+        DROP TABLE medications_v2_old;
+        CREATE INDEX IF NOT EXISTS idx_meds_v2_patient
+            ON medications_v2(patient_id, start_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_meds_v2_active
+            ON medications_v2(patient_id) WHERE end_date IS NULL;
+        ",
+    )?;
+    Ok(())
+}
+
+/// Blog v2 extras: scheduled_at on publications + auto-generated
+/// social snippet column on posts. `scheduled_at` holds the target
+/// time; a background ticker flips the status to 'published' when the
+/// wall clock catches up. `social_snippet` is a 280-ish-char teaser
+/// computed at save time.
+fn migrate_014_blog_scheduling_snippets(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        ALTER TABLE blog_platform_publications ADD COLUMN scheduled_at TEXT;
+        CREATE INDEX IF NOT EXISTS idx_blog_pub_scheduled
+            ON blog_platform_publications(scheduled_at)
+            WHERE scheduled_at IS NOT NULL;
+
+        ALTER TABLE blog_posts ADD COLUMN social_snippet TEXT;
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,7 +1202,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 12);
+        assert_eq!(count, 14);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn

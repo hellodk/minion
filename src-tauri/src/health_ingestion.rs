@@ -296,12 +296,21 @@ pub async fn health_start_ingestion(
     let state_bg = state.inner().clone();
     let app_bg = app.clone();
 
+    // Cache a DB handle *outside* the RwLock. The r2d2 pool is already
+    // Arc-based, so this clone is cheap and lets the ingestion hot path
+    // do `db.get()` instead of `state.read().await.db.get()` on every
+    // single file — the lock becomes invisible to concurrent reads.
+    let db_bg: minion_db::Database = {
+        let st = state.read().await;
+        st.db.clone()
+    };
+
     // Supervisor: catches panics from the worker so a partial failure
     // doesn't leave the row stuck at status='running'. The inner task
     // does its own status='completed' write on the happy path; only the
     // panic path is patched up here.
     let job_id_supervised = job_id.clone();
-    let state_supervised = state.inner().clone();
+    let db_supervised = db_bg.clone();
     let worker = tokio::spawn(async move {
         let app_data_dir = app_bg
             .path()
@@ -314,8 +323,10 @@ pub async fn health_start_ingestion(
 
         // Helper closure: bump the counter, persist, and emit progress
         // event in one shot. Used by every loop branch (success + each
-        // failure mode) so the UI never sees a stalled bar.
-        let emit_progress = |state: Arc<RwLock<crate::state::AppState>>,
+        // failure mode) so the UI never sees a stalled bar. Takes the
+        // lock-free DB handle so we don't serialize on the app state
+        // RwLock while a 1000-file ingestion is running.
+        let emit_progress = |db: minion_db::Database,
                              app: tauri::AppHandle,
                              job_id: String,
                              processed: i64,
@@ -323,7 +334,7 @@ pub async fn health_start_ingestion(
                              failed: i64,
                              total: i64,
                              current: String| async move {
-            let _ = update_progress(&state, &job_id, processed, skipped, failed).await;
+            let _ = update_progress_db(&db, &job_id, processed, skipped, failed);
             let _ = app.emit(
                 "health-ingestion-progress",
                 serde_json::json!({
@@ -361,7 +372,7 @@ pub async fn health_start_ingestion(
                     processed += 1;
                     tracing::warn!("hash failed for {}: {}", path_str, e);
                     emit_progress(
-                        state_bg.clone(),
+                        db_bg.clone(),
                         app_bg.clone(),
                         job_id_bg.clone(),
                         processed,
@@ -376,42 +387,38 @@ pub async fn health_start_ingestion(
             };
 
             // Dedup check
-            let exists: bool = {
-                let st = state_bg.read().await;
-                let conn = match st.db.get() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        failed += 1;
-                        processed += 1;
-                        tracing::warn!("db conn failed: {}", e);
-                        drop(st);
-                        emit_progress(
-                            state_bg.clone(),
-                            app_bg.clone(),
-                            job_id_bg.clone(),
-                            processed,
-                            skipped,
-                            failed,
-                            total,
-                            path_str.clone(),
-                        )
-                        .await;
-                        continue;
-                    }
-                };
-                conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM file_manifest WHERE sha256 = ?1)",
-                    rusqlite::params![sha],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false)
+            let exists: bool = match db_bg.get() {
+                Ok(conn) => conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM file_manifest WHERE sha256 = ?1)",
+                        rusqlite::params![sha],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false),
+                Err(e) => {
+                    failed += 1;
+                    processed += 1;
+                    tracing::warn!("db conn failed: {}", e);
+                    emit_progress(
+                        db_bg.clone(),
+                        app_bg.clone(),
+                        job_id_bg.clone(),
+                        processed,
+                        skipped,
+                        failed,
+                        total,
+                        path_str.clone(),
+                    )
+                    .await;
+                    continue;
+                }
             };
 
             if exists {
                 skipped += 1;
                 processed += 1;
                 emit_progress(
-                    state_bg.clone(),
+                    db_bg.clone(),
                     app_bg.clone(),
                     job_id_bg.clone(),
                     processed,
@@ -432,7 +439,7 @@ pub async fn health_start_ingestion(
                     processed += 1;
                     tracing::warn!("vault copy failed: {}", e);
                     emit_progress(
-                        state_bg.clone(),
+                        db_bg.clone(),
                         app_bg.clone(),
                         job_id_bg.clone(),
                         processed,
@@ -454,63 +461,58 @@ pub async fn health_start_ingestion(
             let mime = detect_mime(&path);
             let now2 = chrono::Utc::now().to_rfc3339();
 
-            {
-                let st = state_bg.read().await;
-                let conn = match st.db.get() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        failed += 1;
-                        processed += 1;
-                        tracing::warn!("db conn failed: {}", e);
-                        drop(st);
-                        emit_progress(
-                            state_bg.clone(),
-                            app_bg.clone(),
-                            job_id_bg.clone(),
-                            processed,
-                            skipped,
-                            failed,
-                            total,
-                            path_str.clone(),
-                        )
-                        .await;
-                        continue;
-                    }
-                };
-                let _ = conn.execute(
-                    "INSERT INTO file_manifest (id, sha256, original_path, stored_path,
-                     mime_type, size_bytes, status, patient_id, job_id, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'extracting', ?7, ?8, ?9)",
-                    rusqlite::params![
-                        file_id,
-                        sha,
-                        path_str,
-                        stored.to_string_lossy().to_string(),
-                        mime,
-                        size,
-                        patient_id,
-                        job_id_bg,
-                        now2,
-                    ],
-                );
+            match db_bg.get() {
+                Ok(conn) => {
+                    let _ = conn.execute(
+                        "INSERT INTO file_manifest (id, sha256, original_path, stored_path,
+                         mime_type, size_bytes, status, patient_id, job_id, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'extracting', ?7, ?8, ?9)",
+                        rusqlite::params![
+                            file_id,
+                            sha,
+                            path_str,
+                            stored.to_string_lossy().to_string(),
+                            mime,
+                            size,
+                            patient_id,
+                            job_id_bg,
+                            now2,
+                        ],
+                    );
+                }
+                Err(e) => {
+                    failed += 1;
+                    processed += 1;
+                    tracing::warn!("db conn failed: {}", e);
+                    emit_progress(
+                        db_bg.clone(),
+                        app_bg.clone(),
+                        job_id_bg.clone(),
+                        processed,
+                        skipped,
+                        failed,
+                        total,
+                        path_str.clone(),
+                    )
+                    .await;
+                    continue;
+                }
             }
 
             // Extract text
             let text = match extract_text_from_file(&stored).await {
                 Ok(t) => t,
                 Err(e) => {
-                    let st = state_bg.read().await;
-                    if let Ok(conn) = st.db.get() {
+                    if let Ok(conn) = db_bg.get() {
                         let _ = conn.execute(
                             "UPDATE file_manifest SET status = 'failed', error = ?1 WHERE id = ?2",
                             rusqlite::params![e, file_id],
                         );
                     }
-                    drop(st);
                     failed += 1;
                     processed += 1;
                     emit_progress(
-                        state_bg.clone(),
+                        db_bg.clone(),
                         app_bg.clone(),
                         job_id_bg.clone(),
                         processed,
@@ -528,24 +530,21 @@ pub async fn health_start_ingestion(
             // classify + extract right now (Option A); otherwise the user
             // can run `health_classify_pending` later.
             let extraction_id = uuid::Uuid::new_v4().to_string();
-            {
-                let st = state_bg.read().await;
-                if let Ok(conn) = st.db.get() {
-                    let _ = conn.execute(
-                        "INSERT INTO document_extractions (id, file_id, raw_text, extracted_at)
-                         VALUES (?1, ?2, ?3, ?4)",
-                        rusqlite::params![
-                            extraction_id,
-                            file_id,
-                            text,
-                            chrono::Utc::now().to_rfc3339()
-                        ],
-                    );
-                    let _ = conn.execute(
-                        "UPDATE file_manifest SET status = 'extracted' WHERE id = ?1",
-                        rusqlite::params![file_id],
-                    );
-                }
+            if let Ok(conn) = db_bg.get() {
+                let _ = conn.execute(
+                    "INSERT INTO document_extractions (id, file_id, raw_text, extracted_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![
+                        extraction_id,
+                        file_id,
+                        text,
+                        chrono::Utc::now().to_rfc3339()
+                    ],
+                );
+                let _ = conn.execute(
+                    "UPDATE file_manifest SET status = 'extracted' WHERE id = ?1",
+                    rusqlite::params![file_id],
+                );
             }
 
             if auto_classify {
@@ -563,7 +562,7 @@ pub async fn health_start_ingestion(
 
             processed += 1;
             emit_progress(
-                state_bg.clone(),
+                db_bg.clone(),
                 app_bg.clone(),
                 job_id_bg.clone(),
                 processed,
@@ -579,22 +578,19 @@ pub async fn health_start_ingestion(
         // would skip past, so the supervisor wrapper installed on the
         // spawn handle below converts a panic into a `status='failed'`
         // update so the row never sticks at `running`.
-        {
-            let st = state_bg.read().await;
-            if let Ok(conn) = st.db.get() {
-                let _ = conn.execute(
-                    "UPDATE ingestion_jobs SET status = 'completed',
-                     completed_at = ?1, processed_files = ?2, skipped_files = ?3, failed_files = ?4
-                     WHERE id = ?5",
-                    rusqlite::params![
-                        chrono::Utc::now().to_rfc3339(),
-                        processed,
-                        skipped,
-                        failed,
-                        job_id_bg
-                    ],
-                );
-            }
+        if let Ok(conn) = db_bg.get() {
+            let _ = conn.execute(
+                "UPDATE ingestion_jobs SET status = 'completed',
+                 completed_at = ?1, processed_files = ?2, skipped_files = ?3, failed_files = ?4
+                 WHERE id = ?5",
+                rusqlite::params![
+                    chrono::Utc::now().to_rfc3339(),
+                    processed,
+                    skipped,
+                    failed,
+                    job_id_bg
+                ],
+            );
         }
 
         let _ = app_bg.emit(
@@ -612,8 +608,7 @@ pub async fn health_start_ingestion(
     // stuck on `running` forever.
     tokio::spawn(async move {
         if let Err(join_err) = worker.await {
-            let st = state_supervised.read().await;
-            if let Ok(conn) = st.db.get() {
+            if let Ok(conn) = db_supervised.get() {
                 let msg = format!("worker panicked: {}", join_err);
                 let _ = conn.execute(
                     "UPDATE ingestion_jobs SET status = 'failed',
@@ -631,15 +626,16 @@ pub async fn health_start_ingestion(
     Ok(job_id)
 }
 
-async fn update_progress(
-    state: &AppStateHandle,
+/// Lock-free variant: takes the pooled Database handle directly so we
+/// never touch the app-state RwLock during a hot ingestion loop.
+fn update_progress_db(
+    db: &minion_db::Database,
     job_id: &str,
     processed: i64,
     skipped: i64,
     failed: i64,
 ) -> Result<(), String> {
-    let st = state.read().await;
-    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let conn = db.get().map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE ingestion_jobs SET processed_files = ?1, skipped_files = ?2,
          failed_files = ?3 WHERE id = ?4",

@@ -114,13 +114,80 @@ fn export_payload(conn: &rusqlite::Connection) -> Result<BackupPayload, String> 
     })
 }
 
-/// Conflict policy: by default we INSERT OR REPLACE on primary key, which
-/// means the cloud backup wins. The user is warned in the UI before they
-/// run a restore.
+/// Restore mode controlling how the incoming backup interacts with the
+/// local DB.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreMode {
+    /// Default: INSERT OR REPLACE on primary key. Rows in the local DB
+    /// that are not in the backup are preserved. Safe but misleadingly
+    /// named "restore" — really a merge.
+    #[default]
+    Merge,
+    /// Patient-scoped wipe + restore: for every patient id present in
+    /// the backup we delete all their per-event rows locally before
+    /// re-inserting. Patients not in the backup are untouched.
+    Replace,
+}
+
+/// Run the SQL restore. `mode == Replace` truncates patient-scoped
+/// tables for each patient id in the backup before re-inserting, so
+/// post-restore the local DB matches the backup exactly *for those
+/// patients*. Other patients' data is left alone.
+///
+/// The whole operation runs inside an unchecked transaction so a panic
+/// or crash mid-restore leaves the DB untouched instead of
+/// half-deleted.
 fn restore_payload(
     conn: &rusqlite::Connection,
     payload: &BackupPayload,
+    mode: RestoreMode,
 ) -> Result<RestoreSummary, String> {
+    let tx_guard = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("could not open transaction: {}", e))?;
+    let summary = restore_payload_inner(&tx_guard, payload, mode)?;
+    tx_guard
+        .commit()
+        .map_err(|e| format!("could not commit restore: {}", e))?;
+    Ok(summary)
+}
+
+fn restore_payload_inner(
+    conn: &rusqlite::Connection,
+    payload: &BackupPayload,
+    mode: RestoreMode,
+) -> Result<RestoreSummary, String> {
+    if matches!(mode, RestoreMode::Replace) {
+        // Collect patient ids actually present in the backup.
+        let mut patient_ids: Vec<String> = Vec::new();
+        for p in &payload.patients {
+            if let Some(id) = p.get("id").and_then(|v| v.as_str()) {
+                patient_ids.push(id.to_string());
+            }
+        }
+        // Clear patient-scoped rows for those patients in dependency
+        // order (children first). Entities + episodes are shared and
+        // not wiped by id (they'll be upserted below).
+        const SCOPED_TABLES: &[&str] = &[
+            "lab_tests",
+            "medications_v2",
+            "health_conditions",
+            "vitals",
+            "family_history",
+            "life_events",
+            "symptoms",
+            "medical_records",
+        ];
+        for pid in &patient_ids {
+            for table in SCOPED_TABLES {
+                let sql = format!("DELETE FROM {} WHERE patient_id = ?1", table);
+                conn.execute(&sql, rusqlite::params![pid])
+                    .map_err(|e| format!("replace-restore {}: {}", table, e))?;
+            }
+        }
+    }
+
     let mut summary = RestoreSummary::default();
     fn upsert(
         conn: &rusqlite::Connection,
@@ -842,7 +909,9 @@ pub async fn health_drive_backup_now(
 pub async fn health_drive_restore_now(
     state: State<'_, AppStateHandle>,
     passphrase: String,
+    mode: Option<RestoreMode>,
 ) -> Result<RestoreSummary, String> {
+    let mode = mode.unwrap_or_default();
     let token = get_access_token(&state).await?;
     let key = {
         let st = state.read().await;
@@ -862,7 +931,7 @@ pub async fn health_drive_restore_now(
     let summary = {
         let st = state.read().await;
         let conn = st.db.get().map_err(|e| e.to_string())?;
-        restore_payload(&conn, &payload)?
+        restore_payload(&conn, &payload, mode)?
     };
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
@@ -905,7 +974,9 @@ pub async fn health_drive_import_local(
     state: State<'_, AppStateHandle>,
     passphrase: String,
     input_path: String,
+    mode: Option<RestoreMode>,
 ) -> Result<RestoreSummary, String> {
+    let mode = mode.unwrap_or_default();
     let key = {
         let st = state.read().await;
         let conn = st.db.get().map_err(|e| e.to_string())?;
@@ -919,7 +990,7 @@ pub async fn health_drive_import_local(
         serde_json::from_slice(&decrypted).map_err(|e| format!("backup parse failed: {e}"))?;
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
-    restore_payload(&conn, &payload)
+    restore_payload(&conn, &payload, mode)
 }
 
 #[cfg(test)]
@@ -959,9 +1030,68 @@ mod tests {
         // Wipe and restore.
         conn.execute("DELETE FROM lab_tests", []).unwrap();
         conn.execute("DELETE FROM patients", []).unwrap();
-        let summary = restore_payload(&conn, &payload).unwrap();
+        let summary = restore_payload(&conn, &payload, RestoreMode::Merge).unwrap();
         assert_eq!(summary.patients, 1);
         assert_eq!(summary.labs, 1);
+    }
+
+    #[test]
+    fn replace_mode_wipes_local_patient_scope() {
+        let (_dir, db) = make_db();
+        let conn = db.get().unwrap();
+        conn.execute(
+            "INSERT INTO patients (id, phone_number, full_name, relationship, is_primary)
+             VALUES ('p1', '+1', 'Test', 'self', 1)",
+            [],
+        )
+        .unwrap();
+        // Two local labs.
+        conn.execute(
+            "INSERT INTO lab_tests (id, patient_id, test_name, value, collected_at)
+             VALUES ('a', 'p1', 'HbA1c', 7.0, '2024-01-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lab_tests (id, patient_id, test_name, value, collected_at)
+             VALUES ('b', 'p1', 'LDL', 100.0, '2024-02-01')",
+            [],
+        )
+        .unwrap();
+        // Backup contains only one lab for this patient.
+        let payload = BackupPayload {
+            schema_version: 1,
+            exported_at: "2025-01-01".into(),
+            patients: vec![serde_json::json!({
+                "id": "p1", "phone_number": "+1", "full_name": "Test",
+                "relationship": "self", "is_primary": 1
+            })],
+            medical_records: vec![],
+            lab_tests: vec![serde_json::json!({
+                "id": "c", "patient_id": "p1", "test_name": "HbA1c",
+                "value": 6.5, "collected_at": "2025-01-01"
+            })],
+            medications_v2: vec![],
+            health_conditions: vec![],
+            vitals: vec![],
+            family_history: vec![],
+            life_events: vec![],
+            symptoms: vec![],
+            health_entities: vec![],
+            episodes: vec![],
+        };
+        restore_payload(&conn, &payload, RestoreMode::Replace).unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM lab_tests", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            remaining, 1,
+            "Replace should have wiped local labs and inserted only the backup row"
+        );
+        let remaining_id: String = conn
+            .query_row("SELECT id FROM lab_tests", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining_id, "c");
     }
 
     #[test]
