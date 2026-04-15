@@ -7,6 +7,8 @@ mod commands;
 mod health_classify;
 mod health_commands;
 mod health_entities;
+mod health_analysis;
+mod health_drive_sync;
 mod health_ingestion;
 mod health_timeline;
 mod llm_commands;
@@ -247,6 +249,22 @@ pub fn run() {
             health_timeline::health_apply_symptom_classification,
             health_timeline::health_correlate,
             health_timeline::health_list_correlations,
+            // Health Vault AI analysis (week 5)
+            health_analysis::health_run_analysis,
+            health_analysis::health_list_analyses,
+            health_analysis::health_delete_analysis,
+            health_analysis::health_preview_brief,
+            health_analysis::health_analysis_endpoint_status,
+            // Health Vault Google Drive sync (week 5)
+            health_drive_sync::health_drive_status,
+            health_drive_sync::health_drive_save_client_id,
+            health_drive_sync::health_drive_set_passphrase,
+            health_drive_sync::health_drive_connect,
+            health_drive_sync::health_drive_disconnect,
+            health_drive_sync::health_drive_backup_now,
+            health_drive_sync::health_drive_restore_now,
+            health_drive_sync::health_drive_export_local,
+            health_drive_sync::health_drive_import_local,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

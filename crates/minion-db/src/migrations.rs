@@ -27,6 +27,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("007_health_ingestion", migrate_007_health_ingestion),
         ("008_llm_endpoints", migrate_008_llm_endpoints),
         ("009_health_timeline", migrate_009_health_timeline),
+        ("010_health_analysis", migrate_010_health_analysis),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -817,6 +818,33 @@ fn migrate_009_health_timeline(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Health Vault week 5: AI analysis cache. Stores prompt+response so the
+/// UI can show prior analyses without re-spending tokens.
+fn migrate_010_health_analysis(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS health_analyses (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            mode TEXT NOT NULL,
+            question TEXT,
+            timeline_from TEXT,
+            timeline_to TEXT,
+            brief_text TEXT,
+            response_text TEXT NOT NULL,
+            response_json TEXT,
+            model_used TEXT,
+            endpoint_id TEXT,
+            cloud_used INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_analyses_patient_date
+            ON health_analyses(patient_id, created_at DESC);
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,7 +963,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 9);
+        assert_eq!(count, 10);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn

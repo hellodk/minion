@@ -5,6 +5,8 @@ import ReviewTab from './health/ReviewTab';
 import DocumentsTab from './health/DocumentsTab';
 import TimelineTab from './health/TimelineTab';
 import EpisodesTab from './health/EpisodesTab';
+import AnalysisTab from './health/AnalysisTab';
+import CloudBackupTab from './health/CloudBackupTab';
 
 // =====================================================================
 // Types
@@ -143,10 +145,12 @@ type HealthTab =
   | 'symptoms'
   | 'timeline'
   | 'episodes'
+  | 'analysis'
   | 'family'
   | 'import'
   | 'review'
-  | 'documents';
+  | 'documents'
+  | 'cloud_backup';
 
 // =====================================================================
 // Life event categories (including yoga/meditation/spiritual)
@@ -784,10 +788,12 @@ const Health: Component = () => {
               ['symptoms', 'Symptoms'],
               ['timeline', 'Timeline'],
               ['episodes', 'Episodes'],
+              ['analysis', 'AI Analysis'],
               ['family', 'Family History'],
               ['import', 'Import'],
               ['review', 'Review'],
               ['documents', 'Documents'],
+              ['cloud_backup', 'Cloud Backup'],
             ] as const
           ).map(([tab, label]) => (
             <button
@@ -933,6 +939,11 @@ const Health: Component = () => {
           <EpisodesTab patientId={activePatient()!.id} />
         </Show>
 
+        {/* ============== AI ANALYSIS ============== */}
+        <Show when={activeTab() === 'analysis'}>
+          <AnalysisTab patientId={activePatient()!.id} />
+        </Show>
+
         {/* ============== FAMILY HISTORY ============== */}
         <Show when={activeTab() === 'family'}>
           <FamilyHistoryTab
@@ -958,6 +969,11 @@ const Health: Component = () => {
         {/* ============== DOCUMENTS ============== */}
         <Show when={activeTab() === 'documents'}>
           <DocumentsTab activePatient={activePatient()!} />
+        </Show>
+
+        {/* ============== CLOUD BACKUP ============== */}
+        <Show when={activeTab() === 'cloud_backup'}>
+          <CloudBackupTab />
         </Show>
 
         {/* Add patient modal */}
