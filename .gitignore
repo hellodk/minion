@@ -51,3 +51,11 @@ data/
 *.key
 credentials.json
 secrets.toml
+
+# Claude Code runtime files
+.claude/scheduled_tasks.lock
+.claude/todos/
+
+# App data / user state
+app_data/
+*.backup

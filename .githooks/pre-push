@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Pre-push hook: block commits containing common secret patterns.
+# Scans staged diff of commits being pushed — not working tree.
+
+set -euo pipefail
+
+REMOTE="$1"
+URL="$2"
+
+# Patterns that indicate hardcoded secrets
+PATTERNS=(
+  'AKIA[0-9A-Z]{16}'                          # AWS access key
+  'ASIA[0-9A-Z]{16}'                          # AWS STS key
+  'AIza[0-9A-Za-z\-_]{35}'                   # Google API key
+  'ya29\.[0-9A-Za-z\-_]+'                    # Google OAuth token
+  'sk-[a-zA-Z0-9]{32,}'                       # OpenAI / Anthropic secret key
+  'ghp_[0-9a-zA-Z]{36}'                       # GitHub personal access token
+  'gho_[0-9a-zA-Z]{36}'                       # GitHub OAuth token
+  'ghs_[0-9a-zA-Z]{36}'                       # GitHub app token
+  'xox[baprs]-[0-9A-Za-z\-]+'               # Slack token
+  'eyJhbGciOiJIUzI1NiJ9\.[A-Za-z0-9_-]+'   # HS256 JWT (hardcoded secret)
+  'BEGIN (RSA|EC|DSA|OPENSSH) PRIVATE KEY'   # Private key block
+  'password\s*=\s*["\x27][^"\x27]{6,}'       # password = "..." assignments
+  'secret\s*=\s*["\x27][^"\x27]{8,}'         # secret = "..." assignments
+  'api_?key\s*=\s*["\x27][^"\x27]{8,}'       # api_key = "..." assignments
+  'token\s*=\s*["\x27][^"\x27]{16,}'         # token = "..." assignments
+)
+
+FOUND=0
+
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+  # Skip deletes
+  [[ "$local_sha" == "0000000000000000000000000000000000000000" ]] && continue
+
+  # Range of commits being pushed
+  if [[ "$remote_sha" == "0000000000000000000000000000000000000000" ]]; then
+    RANGE="$local_sha"
+  else
+    RANGE="${remote_sha}..${local_sha}"
+  fi
+
+  DIFF=$(git diff --unified=0 "${RANGE}" 2>/dev/null || git show --unified=0 "${local_sha}" 2>/dev/null)
+
+  for pattern in "${PATTERNS[@]}"; do
+    matches=$(echo "$DIFF" | grep -E "^\+" | grep -vE "^\+\+\+" | grep -iE "$pattern" || true)
+    if [[ -n "$matches" ]]; then
+      echo ""
+      echo "  BLOCKED: possible secret detected matching pattern: $pattern"
+      echo "  -------------------------------------------------------"
+      echo "$matches" | head -5 | sed 's/^/  /'
+      echo ""
+      FOUND=1
+    fi
+  done
+done
+
+if [[ "$FOUND" -ne 0 ]]; then
+  echo "Push blocked. Review the matches above."
+  echo "If these are false positives, use:  git push --no-verify"
+  exit 1
+fi
+
+exit 0
