@@ -15,8 +15,8 @@ mod health_drive_sync;
 mod health_ingestion;
 mod health_timeline;
 mod llm_commands;
-pub mod sysmon_collect;
-pub mod sysmon_analysis;
+mod sysmon_collect;
+mod sysmon_analysis;
 mod sysmon_commands;
 mod state;
 

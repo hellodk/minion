@@ -71,8 +71,6 @@ impl Collector {
                 .with_memory(MemoryRefreshKind::everything()),
         );
         sys.refresh_cpu_usage();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        sys.refresh_cpu_usage();
 
         Self {
             sys,

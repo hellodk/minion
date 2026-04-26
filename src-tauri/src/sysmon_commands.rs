@@ -582,33 +582,15 @@ pub fn spawn_sysmon_poller(app: tauri::AppHandle, db: minion_db::Database) {
                 );
 
                 // Check for zombies
-                let settings = load_settings(&conn);
                 for p in &procs {
                     if p.status == "zombie" {
-                        if let Ok(alert_id) = insert_alert(
-                            &conn,
-                            "zombie",
-                            1.0,
-                            0.0,
-                            "warn",
+                        check_threshold(
+                            &conn, &app, "zombie",
+                            1.0, 0.5, 2.0,
                             Some(&format!("pid {} ({})", p.pid, p.name)),
-                        ) {
-                            let _ = app.emit(
-                                "sysmon-alert",
-                                serde_json::json!({
-                                    "id": alert_id,
-                                    "metric": "zombie",
-                                    "value": 1,
-                                    "threshold": 0,
-                                    "severity": "warn",
-                                    "detail": format!("pid {} ({})", p.pid, p.name),
-                                }),
-                            );
-                        }
+                        );
                     }
                 }
-                // suppress unused warning for settings loaded before zombie loop
-                let _ = settings;
             }
 
             // Threshold checks
@@ -757,36 +739,33 @@ fn check_threshold(
         return;
     };
 
-    // Only fire if no unresolved alert for this metric (+detail) in the last 5 min
-    let recent_exists: bool = conn
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM sysmon_alerts
-                WHERE metric = ?1
-                AND COALESCE(detail,'') = COALESCE(?2,'')
-                AND resolved_at IS NULL
-                AND fired_at > datetime('now', '-5 minutes')
-            )",
-            params![metric, detail],
-            |r| r.get(0),
-        )
-        .unwrap_or(false);
+    let five_min_ago = chrono::Utc::now()
+        .checked_sub_signed(chrono::Duration::minutes(5))
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339();
 
-    if recent_exists {
-        return;
-    }
+    let recent_exists: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sysmon_alerts
+            WHERE metric = ?1
+            AND COALESCE(detail,'') = COALESCE(?2,'')
+            AND resolved_at IS NULL
+            AND fired_at > ?3
+        )",
+        params![metric, detail, five_min_ago],
+        |r| r.get(0),
+    ).unwrap_or(false);
+
+    if recent_exists { return; }
 
     if let Ok(alert_id) = insert_alert(conn, metric, value, threshold, severity, detail) {
-        let _ = app.emit(
-            "sysmon-alert",
-            serde_json::json!({
-                "id": alert_id,
-                "metric": metric,
-                "value": value,
-                "threshold": threshold,
-                "severity": severity,
-                "detail": detail,
-            }),
-        );
+        let _ = app.emit("sysmon-alert", serde_json::json!({
+            "id": alert_id,
+            "metric": metric,
+            "value": value,
+            "threshold": threshold,
+            "severity": severity,
+            "detail": detail,
+        }));
     }
 }

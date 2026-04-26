@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 type Conn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SysmonAnalysis {
     pub id: String,
@@ -57,19 +58,22 @@ fn build_prompt(
     lines.join("\n")
 }
 
-fn get_endpoint(conn: &Conn) -> Option<(String, Option<String>)> {
+fn get_endpoint(conn: &Conn) -> Option<(String, Option<String>, String)> {
     conn.query_row(
-        "SELECT base_url, api_key FROM llm_endpoints LIMIT 1",
+        "SELECT base_url, api_key_encrypted, COALESCE(default_model, 'llama3') FROM llm_endpoints LIMIT 1",
         [],
-        |r| -> rusqlite::Result<(String, Option<String>)> {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        },
+        |r| Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, String>(2)?,
+        )),
     ).ok()
 }
 
 async fn call_llm(
     base_url: &str,
     api_key: Option<&str>,
+    model: &str,
     user_content: &str,
 ) -> Option<String> {
     let system = "You are a system reliability expert. Analyse the metrics below and provide a \
@@ -78,7 +82,7 @@ async fn call_llm(
                   actionable fix if warranted. If no issue is present, say so briefly.";
 
     let body = serde_json::json!({
-        "model": "llama3",
+        "model": model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user_content}
@@ -119,7 +123,7 @@ pub async fn run_analysis(
 ) -> Result<Option<String>, String> {
     // Acquire a connection only for the sync endpoint lookup, then drop it
     // before the async LLM call so the future remains Send.
-    let (base_url, api_key) = {
+    let (base_url, api_key, model) = {
         let conn = db.get().map_err(|e| e.to_string())?;
         match get_endpoint(&conn) {
             Some(ep) => ep,
@@ -131,7 +135,7 @@ pub async fn run_analysis(
     let context_json = serde_json::to_string(&snapshots).unwrap_or_default();
 
     // conn is dropped — this await is now Send-safe.
-    let Some(response) = call_llm(&base_url, api_key.as_deref(), &user_content).await else {
+    let Some(response) = call_llm(&base_url, api_key.as_deref(), &model, &user_content).await else {
         return Ok(None);
     };
 

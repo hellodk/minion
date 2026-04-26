@@ -1,4 +1,4 @@
-import { Component, createSignal, For, onMount, Show } from 'solid-js';
+import { Component, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
@@ -36,9 +36,8 @@ const AnalysisTab: Component = () => {
 
   onMount(async () => {
     await load();
-    await listen('sysmon-analysis-ready', () => {
-      load();
-    });
+    const unlisten = await listen('sysmon-analysis-ready', () => { load(); });
+    onCleanup(() => unlisten());
   });
 
   return (
