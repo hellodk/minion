@@ -180,6 +180,7 @@ const LIFE_EVENT_CATEGORIES: Array<{ value: string; label: string; emoji: string
 
 const ConsentModal: Component<{
   onAccept: (patient: Patient) => void;
+  onCancel: () => void;
 }> = (props) => {
   const [name, setName] = createSignal('');
   const [phone, setPhone] = createSignal('');
@@ -383,6 +384,13 @@ const ConsentModal: Component<{
           </Show>
 
           <div class="flex gap-2 justify-end">
+            <button
+              class="btn btn-secondary"
+              disabled={submitting()}
+              onClick={props.onCancel}
+            >
+              Cancel
+            </button>
             <button
               class="btn btn-primary"
               disabled={!accepted() || submitting()}
@@ -744,7 +752,7 @@ const Health: Component = () => {
   return (
     <div class="p-6 max-w-6xl mx-auto">
       <Show when={showConsent()}>
-        <ConsentModal onAccept={onConsentAccepted} />
+        <ConsentModal onAccept={onConsentAccepted} onCancel={() => setShowConsent(false)} />
       </Show>
 
       <Show
