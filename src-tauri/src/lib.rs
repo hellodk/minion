@@ -4,6 +4,7 @@
 
 mod blog_assets;
 mod blog_import;
+mod blog_preview;
 mod blog_publish;
 mod calendar_integration;
 mod commands;
@@ -227,6 +228,9 @@ pub fn run() {
             blog_publish::blog_cancel_scheduled,
             blog_publish::blog_regenerate_social_snippet,
             blog_publish::blog_get_social_snippet,
+            // Blog v3 — rich preview
+            blog_preview::blog_render_preview,
+            commands::blog_update_draft,
             // Health Vault commands (week 1)
             health_commands::health_get_consent,
             health_commands::health_accept_consent,

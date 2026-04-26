@@ -33,6 +33,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("013_health_entity_fk_set_null", migrate_013_health_entity_fk_set_null),
         ("014_blog_scheduling_snippets", migrate_014_blog_scheduling_snippets),
         ("015_sysmon", migrate_015_sysmon),
+        ("016_blog_draft_content", migrate_016_blog_draft_content),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -1140,6 +1141,13 @@ fn migrate_015_sysmon(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_016_blog_draft_content(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE blog_posts ADD COLUMN draft_content TEXT;",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1258,7 +1266,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 15);
+        assert_eq!(count, 16);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn
@@ -1372,5 +1380,30 @@ mod tests {
              VALUES ('t1','2026-01-01T00:00:00Z',42.0,4096,8192,0,'[]','[]','[]')",
             [],
         ).expect("insert into sysmon_snapshots failed");
+    }
+
+    #[test]
+    fn test_migration_016_blog_draft_content() {
+        let conn = setup_test_db();
+        run(&conn).expect("migrations failed");
+
+        conn.execute(
+            "INSERT INTO blog_posts (id, title, slug, content, status, created_at, updated_at, draft_content)
+             VALUES ('p1', 'Test', 'test', 'body', 'draft', '2026-01-01', '2026-01-01', 'draft body')",
+            [],
+        ).expect("insert with draft_content failed");
+
+        let draft: Option<String> = conn.query_row(
+            "SELECT draft_content FROM blog_posts WHERE id = 'p1'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(draft.as_deref(), Some("draft body"));
+
+        conn.execute(
+            "INSERT INTO blog_posts (id, title, slug, content, status, created_at, updated_at)
+             VALUES ('p2', 'Test2', 'test2', 'body2', 'draft', '2026-01-01', '2026-01-01')",
+            [],
+        ).expect("insert without draft_content failed");
     }
 }
