@@ -4686,6 +4686,67 @@ pub async fn ai_analyze_health(
 // Google Fit integration
 // ============================================================================
 
+// ── Device-key encryption for OAuth tokens ───────────────────────────────────
+
+use aes_gcm::{Aes256Gcm, KeyInit, aead::{Aead, generic_array::GenericArray}};
+
+fn get_or_create_device_key(data_dir: &std::path::Path) -> [u8; 32] {
+    let key_path = data_dir.join("device.key");
+    if let Ok(bytes) = std::fs::read(&key_path) {
+        if bytes.len() == 32 {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&bytes);
+            return key;
+        }
+    }
+    use rand::RngCore;
+    let mut key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut key);
+    if let Ok(()) = std::fs::write(&key_path, key) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    key
+}
+
+fn encrypt_secret(key: &[u8; 32], plaintext: &str) -> String {
+    use base64::Engine as _;
+    use rand::RngCore;
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(key));
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = GenericArray::from_slice(&nonce_bytes);
+    let ciphertext = cipher.encrypt(nonce, plaintext.as_bytes())
+        .unwrap_or_default();
+    let mut combined = nonce_bytes.to_vec();
+    combined.extend_from_slice(&ciphertext);
+    base64::engine::general_purpose::STANDARD.encode(&combined)
+}
+
+fn decrypt_secret(key: &[u8; 32], encoded: &str) -> Result<String, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)
+        .map_err(|_| "base64 decode failed".to_string())?;
+    if bytes.len() < 12 {
+        return Err("ciphertext too short".into());
+    }
+    let (nonce_bytes, ciphertext) = bytes.split_at(12);
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(key));
+    let nonce = GenericArray::from_slice(nonce_bytes);
+    let plaintext = cipher.decrypt(nonce, ciphertext)
+        .map_err(|_| "decryption failed".to_string())?;
+    String::from_utf8(plaintext).map_err(|e| e.to_string())
+}
+
+/// Read a potentially-encrypted token. If decryption fails, treat value as legacy plaintext,
+/// re-encrypt it, and return the plaintext. This handles migration transparently.
+fn read_token(key: &[u8; 32], stored: &str) -> String {
+    decrypt_secret(key, stored).unwrap_or_else(|_| stored.to_string())
+}
+
 /// Must match an **Authorized redirect URI** in Google Cloud Console (OAuth client).
 /// Add exactly: `http://127.0.0.1:8745/` (with trailing slash) for a Desktop app client.
 const GFIT_LOOPBACK_REDIRECT: &str = "http://127.0.0.1:8745/";
@@ -4700,35 +4761,34 @@ const GFIT_SCOPE: &str = concat!(
     "https://www.googleapis.com/auth/fitness.nutrition.read",
 );
 
-fn parse_gfit_oauth_callback(buf: &[u8]) -> Result<String, String> {
+fn parse_gfit_oauth_callback(buf: &[u8]) -> Result<(String, String), String> {
     let s = std::str::from_utf8(buf).map_err(|_| "Invalid HTTP request".to_string())?;
-    let first = s
-        .lines()
-        .next()
-        .ok_or_else(|| "Empty request".to_string())?;
-    let path = first
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| "Bad request line".to_string())?;
+    let first = s.lines().next().ok_or_else(|| "Empty request".to_string())?;
+    let path = first.split_whitespace().nth(1).ok_or_else(|| "Bad request line".to_string())?;
     let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
     let query = query.split_whitespace().next().unwrap_or(query);
+    let mut code = None;
+    let mut state_val = String::new();
     for pair in query.split('&') {
         let mut it = pair.splitn(2, '=');
         let k = it.next().unwrap_or("");
         let v = it.next().unwrap_or("");
-        if k == "error" {
-            return Err(format!(
-                "Google OAuth error: {}",
-                urlencoding::decode(v).unwrap_or_else(|_| v.into())
-            ));
-        }
-        if k == "code" {
-            return urlencoding::decode(v)
+        match k {
+            "error" => return Err(format!("Google OAuth error: {}",
+                urlencoding::decode(v).unwrap_or_else(|_| v.into()))),
+            "code" => code = Some(urlencoding::decode(v)
                 .map(|c| c.into_owned())
-                .map_err(|e| e.to_string());
+                .map_err(|e| e.to_string())?),
+            "state" => state_val = urlencoding::decode(v)
+                .map(|c| c.into_owned())
+                .unwrap_or_else(|_| v.to_string()),
+            _ => {}
         }
     }
-    Err("No authorization code in OAuth callback".to_string())
+    match code {
+        Some(c) => Ok((c, state_val)),
+        None => Err("No authorization code in OAuth callback".to_string()),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -4743,6 +4803,7 @@ async fn gfit_exchange_code_for_tokens(
     client_id: &str,
     code: &str,
     redirect_uri: &str,
+    code_verifier: &str,
 ) -> Result<GfitTokenJson, String> {
     let client = reqwest::Client::new();
     let params = [
@@ -4750,6 +4811,7 @@ async fn gfit_exchange_code_for_tokens(
         ("code", code),
         ("client_id", client_id),
         ("redirect_uri", redirect_uri),
+        ("code_verifier", code_verifier),
     ];
     let resp = client
         .post("https://oauth2.googleapis.com/token")
@@ -4801,6 +4863,26 @@ pub async fn gfit_open_auth(
     drop(st);
 
     let redirect_uri = GFIT_LOOPBACK_REDIRECT;
+
+    // PKCE: generate code_verifier and code_challenge
+    use base64::Engine as _;
+    use rand::RngCore;
+    let mut verifier_bytes = [0u8; 64];
+    rand::thread_rng().fill_bytes(&mut verifier_bytes);
+    let code_verifier =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);
+    let challenge_hash = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(code_verifier.as_bytes());
+        h.finalize()
+    };
+    let code_challenge =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge_hash);
+
+    // CSRF state
+    let csrf_state = uuid::Uuid::new_v4().to_string();
+
     let listener = TcpListener::bind("127.0.0.1:8745").await.map_err(|e| {
         format!(
             "Could not listen on 127.0.0.1:8745 ({}). Close anything using that port, or ensure \
@@ -4811,56 +4893,93 @@ pub async fn gfit_open_auth(
 
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
 
+    let expected_state = csrf_state.clone();
     let callback_task = tokio::spawn(async move {
-        let result = tokio::time::timeout(Duration::from_secs(300), listener.accept()).await;
-        match result {
-            Ok(Ok((mut stream, _))) => {
-                let mut buf = vec![0u8; 16_384];
-                let n = match stream.read(&mut buf).await {
-                    Ok(n) => n,
-                    Err(e) => {
-                        let _ = tx.send(Err(e.to_string()));
-                        return;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                let _ = tx.send(Err("OAuth login timed out (5 minutes).".to_string()));
+                return;
+            }
+            match tokio::time::timeout(remaining, listener.accept()).await {
+                Ok(Ok((mut stream, _))) => {
+                    let mut buf = vec![0u8; 16_384];
+                    let n = match stream.read(&mut buf).await { Ok(n) => n, Err(_) => continue };
+                    buf.truncate(n);
+                    match parse_gfit_oauth_callback(&buf) {
+                        Ok((code, state_val)) => {
+                            // Verify CSRF state
+                            if state_val != expected_state {
+                                let _ = stream.write_all(
+                                    b"HTTP/1.1 400 Bad Request\r\n\r\nCSRF mismatch",
+                                ).await;
+                                let _ = tx.send(Err(
+                                    "OAuth CSRF state mismatch — possible CSRF attack.".to_string(),
+                                ));
+                                return;
+                            }
+                            let body = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
+                                        <title>Connected</title></head>\
+                                        <body style=\"font-family:system-ui;padding:2rem\">\
+                                        <p>Google Fit is connected. You can close this window.\
+                                        </p></body></html>";
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = stream.write_all(response.as_bytes()).await;
+                            let _ = tx.send(Ok(code));
+                            return;
+                        }
+                        Err(e) if e.contains("No authorization code") => {
+                            // Likely a favicon/preflight — send 404 and keep looping
+                            let _ = stream.write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\
+                                  Connection: close\r\n\r\n",
+                            ).await;
+                            continue;
+                        }
+                        Err(e) => {
+                            let body = format!(
+                                "<!DOCTYPE html><html><body>Error: {}</body></html>",
+                                e
+                            );
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = stream.write_all(response.as_bytes()).await;
+                            let _ = tx.send(Err(e));
+                            return;
+                        }
                     }
-                };
-                buf.truncate(n);
-                let parse_result = parse_gfit_oauth_callback(&buf);
-                let ok = parse_result.is_ok();
-                let body = if ok {
-                    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Connected</title></head>\
-                     <body style=\"font-family:system-ui;padding:2rem\">\
-                     <p>Google Fit is connected. You can close this window.</p></body></html>"
-                } else {
-                    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Authorization</title></head>\
-                     <body style=\"font-family:system-ui;padding:2rem\">\
-                     <p>Authorization did not complete. You can close this window.</p></body></html>"
-                };
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.flush().await;
-                let _ = tx.send(parse_result);
-            }
-            Ok(Err(e)) => {
-                let _ = tx.send(Err(format!("Accept failed: {}", e)));
-            }
-            Err(_) => {
-                let _ = tx.send(Err(
-                    "OAuth login timed out waiting for browser (5 minutes).".to_string(),
-                ));
+                }
+                Ok(Err(e)) => {
+                    let _ = tx.send(Err(format!("Accept failed: {}", e)));
+                    return;
+                }
+                Err(_) => {
+                    let _ = tx.send(Err("OAuth login timed out.".to_string()));
+                    return;
+                }
             }
         }
     });
 
     let auth_url = format!(
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&scope={}&response_type=code&\
-         access_type=offline&prompt=consent&redirect_uri={}",
+         access_type=offline&prompt=consent&redirect_uri={}&\
+         code_challenge={}&code_challenge_method=S256&state={}",
         urlencoding::encode(&client_id),
         urlencoding::encode(GFIT_SCOPE),
         urlencoding::encode(redirect_uri),
+        urlencoding::encode(&code_challenge),
+        urlencoding::encode(&csrf_state),
     );
 
     close_gfit_auth_window(&app);
@@ -4872,7 +4991,7 @@ pub async fn gfit_open_auth(
         .build()
         .map_err(|e| e.to_string())?;
 
-    let code_result = tokio::time::timeout(Duration::from_secs(300), rx)
+    let code = tokio::time::timeout(Duration::from_secs(300), rx)
         .await
         .map_err(|_| {
             callback_task.abort();
@@ -4881,24 +5000,28 @@ pub async fn gfit_open_auth(
         .map_err(|_| {
             callback_task.abort();
             "OAuth was cancelled.".to_string()
-        })?;
+        })??;
 
     callback_task.abort();
 
-    let code = code_result?;
-    let tokens = gfit_exchange_code_for_tokens(&client_id, &code, redirect_uri).await?;
+    let tokens =
+        gfit_exchange_code_for_tokens(&client_id, &code, redirect_uri, &code_verifier).await?;
 
+    let data_dir = { state.read().await.data_dir.clone() };
+    let dev_key = get_or_create_device_key(&data_dir);
+    let enc_access = encrypt_secret(&dev_key, &tokens.access_token);
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_access_token', ?1)",
-        rusqlite::params![tokens.access_token],
+        rusqlite::params![enc_access],
     )
     .map_err(|e| e.to_string())?;
     if let Some(ref rt) = tokens.refresh_token {
+        let enc_refresh = encrypt_secret(&dev_key, rt);
         conn.execute(
             "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_refresh_token', ?1)",
-            rusqlite::params![rt],
+            rusqlite::params![enc_refresh],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -4914,13 +5037,19 @@ pub async fn gfit_sync(state: State<'_, AppStateHandle>) -> Result<String, Strin
 }
 
 /// Refresh the Google Fit access token. Gets creds from DB, drops conn, does HTTP, saves result.
-async fn gfit_refresh_token(db: &minion_db::Database) -> Result<String, String> {
+async fn gfit_refresh_token(
+    db: &minion_db::Database,
+    data_dir: &std::path::Path,
+) -> Result<String, String> {
     // Phase 1: read credentials synchronously
+    let dev_key_ref = get_or_create_device_key(data_dir);
     let (refresh, client_id) = {
         let conn = db.get().map_err(|e| e.to_string())?;
         let refresh: Option<String> = conn.query_row(
-            "SELECT value FROM config WHERE key = 'gfit_refresh_token'", [], |r| r.get(0),
-        ).ok().flatten();
+            "SELECT value FROM config WHERE key = 'gfit_refresh_token'",
+            [],
+            |r| r.get::<_, String>(0),
+        ).ok().map(|s| read_token(&dev_key_ref, &s));
         let client_id: Option<String> = conn.query_row(
             "SELECT value FROM config WHERE key = 'gfit_client_id'", [], |r| r.get(0),
         ).ok().flatten();
@@ -4947,11 +5076,13 @@ async fn gfit_refresh_token(db: &minion_db::Database) -> Result<String, String> 
     let new_token = json["access_token"].as_str()
         .ok_or("No access_token in refresh response")?.to_string();
 
-    // Phase 3: save new token
+    // Phase 3: save new token (encrypted)
+    let dev_key = get_or_create_device_key(data_dir);
+    let enc_token = encrypt_secret(&dev_key, &new_token);
     let conn = db.get().map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_access_token', ?1)",
-        rusqlite::params![new_token],
+        rusqlite::params![enc_token],
     ).map_err(|e| e.to_string())?;
 
     Ok(new_token)
@@ -4965,12 +5096,14 @@ pub async fn gfit_sync_inner(
     // Phase 1: read token from DB synchronously, drop conn before any await
     let db = { state.read().await.db.clone() };
 
+    let dev_key = { get_or_create_device_key(&state.read().await.data_dir) };
     let mut token: Option<String> = {
         let conn = db.get().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT value FROM config WHERE key = 'gfit_access_token'",
-            [], |r| r.get(0),
-        ).ok().flatten()
+            [],
+            |r| r.get::<_, String>(0),
+        ).ok().map(|stored| read_token(&dev_key, &stored))
     }; // conn dropped
 
     if token.is_none() {
@@ -5008,7 +5141,8 @@ pub async fn gfit_sync_inner(
 
     // If 401, try refreshing the token once
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        let new_token = gfit_refresh_token(&db).await?;
+        let data_dir2 = { state.read().await.data_dir.clone() };
+        let new_token = gfit_refresh_token(&db, &data_dir2).await?;
         token = Some(new_token.clone());
         resp = client
             .post("https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate")
@@ -5250,19 +5384,24 @@ pub async fn gfit_exchange_auth_code(
     drop(st);
 
     let tokens =
-        gfit_exchange_code_for_tokens(&client_id, code.trim(), GFIT_LOOPBACK_REDIRECT).await?;
+        gfit_exchange_code_for_tokens(&client_id, code.trim(), GFIT_LOOPBACK_REDIRECT, "")
+            .await?;
 
+    let data_dir = { state.read().await.data_dir.clone() };
+    let dev_key = get_or_create_device_key(&data_dir);
+    let enc_access = encrypt_secret(&dev_key, &tokens.access_token);
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_access_token', ?1)",
-        rusqlite::params![tokens.access_token],
+        rusqlite::params![enc_access],
     )
     .map_err(|e| e.to_string())?;
     if let Some(ref rt) = tokens.refresh_token {
+        let enc_refresh = encrypt_secret(&dev_key, rt);
         conn.execute(
             "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_refresh_token', ?1)",
-            rusqlite::params![rt],
+            rusqlite::params![enc_refresh],
         )
         .map_err(|e| e.to_string())?;
     }
