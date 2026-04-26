@@ -15,6 +15,7 @@ mod health_drive_sync;
 mod health_ingestion;
 mod health_timeline;
 mod llm_commands;
+pub mod sysmon_collect;
 mod state;
 
 #[cfg(test)]
