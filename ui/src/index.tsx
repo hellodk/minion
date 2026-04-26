@@ -11,6 +11,7 @@ import Health from './pages/Health';
 import Media from './pages/Media';
 import Calendar from './pages/Calendar';
 import Blog from './pages/Blog';
+import Sysmon from './pages/Sysmon';
 import Settings from './pages/Settings';
 import './styles/index.css';
 
@@ -32,6 +33,7 @@ render(
       <Route path="/media" component={Media} />
       <Route path="/calendar" component={Calendar} />
       <Route path="/blog" component={Blog} />
+      <Route path="/sysmon" component={Sysmon} />
       <Route path="/settings" component={Settings} />
     </Router>
   ),
