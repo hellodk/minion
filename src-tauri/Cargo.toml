@@ -53,6 +53,10 @@ hmac = "=0.12.1"
 tempfile = "3.10"
 pdf-extract = "0.10.0"
 strsim = "0.11"
+sysinfo = "0.30"
+r2d2 = "0.8"
+r2d2_sqlite = "0.24"
+nvml-wrapper = { version = "0.10", optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"
@@ -60,3 +64,4 @@ tempfile = "3.10"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+nvidia = ["nvml-wrapper"]
