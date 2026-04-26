@@ -128,6 +128,27 @@ const Blog: Component = () => {
 
   onCleanup(() => { if (previewDebounce) clearTimeout(previewDebounce); });
 
+  let autoSaveDebounce: ReturnType<typeof setTimeout> | undefined;
+  const [autoSaveStatus, setAutoSaveStatus] = createSignal<'saved' | 'saving' | 'unsaved' | 'idle'>('idle');
+
+  const triggerAutoSave = (postId: string, content: string) => {
+    setAutoSaveStatus('unsaved');
+    if (autoSaveDebounce) clearTimeout(autoSaveDebounce);
+    autoSaveDebounce = setTimeout(async () => {
+      setAutoSaveStatus('saving');
+      try {
+        await invoke('blog_update_draft', { postId, draftContent: content });
+        setAutoSaveStatus('saved');
+        setTimeout(() => setAutoSaveStatus('idle'), 2000);
+      } catch (e) {
+        console.error('Auto-save failed:', e);
+        setAutoSaveStatus('unsaved');
+      }
+    }, 2000);
+  };
+
+  onCleanup(() => { if (autoSaveDebounce) clearTimeout(autoSaveDebounce); });
+
   // Derived
   const edWordCount = createMemo(() => wordCount(edContent()));
   const edReadingTime = createMemo(() => readingTime(edContent()));
@@ -288,7 +309,6 @@ const Blog: Component = () => {
     { id: 'posts', label: 'Posts' },
     { id: 'editor', label: 'Editor' },
     { id: 'seo', label: 'SEO Tools' },
-    { id: 'import', label: 'Import' },
     { id: 'publish', label: 'Publish' },
     { id: 'platforms', label: 'Platforms' },
     { id: 'assets', label: 'Assets' },
@@ -309,13 +329,25 @@ const Blog: Component = () => {
               Write, manage, and optimize your blog content
             </p>
           </div>
-          <Show when={tab() === 'posts'}>
-            <button
-              onClick={openNewPost}
-              class="px-4 py-2 rounded-lg text-sm font-medium text-white bg-sky-500 hover:bg-sky-600 transition-colors"
-            >
-              New Post
-            </button>
+          <Show when={tab() === 'posts' || tab() === 'editor'}>
+            <div class="flex gap-2">
+              <button
+                onClick={() => setTab('import' as TabId)}
+                class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors flex items-center gap-1.5"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                Import
+              </button>
+              <button
+                onClick={openNewPost}
+                class="px-4 py-2 rounded-lg text-sm font-medium text-white bg-sky-500 hover:bg-sky-600 transition-colors"
+              >
+                New Post
+              </button>
+            </div>
           </Show>
         </div>
 
@@ -494,6 +526,8 @@ const Blog: Component = () => {
                     const val = e.currentTarget.value;
                     setEdContent(val);
                     if (viewMode() !== 'editor') renderPreview(val);
+                    const id = editingId();
+                    if (id) triggerAutoSave(id, val);
                   }}
                   class="w-full flex-1 min-h-[400px] bg-transparent border border-gray-200 dark:border-gray-700 rounded-lg p-4 outline-none resize-none text-gray-800 dark:text-gray-200 placeholder-gray-300 dark:placeholder-gray-600 focus:border-sky-300 dark:focus:border-sky-700 transition-colors"
                   style={{ 'font-family': 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace', 'font-size': '14px', 'line-height': '1.7' }}
@@ -501,9 +535,18 @@ const Blog: Component = () => {
 
                 {/* Bottom bar */}
                 <div class="flex items-center justify-between mt-4 text-xs text-gray-400 dark:text-gray-500">
-                  <div class="flex gap-4">
+                  <div class="flex gap-4 items-center">
                     <span>{edWordCount()} words</span>
                     <span>{edReadingTime()} min read</span>
+                    <Show when={autoSaveStatus() === 'unsaved'}>
+                      <span class="text-amber-500">● Unsaved changes</span>
+                    </Show>
+                    <Show when={autoSaveStatus() === 'saving'}>
+                      <span class="animate-pulse text-gray-400">Saving…</span>
+                    </Show>
+                    <Show when={autoSaveStatus() === 'saved'}>
+                      <span class="text-emerald-500">✓ Draft saved</span>
+                    </Show>
                   </div>
                   <Show when={edSeoResult()}>
                     <div class="flex items-center gap-2">
