@@ -22,12 +22,17 @@ const DOMPURIFY_CONFIG: DOMPurifyConfig = {
   FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form'],
 };
 
+let mermaidInitialized = false;
+
 async function applyMermaid(container: HTMLElement): Promise<void> {
   const blocks = container.querySelectorAll('code.language-mermaid');
   if (blocks.length === 0) return;
   try {
     const mermaid = await import('mermaid');
-    mermaid.default.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' });
+    if (!mermaidInitialized) {
+      mermaid.default.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' });
+      mermaidInitialized = true;
+    }
     for (let i = 0; i < blocks.length; i++) {
       const el = blocks[i] as HTMLElement;
       const pre = el.closest('pre') ?? el;
@@ -37,7 +42,10 @@ async function applyMermaid(container: HTMLElement): Promise<void> {
         const { svg } = await mermaid.default.render(id, graphDef);
         const wrapper = document.createElement('div');
         wrapper.className = 'mermaid-rendered';
-        wrapper.innerHTML = svg;
+        wrapper.innerHTML = DOMPurify.sanitize(svg, {
+          USE_PROFILES: { svg: true, svgFilters: true },
+          ADD_TAGS: ['foreignObject'],
+        });
         pre.replaceWith(wrapper);
       } catch {
         // leave original code block on render failure

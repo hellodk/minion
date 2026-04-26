@@ -5,8 +5,6 @@ interface DiskInfo {
   mount: string;
   used_gb: number;
   total_gb: number;
-  read_bps: number;
-  write_bps: number;
 }
 
 interface DirEntry {

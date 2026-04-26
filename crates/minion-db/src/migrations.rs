@@ -1137,6 +1137,7 @@ fn migrate_015_sysmon(conn: &Connection) -> Result<()> {
             context_json TEXT NOT NULL,
             response     TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_sysmon_analysis_time ON sysmon_analyses(created_at);
         ",
     )?;
     Ok(())

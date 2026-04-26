@@ -5067,11 +5067,13 @@ pub async fn gfit_sync_inner(
                     steps = Some(steps.unwrap_or(0) + ip!(vals, 0).unwrap_or(0));
                 } else if type_name.contains("heart_rate") {
                     let v = fp!(vals, 0).unwrap_or(0.0);
-                    if v > 0.0 { hr_sum += v; hr_count += 1; }
-                    let min_v = fp!(vals, 1).unwrap_or(v) as i64;
-                    let max_v = fp!(vals, 2).unwrap_or(v) as i64;
-                    hr_min = Some(hr_min.unwrap_or(min_v).min(min_v));
-                    hr_max = Some(hr_max.unwrap_or(max_v).max(max_v));
+                    if v > 0.0 {
+                        hr_sum += v;
+                        hr_count += 1;
+                        let iv = v as i64;
+                        hr_min = Some(hr_min.map_or(iv, |m: i64| m.min(iv)));
+                        hr_max = Some(hr_max.map_or(iv, |m: i64| m.max(iv)));
+                    }
                 } else if type_name.contains("calories") {
                     calories = Some(calories.unwrap_or(0) + fp!(vals, 0).unwrap_or(0.0) as i64);
                 } else if type_name.contains("distance") {

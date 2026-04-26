@@ -247,21 +247,25 @@ pub async fn sysmon_list_processes(
 pub async fn sysmon_kill_process(pid: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
-        use std::process::Command;
-        Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .output()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
+        return tokio::task::spawn_blocking(move || {
+            use std::process::Command;
+            Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output()
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        }).await.map_err(|e| e.to_string())?;
     }
     #[cfg(windows)]
     {
-        use std::process::Command;
-        Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .output()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
+        return tokio::task::spawn_blocking(move || {
+            use std::process::Command;
+            Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .output()
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        }).await.map_err(|e| e.to_string())?;
     }
     #[allow(unreachable_code)]
     Err("kill not supported on this platform".into())
@@ -271,30 +275,31 @@ pub async fn sysmon_kill_process(pid: u32) -> Result<(), String> {
 pub async fn sysmon_get_disk_breakdown(
     path: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    use std::process::Command;
-
     #[cfg(unix)]
     {
-        let out = Command::new("du")
-            .args(["-sm", "--max-depth=1", &path])
-            .output()
-            .map_err(|e| e.to_string())?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut entries: Vec<(u64, String)> = text
-            .lines()
-            .filter_map(|line| {
-                let mut parts = line.splitn(2, '\t');
-                let size: u64 = parts.next()?.parse().ok()?;
-                let dir = parts.next()?.to_string();
-                Some((size, dir))
-            })
-            .collect();
-        entries.sort_by(|a, b| b.0.cmp(&a.0));
-        entries.truncate(20);
-        return Ok(entries
-            .iter()
-            .map(|(s, d)| serde_json::json!({"path": d, "size_mb": s}))
-            .collect());
+        return tokio::task::spawn_blocking(move || {
+            use std::process::Command;
+            let out = Command::new("du")
+                .args(["-sm", "--max-depth=1", &path])
+                .output()
+                .map_err(|e| e.to_string())?;
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut entries: Vec<(u64, String)> = text
+                .lines()
+                .filter_map(|line| {
+                    let mut parts = line.splitn(2, '\t');
+                    let size: u64 = parts.next()?.parse().ok()?;
+                    let dir = parts.next()?.to_string();
+                    Some((size, dir))
+                })
+                .collect();
+            entries.sort_by(|a, b| b.0.cmp(&a.0));
+            entries.truncate(20);
+            Ok(entries
+                .iter()
+                .map(|(s, d)| serde_json::json!({"path": d, "size_mb": s}))
+                .collect())
+        }).await.map_err(|e| e.to_string())?;
     }
 
     #[allow(unreachable_code)]
@@ -357,97 +362,129 @@ pub struct RedundantEntry {
 /// Walk `root` (max depth 6) and find known space-wasting directories/files.
 #[tauri::command]
 pub async fn sysmon_find_redundant(root: String) -> Result<Vec<RedundantEntry>, String> {
-    use std::path::Path;
-
-    // (pattern_name, dir_name_or_suffix, description, is_dir_match)
-    const PATTERNS: &[(&str, &str, &str, bool)] = &[
-        ("node_modules",  "node_modules",   "Node.js dependencies — safe to delete, restore with npm/pnpm install", true),
-        ("rust_target",   "target",         "Rust build artifacts — safe to delete, restore with cargo build",      true),
-        ("python_cache",  "__pycache__",    "Python bytecode cache — safe to delete, auto-regenerated",             true),
-        ("gradle_cache",  ".gradle",        "Gradle build cache — safe to delete, restores on next build",          true),
-        ("maven_cache",   ".m2",            "Maven local repository — safe to delete, restores on next build",      true),
-        ("next_cache",    ".next",          "Next.js build cache — safe to delete, restore with next build",        true),
-        ("nuxt_cache",    ".nuxt",          "Nuxt.js build cache — safe to delete, restore with nuxt build",        true),
-        ("dist_build",    "dist",           "Distribution build output — safe to delete if source is tracked",      true),
-        ("jest_cache",    ".jest-cache",    "Jest test cache — safe to delete, auto-regenerated",                   true),
-        ("cargo_debug",   "debug",          "Cargo debug build output — safe to delete (inside target/)",           true),
-        ("venv",          ".venv",          "Python virtual environment — delete and recreate with pip install",     true),
-        ("venv2",         "venv",           "Python virtual environment — delete and recreate with pip install",     true),
-        ("ds_store",      ".DS_Store",      "macOS metadata file — safe to delete",                                  false),
+    // Validate root — block system directories, same guard as sysmon_delete_path
+    let root_canonical = std::path::Path::new(&root)
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve path: {e}"))?;
+    let root_str = root_canonical.to_string_lossy();
+    const BLOCKED: &[&str] = &[
+        "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc",
+        "/boot", "/sys", "/proc", "/dev", "/run", "/snap",
     ];
-
-    let root_path = Path::new(&root);
-    let mut results: Vec<RedundantEntry> = Vec::new();
-
-    fn dir_size(p: &std::path::Path) -> u64 {
-        let out = std::process::Command::new("du")
-            .args(["-sm", &p.to_string_lossy().to_string()])
-            .output();
-        if let Ok(o) = out {
-            let text = String::from_utf8_lossy(&o.stdout);
-            if let Some(line) = text.lines().next() {
-                if let Some(size_str) = line.split_whitespace().next() {
-                    return size_str.parse().unwrap_or(0);
-                }
-            }
-        }
-        0
+    if root_str == "/" {
+        return Err("Refusing to scan root filesystem".into());
     }
+    for b in BLOCKED {
+        if root_str.starts_with(&format!("{}/", b)) || root_str == *b {
+            return Err(format!("Refusing to scan system path: {root_str}"));
+        }
+    }
+    let root = root_canonical.to_string_lossy().into_owned();
 
-    fn walk(
-        dir: &std::path::Path,
-        depth: usize,
-        patterns: &[(&str, &str, &str, bool)],
-        results: &mut Vec<RedundantEntry>,
-    ) {
-        if depth > 6 { return; }
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-            // Skip hidden top-level dirs (except ones we explicitly match)
-            for (category, pattern, description, is_dir) in patterns {
-                if name == *pattern {
-                    let is_dir_actual = path.is_dir();
-                    if *is_dir && !is_dir_actual { continue; }
-                    if !*is_dir && is_dir_actual { continue; }
-                    // Don't recurse into matched dirs — measure and record them
-                    let size_mb = if is_dir_actual {
-                        dir_size(&path)
-                    } else {
-                        std::fs::metadata(&path)
-                            .map(|m| m.len() / 1024 / 1024)
-                            .unwrap_or(0)
-                    };
-                    if size_mb > 0 || !is_dir_actual {
-                        results.push(RedundantEntry {
-                            path: path.to_string_lossy().to_string(),
-                            size_mb,
-                            category: category.to_string(),
-                            description: description.to_string(),
-                        });
+    tokio::task::spawn_blocking(move || {
+        use std::path::Path;
+
+        // (pattern_name, dir_name_or_suffix, description, is_dir_match)
+        const PATTERNS: &[(&str, &str, &str, bool)] = &[
+            ("node_modules",  "node_modules",   "Node.js dependencies — safe to delete, restore with npm/pnpm install", true),
+            ("rust_target",   "target",         "Rust build artifacts — safe to delete, restore with cargo build",      true),
+            ("python_cache",  "__pycache__",    "Python bytecode cache — safe to delete, auto-regenerated",             true),
+            ("gradle_cache",  ".gradle",        "Gradle build cache — safe to delete, restores on next build",          true),
+            ("maven_cache",   ".m2",            "Maven local repository — safe to delete, restores on next build",      true),
+            ("next_cache",    ".next",          "Next.js build cache — safe to delete, restore with next build",        true),
+            ("nuxt_cache",    ".nuxt",          "Nuxt.js build cache — safe to delete, restore with nuxt build",        true),
+            ("dist_build",    "dist",           "Distribution build output — safe to delete if source is tracked",      true),
+            ("jest_cache",    ".jest-cache",    "Jest test cache — safe to delete, auto-regenerated",                   true),
+            ("cargo_debug",   "debug",          "Cargo debug build output — safe to delete (inside target/)",           true),
+            ("venv",          ".venv",          "Python virtual environment — delete and recreate with pip install",     true),
+            ("venv2",         "venv",           "Python virtual environment — delete and recreate with pip install",     true),
+            ("ds_store",      ".DS_Store",      "macOS metadata file — safe to delete",                                  false),
+        ];
+
+        let root_path = Path::new(&root);
+        let mut results: Vec<RedundantEntry> = Vec::new();
+
+        fn dir_size(p: &std::path::Path) -> u64 {
+            let out = std::process::Command::new("du")
+                .args(["-sm", p.to_string_lossy().as_ref()])
+                .output();
+            if let Ok(o) = out {
+                let text = String::from_utf8_lossy(&o.stdout);
+                if let Some(line) = text.lines().next() {
+                    if let Some(size_str) = line.split_whitespace().next() {
+                        return size_str.parse().unwrap_or(0);
                     }
-                    // Don't recurse into matched dir
-                    break;
                 }
             }
-            // Recurse into unmatched dirs (not hidden unless explicit)
-            if path.is_dir() {
-                let matched = patterns.iter().any(|(_, p, _, is_dir)| *is_dir && name == *p);
-                if !matched && !name.starts_with('.') {
-                    walk(&path, depth + 1, patterns, results);
+            0
+        }
+
+        fn walk(
+            dir: &std::path::Path,
+            depth: usize,
+            patterns: &[(&str, &str, &str, bool)],
+            results: &mut Vec<RedundantEntry>,
+        ) {
+            if depth > 6 { return; }
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                // Skip hidden top-level dirs (except ones we explicitly match)
+                for (category, pattern, description, is_dir) in patterns {
+                    if name == *pattern {
+                        let is_dir_actual = path.is_dir();
+                        if *is_dir && !is_dir_actual { continue; }
+                        if !*is_dir && is_dir_actual { continue; }
+                        // Context guard for broad patterns
+                        if *category == "dist_build" {
+                            // Only flag if parent has package.json or src/
+                            let has_pkg = dir.join("package.json").exists() || dir.join("src").exists();
+                            if !has_pkg { continue; }
+                        }
+                        if *category == "cargo_debug" {
+                            // Only flag if parent is named 'target'
+                            let parent_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            if parent_name != "target" { continue; }
+                        }
+                        // Don't recurse into matched dirs — measure and record them
+                        let size_mb = if is_dir_actual {
+                            dir_size(&path)
+                        } else {
+                            std::fs::metadata(&path)
+                                .map(|m| m.len() / 1024 / 1024)
+                                .unwrap_or(0)
+                        };
+                        if size_mb > 0 || !is_dir_actual {
+                            results.push(RedundantEntry {
+                                path: path.to_string_lossy().into_owned(),
+                                size_mb,
+                                category: category.to_string(),
+                                description: description.to_string(),
+                            });
+                        }
+                        // Don't recurse into matched dir
+                        break;
+                    }
+                }
+                // Recurse into unmatched dirs (not hidden unless explicit)
+                if path.is_dir() {
+                    let matched = patterns.iter().any(|(_, p, _, is_dir)| *is_dir && name == *p);
+                    if !matched && !name.starts_with('.') {
+                        walk(&path, depth + 1, patterns, results);
+                    }
                 }
             }
         }
-    }
 
-    walk(root_path, 0, PATTERNS, &mut results);
+        walk(root_path, 0, PATTERNS, &mut results);
 
-    // Sort by size descending
-    results.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
-    Ok(results)
+        // Sort by size descending
+        results.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
+        Ok(results)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -814,7 +851,7 @@ pub fn spawn_sysmon_poller(app: tauri::AppHandle, db: minion_db::Database) {
             // Auto-analysis: if an alert fired this tick, try LLM (debounced 2 min)
             let recent_alert: Option<String> = conn
                 .query_row(
-                    "SELECT id FROM sysmon_alerts WHERE fired_at > ?1 LIMIT 1",
+                    "SELECT id FROM sysmon_alerts WHERE fired_at >= ?1 LIMIT 1",
                     params![now],
                     |r| r.get(0),
                 )

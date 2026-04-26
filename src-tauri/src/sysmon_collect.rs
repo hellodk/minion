@@ -8,8 +8,6 @@ pub struct DiskInfo {
     pub mount: String,
     pub used_gb: f64,
     pub total_gb: f64,
-    pub read_bps: u64,
-    pub write_bps: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,8 +98,6 @@ impl Collector {
             mount: d.mount_point().to_string_lossy().to_string(),
             used_gb: (d.total_space().saturating_sub(d.available_space())) as f64 / 1e9,
             total_gb: d.total_space() as f64 / 1e9,
-            read_bps: 0,
-            write_bps: 0,
         }).collect();
 
         let net = self.networks.iter().map(|(iface, data)| NetInfo {

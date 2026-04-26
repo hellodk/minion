@@ -527,7 +527,11 @@ const Blog: Component = () => {
                     setEdContent(val);
                     if (viewMode() !== 'editor') renderPreview(val);
                     const id = editingId();
-                    if (id) triggerAutoSave(id, val);
+                    if (id) {
+                      triggerAutoSave(id, val);
+                    } else {
+                      setAutoSaveStatus('unsaved');
+                    }
                   }}
                   class="w-full flex-1 min-h-[400px] bg-transparent border border-gray-200 dark:border-gray-700 rounded-lg p-4 outline-none resize-none text-gray-800 dark:text-gray-200 placeholder-gray-300 dark:placeholder-gray-600 focus:border-sky-300 dark:focus:border-sky-700 transition-colors"
                   style={{ 'font-family': 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace', 'font-size': '14px', 'line-height': '1.7' }}
@@ -539,7 +543,9 @@ const Blog: Component = () => {
                     <span>{edWordCount()} words</span>
                     <span>{edReadingTime()} min read</span>
                     <Show when={autoSaveStatus() === 'unsaved'}>
-                      <span class="text-amber-500">● Unsaved changes</span>
+                      <span class="text-amber-500">
+                        {editingId() ? '● Unsaved changes' : '● New post — click Create Post to save'}
+                      </span>
                     </Show>
                     <Show when={autoSaveStatus() === 'saving'}>
                       <span class="animate-pulse text-gray-400">Saving…</span>
