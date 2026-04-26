@@ -1,9 +1,10 @@
-import { Component, createSignal, createMemo, For, Show, Switch, Match, onMount } from 'solid-js';
+import { Component, createSignal, createMemo, For, Show, Switch, Match, onMount, onCleanup } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import ImportTab from './blog/ImportTab';
 import AssetsTab from './blog/AssetsTab';
 import PublishTab from './blog/PublishTab';
 import PlatformsTab from './blog/PlatformsTab';
+import PreviewPane from './blog/PreviewPane';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -101,6 +102,32 @@ const Blog: Component = () => {
   const [seoResult, setSeoResult] = createSignal<SeoAnalysis | null>(null);
   const [analyzing, setAnalyzing] = createSignal(false);
 
+  // Split-view state
+  type ViewMode = 'editor' | 'split' | 'preview';
+  const [viewMode, setViewMode] = createSignal<ViewMode>('split');
+  const [previewHtml, setPreviewHtml] = createSignal('');
+  const [renderingPreview, setRenderingPreview] = createSignal(false);
+
+  let previewDebounce: ReturnType<typeof setTimeout> | undefined;
+
+  const renderPreview = (markdown: string) => {
+    if (previewDebounce) clearTimeout(previewDebounce);
+    previewDebounce = setTimeout(async () => {
+      if (!markdown.trim()) { setPreviewHtml(''); return; }
+      setRenderingPreview(true);
+      try {
+        const html = await invoke<string>('blog_render_preview', { markdown });
+        setPreviewHtml(html);
+      } catch (e) {
+        console.error('Preview render failed:', e);
+      } finally {
+        setRenderingPreview(false);
+      }
+    }, 400);
+  };
+
+  onCleanup(() => { if (previewDebounce) clearTimeout(previewDebounce); });
+
   // Derived
   const edWordCount = createMemo(() => wordCount(edContent()));
   const edReadingTime = createMemo(() => readingTime(edContent()));
@@ -153,6 +180,7 @@ const Blog: Component = () => {
       setEditingId(full.id);
       setEdTitle(full.title);
       setEdContent(full.content || '');
+      renderPreview(full.content || '');
       setEdStatus(full.status);
       setEdTags(full.tags || '');
       setEdAuthor(full.author || '');
@@ -422,9 +450,33 @@ const Blog: Component = () => {
 
           {/* ==================== EDITOR TAB ==================== */}
           <Match when={tab() === 'editor'}>
-            <div class="flex h-full">
-              {/* Main editor area */}
-              <div class="flex-1 flex flex-col p-6 overflow-y-auto">
+            <div class="flex flex-col h-full">
+              {/* View mode toggle */}
+              <div class="flex items-center gap-1 px-6 pt-3 pb-2 border-b border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800 shrink-0">
+                <span class="text-xs text-gray-400 mr-2">View:</span>
+                {(['editor', 'split', 'preview'] as ViewMode[]).map((mode) => (
+                  <button
+                    onClick={() => {
+                      setViewMode(mode);
+                      if (mode !== 'editor') renderPreview(edContent());
+                    }}
+                    class="px-3 py-1 rounded text-xs font-medium transition-colors"
+                    classList={{
+                      'bg-sky-500 text-white': viewMode() === mode,
+                      'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200': viewMode() !== mode,
+                    }}
+                  >
+                    {mode === 'editor' ? '✏️ Editor' : mode === 'split' ? '⬛ Split' : '👁 Preview'}
+                  </button>
+                ))}
+                <Show when={renderingPreview()}>
+                  <span class="text-xs text-gray-400 ml-2 animate-pulse">rendering…</span>
+                </Show>
+              </div>
+              <div class="flex flex-1 overflow-hidden min-h-0">
+              {/* Main editor area — shown in editor and split modes */}
+              <Show when={viewMode() !== 'preview'}>
+                <div class={`flex flex-col p-6 overflow-y-auto ${viewMode() === 'split' ? 'w-1/2 border-r border-gray-200 dark:border-gray-700' : 'flex-1'}`}>
                 {/* Title */}
                 <input
                   type="text"
@@ -438,7 +490,11 @@ const Blog: Component = () => {
                 <textarea
                   placeholder="Start writing your post in markdown..."
                   value={edContent()}
-                  onInput={(e) => setEdContent(e.currentTarget.value)}
+                  onInput={(e) => {
+                    const val = e.currentTarget.value;
+                    setEdContent(val);
+                    if (viewMode() !== 'editor') renderPreview(val);
+                  }}
                   class="w-full flex-1 min-h-[400px] bg-transparent border border-gray-200 dark:border-gray-700 rounded-lg p-4 outline-none resize-none text-gray-800 dark:text-gray-200 placeholder-gray-300 dark:placeholder-gray-600 focus:border-sky-300 dark:focus:border-sky-700 transition-colors"
                   style={{ 'font-family': 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace', 'font-size': '14px', 'line-height': '1.7' }}
                 />
@@ -462,6 +518,14 @@ const Blog: Component = () => {
                   </Show>
                 </div>
               </div>
+              </Show>
+
+              {/* Preview pane — shown in split and preview modes */}
+              <Show when={viewMode() !== 'editor'}>
+                <div class={viewMode() === 'split' ? 'w-1/2 overflow-y-auto' : 'flex-1 overflow-y-auto'}>
+                  <PreviewPane html={previewHtml()} />
+                </div>
+              </Show>
 
               {/* Side panel */}
               <div class="w-72 border-l border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-5 overflow-y-auto flex flex-col gap-5">
@@ -569,6 +633,7 @@ const Blog: Component = () => {
                     </Show>
                   </div>
                 </Show>
+              </div>
               </div>
             </div>
           </Match>
