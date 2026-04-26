@@ -47,7 +47,7 @@ const DiskTab: Component<{ disks: DiskInfo[] }> = (props) => {
   const [view, setView] = createSignal<DiskView>('explorer');
 
   // ── Explorer state ────────────────────────────────────────────────────
-  const [breadcrumbs, setBreadcrumbs] = createSignal<string[]>([]);
+  const [_breadcrumbs, setBreadcrumbs] = createSignal<string[]>([]);
   const [currentPath, setCurrentPath] = createSignal('/home');
   const [entries, setEntries] = createSignal<DirEntry[]>([]);
   const [scanning, setScanning] = createSignal(false);
@@ -111,7 +111,7 @@ const DiskTab: Component<{ disks: DiskInfo[] }> = (props) => {
   // ── Redundant functions ───────────────────────────────────────────────
   const scanRedundant = async () => {
     setScanning2(true);
-    setSelected(new Set());
+    setSelected(new Set<string>());
     setCleanedMb(0);
     const result = await invoke<RedundantEntry[]>('sysmon_find_redundant', { root: redundantRoot() }).catch(() => []);
     setRedundant(result);
@@ -126,8 +126,8 @@ const DiskTab: Component<{ disks: DiskInfo[] }> = (props) => {
     });
   };
 
-  const selectAll = () => setSelected(new Set(redundant().map(e => e.path)));
-  const selectNone = () => setSelected(new Set());
+  const selectAll = () => setSelected(new Set<string>(redundant().map(e => e.path)));
+  const selectNone = () => setSelected(new Set<string>());
 
   const selectedMb = () => redundant()
     .filter(e => selected().has(e.path))
@@ -144,7 +144,7 @@ const DiskTab: Component<{ disks: DiskInfo[] }> = (props) => {
       } catch { /* skip protected paths */ }
     }
     setCleanedMb(freed);
-    setSelected(new Set());
+    setSelected(new Set<string>());
     await scanRedundant();
     setDeleting2(false);
   };
