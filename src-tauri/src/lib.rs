@@ -320,6 +320,8 @@ pub fn run() {
             sysmon_commands::sysmon_list_processes,
             sysmon_commands::sysmon_kill_process,
             sysmon_commands::sysmon_get_disk_breakdown,
+            sysmon_commands::sysmon_delete_path,
+            sysmon_commands::sysmon_find_redundant,
             sysmon_commands::sysmon_run_analysis,
             sysmon_commands::sysmon_list_analyses,
             sysmon_commands::sysmon_get_settings,

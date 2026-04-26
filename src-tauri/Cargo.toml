@@ -57,6 +57,7 @@ sysinfo = "0.30"
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
 nvml-wrapper = { version = "0.10", optional = true }
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.10"

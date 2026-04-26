@@ -301,6 +301,155 @@ pub async fn sysmon_get_disk_breakdown(
     Ok(Vec::new())
 }
 
+/// Delete a file or directory. Refuses to touch system-owned paths or root.
+#[tauri::command]
+pub async fn sysmon_delete_path(path: String) -> Result<(), String> {
+    use std::path::Path;
+
+    let p = Path::new(&path);
+
+    // Normalise to catch `/../` tricks
+    let canonical = p.canonicalize().map_err(|e| format!("Cannot resolve path: {e}"))?;
+    let s = canonical.to_string_lossy();
+
+    // Block system directories — never touch these regardless of ownership
+    const BLOCKED: &[&str] = &[
+        "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32",
+        "/etc", "/boot", "/sys", "/proc", "/dev", "/run",
+        "/snap", "/opt", "/srv",
+    ];
+    if s == "/" || s == "/home" || s == "/root" {
+        return Err("Refusing to delete root or /home".into());
+    }
+    for blocked in BLOCKED {
+        if s.starts_with(blocked) {
+            return Err(format!("Refusing to delete system path: {s}"));
+        }
+    }
+
+    // Must be owned by the current user
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(&canonical).map_err(|e| e.to_string())?;
+        let current_uid = unsafe { libc::getuid() };
+        if meta.uid() != current_uid {
+            return Err(format!("Permission denied: {s} is not owned by current user"));
+        }
+    }
+
+    if canonical.is_dir() {
+        std::fs::remove_dir_all(&canonical).map_err(|e| format!("Delete failed: {e}"))?;
+    } else {
+        std::fs::remove_file(&canonical).map_err(|e| format!("Delete failed: {e}"))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedundantEntry {
+    pub path: String,
+    pub size_mb: u64,
+    pub category: String,
+    pub description: String,
+}
+
+/// Walk `root` (max depth 6) and find known space-wasting directories/files.
+#[tauri::command]
+pub async fn sysmon_find_redundant(root: String) -> Result<Vec<RedundantEntry>, String> {
+    use std::path::Path;
+
+    // (pattern_name, dir_name_or_suffix, description, is_dir_match)
+    const PATTERNS: &[(&str, &str, &str, bool)] = &[
+        ("node_modules",  "node_modules",   "Node.js dependencies — safe to delete, restore with npm/pnpm install", true),
+        ("rust_target",   "target",         "Rust build artifacts — safe to delete, restore with cargo build",      true),
+        ("python_cache",  "__pycache__",    "Python bytecode cache — safe to delete, auto-regenerated",             true),
+        ("gradle_cache",  ".gradle",        "Gradle build cache — safe to delete, restores on next build",          true),
+        ("maven_cache",   ".m2",            "Maven local repository — safe to delete, restores on next build",      true),
+        ("next_cache",    ".next",          "Next.js build cache — safe to delete, restore with next build",        true),
+        ("nuxt_cache",    ".nuxt",          "Nuxt.js build cache — safe to delete, restore with nuxt build",        true),
+        ("dist_build",    "dist",           "Distribution build output — safe to delete if source is tracked",      true),
+        ("jest_cache",    ".jest-cache",    "Jest test cache — safe to delete, auto-regenerated",                   true),
+        ("cargo_debug",   "debug",          "Cargo debug build output — safe to delete (inside target/)",           true),
+        ("venv",          ".venv",          "Python virtual environment — delete and recreate with pip install",     true),
+        ("venv2",         "venv",           "Python virtual environment — delete and recreate with pip install",     true),
+        ("ds_store",      ".DS_Store",      "macOS metadata file — safe to delete",                                  false),
+    ];
+
+    let root_path = Path::new(&root);
+    let mut results: Vec<RedundantEntry> = Vec::new();
+
+    fn dir_size(p: &std::path::Path) -> u64 {
+        let out = std::process::Command::new("du")
+            .args(["-sm", &p.to_string_lossy().to_string()])
+            .output();
+        if let Ok(o) = out {
+            let text = String::from_utf8_lossy(&o.stdout);
+            if let Some(line) = text.lines().next() {
+                if let Some(size_str) = line.split_whitespace().next() {
+                    return size_str.parse().unwrap_or(0);
+                }
+            }
+        }
+        0
+    }
+
+    fn walk(
+        dir: &std::path::Path,
+        depth: usize,
+        patterns: &[(&str, &str, &str, bool)],
+        results: &mut Vec<RedundantEntry>,
+    ) {
+        if depth > 6 { return; }
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            // Skip hidden top-level dirs (except ones we explicitly match)
+            for (category, pattern, description, is_dir) in patterns {
+                if name == *pattern {
+                    let is_dir_actual = path.is_dir();
+                    if *is_dir && !is_dir_actual { continue; }
+                    if !*is_dir && is_dir_actual { continue; }
+                    // Don't recurse into matched dirs — measure and record them
+                    let size_mb = if is_dir_actual {
+                        dir_size(&path)
+                    } else {
+                        std::fs::metadata(&path)
+                            .map(|m| m.len() / 1024 / 1024)
+                            .unwrap_or(0)
+                    };
+                    if size_mb > 0 || !is_dir_actual {
+                        results.push(RedundantEntry {
+                            path: path.to_string_lossy().to_string(),
+                            size_mb,
+                            category: category.to_string(),
+                            description: description.to_string(),
+                        });
+                    }
+                    // Don't recurse into matched dir
+                    break;
+                }
+            }
+            // Recurse into unmatched dirs (not hidden unless explicit)
+            if path.is_dir() {
+                let matched = patterns.iter().any(|(_, p, _, is_dir)| *is_dir && name == *p);
+                if !matched && !name.starts_with('.') {
+                    walk(&path, depth + 1, patterns, results);
+                }
+            }
+        }
+    }
+
+    walk(root_path, 0, PATTERNS, &mut results);
+
+    // Sort by size descending
+    results.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
+    Ok(results)
+}
+
 #[tauri::command]
 pub async fn sysmon_run_analysis(
     state: State<'_, AppStateHandle>,
