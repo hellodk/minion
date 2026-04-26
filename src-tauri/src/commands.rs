@@ -5729,6 +5729,23 @@ pub async fn blog_delete_post(
 }
 
 #[tauri::command]
+pub async fn blog_update_draft(
+    state: State<'_, AppStateHandle>,
+    post_id: String,
+    draft_content: Option<String>,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE blog_posts SET draft_content = ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![draft_content, now, post_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn blog_analyze_seo(
     title: String,
     content: String,
