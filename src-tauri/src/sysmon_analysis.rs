@@ -110,24 +110,33 @@ async fn call_llm(
 }
 
 pub async fn run_analysis(
-    conn: &Conn,
+    db: &minion_db::Database,
     trigger: &str,
     alert_id: Option<&str>,
     snapshots: Vec<SystemSnapshot>,
     alerts: Vec<(String, String, f64, f64, String)>,
     question: Option<&str>,
 ) -> Result<Option<String>, String> {
-    let Some((base_url, api_key)) = get_endpoint(conn) else {
-        return Ok(None);
+    // Acquire a connection only for the sync endpoint lookup, then drop it
+    // before the async LLM call so the future remains Send.
+    let (base_url, api_key) = {
+        let conn = db.get().map_err(|e| e.to_string())?;
+        match get_endpoint(&conn) {
+            Some(ep) => ep,
+            None => return Ok(None),
+        }
     };
 
     let user_content = build_prompt(&snapshots, &alerts, question);
     let context_json = serde_json::to_string(&snapshots).unwrap_or_default();
 
+    // conn is dropped — this await is now Send-safe.
     let Some(response) = call_llm(&base_url, api_key.as_deref(), &user_content).await else {
         return Ok(None);
     };
 
+    // Re-acquire connection for the INSERT.
+    let conn = db.get().map_err(|e| e.to_string())?;
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     conn.execute(

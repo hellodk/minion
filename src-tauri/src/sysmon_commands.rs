@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 type AppStateHandle = Arc<RwLock<AppState>>;
+type ActiveAlertRow = (String, String, f64, f64, String);
 
 // ── Threshold settings ────────────────────────────────────────────────────────
 
@@ -102,7 +103,7 @@ pub async fn sysmon_get_current(
              WHERE sampled_at = (SELECT MAX(sampled_at) FROM sysmon_processes)
              ORDER BY cpu_pct DESC",
         ).map_err(|e| e.to_string())?;
-        stmt.query_map([], |r| {
+        let result: Vec<ProcessInfo> = stmt.query_map([], |r| {
             Ok(ProcessInfo {
                 pid: r.get::<_, i64>(0)? as u32,
                 name: r.get(1)?,
@@ -114,7 +115,8 @@ pub async fn sysmon_get_current(
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
-        .collect()
+        .collect();
+        result
     };
 
     Ok(serde_json::json!({ "snapshot": snapshot, "processes": processes }))
@@ -309,19 +311,19 @@ pub async fn sysmon_run_analysis(
         .unwrap_or_else(Utc::now)
         .to_rfc3339();
 
-    let (snapshots, alerts) = {
+    let db = {
         let st = state.read().await;
         let conn = st.db.get().map_err(|e| e.to_string())?;
         let snaps = load_snapshots_since(&conn, &cutoff)?;
         let alrts = load_active_alerts(&conn)?;
-        (snaps, alrts)
+        // drop conn before await; keep a clone of the pool
+        let db = st.db.clone();
+        (snaps, alrts, db)
     };
-
-    let st = state.read().await;
-    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let (snapshots, alerts, db) = db;
 
     let id = sysmon_analysis::run_analysis(
-        &conn,
+        &db,
         "manual",
         None,
         snapshots,
@@ -334,6 +336,7 @@ pub async fn sysmon_run_analysis(
         return Ok(None);
     };
 
+    let conn = db.get().map_err(|e| e.to_string())?;
     let row: SysmonAnalysisSummary = conn
         .query_row(
             "SELECT id, created_at, trigger, question, response
@@ -453,7 +456,7 @@ fn load_snapshots_since(conn: &PooledConn, cutoff: &str) -> Result<Vec<SystemSna
 
 fn load_active_alerts(
     conn: &PooledConn,
-) -> Result<Vec<(String, String, f64, f64, String)>, String> {
+) -> Result<Vec<ActiveAlertRow>, String> {
     let mut stmt = conn.prepare(
         "SELECT metric, COALESCE(detail,''), value, threshold, severity
          FROM sysmon_alerts WHERE resolved_at IS NULL ORDER BY fired_at DESC LIMIT 20",
@@ -698,9 +701,10 @@ pub fn spawn_sysmon_poller(app: tauri::AppHandle, db: minion_db::Database) {
                         let db_bg = db.clone();
                         let app_bg = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            let Ok(conn2) = db_bg.get() else { return };
+                            // Pass the pool — run_analysis acquires/drops connections
+                            // around the async LLM call so the future stays Send.
                             let result = sysmon_analysis::run_analysis(
-                                &conn2,
+                                &db_bg,
                                 "auto",
                                 alert_id.as_deref(),
                                 snapshots,
@@ -709,6 +713,7 @@ pub fn spawn_sysmon_poller(app: tauri::AppHandle, db: minion_db::Database) {
                             )
                             .await;
                             if let Ok(Some(id)) = result {
+                                let Ok(conn2) = db_bg.get() else { return };
                                 let response: Option<String> = conn2
                                     .query_row(
                                         "SELECT response FROM sysmon_analyses WHERE id = ?1",

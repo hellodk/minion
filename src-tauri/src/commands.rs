@@ -1828,11 +1828,7 @@ fn replace_epub_images_with_temp_files(
     let mut result = html.to_string();
     let mut search_start = 0;
 
-    loop {
-        let src_pos = match result[search_start..].find("src=\"") {
-            Some(p) => p,
-            None => break,
-        };
+    while let Some(src_pos) = result[search_start..].find("src=\"") {
         let abs_pos = search_start + src_pos + 4;
         let end_quote = match result[abs_pos..].find('"') {
             Some(p) => p,
@@ -3432,6 +3428,7 @@ pub async fn fitness_delete_workout(
 // ============================================================================
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn fitness_log_food(
     state: State<'_, AppStateHandle>,
     name: String,
@@ -5082,6 +5079,7 @@ pub struct CalendarEventResponse {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn calendar_add_event(
     state: State<'_, AppStateHandle>,
     title: String,

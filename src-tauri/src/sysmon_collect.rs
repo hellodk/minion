@@ -57,6 +57,12 @@ pub struct Collector {
     networks: Networks,
 }
 
+impl Default for Collector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Collector {
     pub fn new() -> Self {
         let mut sys = System::new_with_specifics(
