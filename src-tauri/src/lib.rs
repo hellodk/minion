@@ -17,6 +17,7 @@ mod health_timeline;
 mod llm_commands;
 pub mod sysmon_collect;
 pub mod sysmon_analysis;
+mod sysmon_commands;
 mod state;
 
 #[cfg(test)]
@@ -48,12 +49,15 @@ pub fn run() {
             // Initialize application state
             let state = AppState::new()?;
             let db_handle = state.db.clone();
+            let sysmon_db = state.db.clone();
             let state_arc = Arc::new(RwLock::new(state));
             app.manage(state_arc.clone());
 
             // Background worker: flips blog_platform_publications from
             // scheduled → published when their scheduled_at fires.
             blog_publish::spawn_scheduled_publisher(state_arc, db_handle);
+
+            sysmon_commands::spawn_sysmon_poller(app.handle().clone(), sysmon_db);
 
             // Open DevTools in debug builds
             #[cfg(debug_assertions)]
@@ -304,6 +308,18 @@ pub fn run() {
             health_drive_sync::health_drive_restore_now,
             health_drive_sync::health_drive_export_local,
             health_drive_sync::health_drive_import_local,
+            // System Monitor commands
+            sysmon_commands::sysmon_get_current,
+            sysmon_commands::sysmon_get_history,
+            sysmon_commands::sysmon_list_alerts,
+            sysmon_commands::sysmon_resolve_alert,
+            sysmon_commands::sysmon_list_processes,
+            sysmon_commands::sysmon_kill_process,
+            sysmon_commands::sysmon_get_disk_breakdown,
+            sysmon_commands::sysmon_run_analysis,
+            sysmon_commands::sysmon_list_analyses,
+            sysmon_commands::sysmon_get_settings,
+            sysmon_commands::sysmon_save_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
