@@ -32,6 +32,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("012_blog_v2", migrate_012_blog_v2),
         ("013_health_entity_fk_set_null", migrate_013_health_entity_fk_set_null),
         ("014_blog_scheduling_snippets", migrate_014_blog_scheduling_snippets),
+        ("015_sysmon", migrate_015_sysmon),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -1084,6 +1085,61 @@ fn migrate_014_blog_scheduling_snippets(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_015_sysmon(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS sysmon_snapshots (
+            id           TEXT PRIMARY KEY,
+            sampled_at   TEXT NOT NULL,
+            cpu_pct      REAL NOT NULL,
+            ram_used_mb  INTEGER NOT NULL,
+            ram_total_mb INTEGER NOT NULL,
+            swap_used_mb INTEGER NOT NULL,
+            load_avg_1   REAL,
+            disks_json   TEXT NOT NULL,
+            gpus_json    TEXT NOT NULL,
+            net_json     TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sysmon_snap_time ON sysmon_snapshots(sampled_at);
+
+        CREATE TABLE IF NOT EXISTS sysmon_processes (
+            id          TEXT PRIMARY KEY,
+            sampled_at  TEXT NOT NULL,
+            pid         INTEGER NOT NULL,
+            name        TEXT NOT NULL,
+            cpu_pct     REAL NOT NULL,
+            ram_mb      INTEGER NOT NULL,
+            status      TEXT NOT NULL,
+            user_name   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_sysmon_proc_time ON sysmon_processes(sampled_at);
+
+        CREATE TABLE IF NOT EXISTS sysmon_alerts (
+            id          TEXT PRIMARY KEY,
+            fired_at    TEXT NOT NULL,
+            metric      TEXT NOT NULL,
+            value       REAL NOT NULL,
+            threshold   REAL NOT NULL,
+            severity    TEXT NOT NULL,
+            detail      TEXT,
+            resolved_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_sysmon_alert_time ON sysmon_alerts(fired_at);
+
+        CREATE TABLE IF NOT EXISTS sysmon_analyses (
+            id           TEXT PRIMARY KEY,
+            created_at   TEXT NOT NULL,
+            trigger      TEXT NOT NULL,
+            alert_id     TEXT REFERENCES sysmon_alerts(id) ON DELETE SET NULL,
+            question     TEXT,
+            context_json TEXT NOT NULL,
+            response     TEXT NOT NULL
+        );
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1202,7 +1258,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 14);
+        assert_eq!(count, 15);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn
@@ -1293,5 +1349,28 @@ mod tests {
             )
             .expect("Failed to check index");
         assert!(index_exists);
+    }
+
+    #[test]
+    fn test_migration_015_sysmon_tables() {
+        let conn = setup_test_db();
+        run(&conn).expect("migrations failed");
+
+        for table in &["sysmon_snapshots", "sysmon_processes", "sysmon_alerts", "sysmon_analyses"] {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+                [table],
+                |r| r.get(0),
+            ).unwrap();
+            assert!(exists, "table {} missing", table);
+        }
+
+        conn.execute(
+            "INSERT INTO sysmon_snapshots
+             (id, sampled_at, cpu_pct, ram_used_mb, ram_total_mb, swap_used_mb,
+              disks_json, gpus_json, net_json)
+             VALUES ('t1','2026-01-01T00:00:00Z',42.0,4096,8192,0,'[]','[]','[]')",
+            [],
+        ).expect("insert into sysmon_snapshots failed");
     }
 }
