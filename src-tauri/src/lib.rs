@@ -16,6 +16,7 @@ mod health_ingestion;
 mod health_timeline;
 mod llm_commands;
 pub mod sysmon_collect;
+pub mod sysmon_analysis;
 mod state;
 
 #[cfg(test)]
