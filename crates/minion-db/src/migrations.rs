@@ -34,6 +34,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("014_blog_scheduling_snippets", migrate_014_blog_scheduling_snippets),
         ("015_sysmon", migrate_015_sysmon),
         ("016_blog_draft_content", migrate_016_blog_draft_content),
+        ("017_fitness_gfit_columns", migrate_017_fitness_gfit_columns),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -1148,6 +1149,35 @@ fn migrate_016_blog_draft_content(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_017_fitness_gfit_columns(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_fitness_date_unique ON fitness_metrics(date);
+        ALTER TABLE fitness_metrics ADD COLUMN calories_out INTEGER;
+        ALTER TABLE fitness_metrics ADD COLUMN distance_m REAL;
+        ALTER TABLE fitness_metrics ADD COLUMN active_minutes INTEGER;
+        ALTER TABLE fitness_metrics ADD COLUMN heart_rate_min INTEGER;
+        ALTER TABLE fitness_metrics ADD COLUMN heart_rate_max INTEGER;
+        ALTER TABLE fitness_metrics ADD COLUMN spo2_avg REAL;
+        ALTER TABLE fitness_metrics ADD COLUMN source TEXT DEFAULT 'manual';
+        ALTER TABLE fitness_metrics ADD COLUMN synced_at TEXT;
+
+        CREATE TABLE IF NOT EXISTS fitness_workouts_gfit (
+            id          TEXT PRIMARY KEY,
+            date        TEXT NOT NULL,
+            activity    TEXT NOT NULL,
+            duration_s  INTEGER NOT NULL,
+            calories    INTEGER,
+            distance_m  REAL,
+            source      TEXT DEFAULT 'gfit',
+            synced_at   TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_gfit_workout_date ON fitness_workouts_gfit(date);
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1266,7 +1296,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 16);
+        assert_eq!(count, 17);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn

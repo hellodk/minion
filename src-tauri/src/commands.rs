@@ -4694,7 +4694,10 @@ const GFIT_SCOPE: &str = concat!(
     "https://www.googleapis.com/auth/fitness.activity.read ",
     "https://www.googleapis.com/auth/fitness.body.read ",
     "https://www.googleapis.com/auth/fitness.sleep.read ",
-    "https://www.googleapis.com/auth/fitness.heart_rate.read",
+    "https://www.googleapis.com/auth/fitness.heart_rate.read ",
+    "https://www.googleapis.com/auth/fitness.blood_glucose.read ",
+    "https://www.googleapis.com/auth/fitness.oxygen_saturation.read ",
+    "https://www.googleapis.com/auth/fitness.nutrition.read",
 );
 
 fn parse_gfit_oauth_callback(buf: &[u8]) -> Result<String, String> {
@@ -4907,49 +4910,267 @@ pub async fn gfit_open_auth(
 
 #[tauri::command]
 pub async fn gfit_sync(state: State<'_, AppStateHandle>) -> Result<String, String> {
-    let st = state.read().await;
-    let conn = st.db.get().map_err(|e| e.to_string())?;
+    gfit_sync_inner(state.inner().clone(), 30).await
+}
 
-    let token: Option<String> = conn
-        .query_row(
+/// Refresh the Google Fit access token. Gets creds from DB, drops conn, does HTTP, saves result.
+async fn gfit_refresh_token(db: &minion_db::Database) -> Result<String, String> {
+    // Phase 1: read credentials synchronously
+    let (refresh, client_id) = {
+        let conn = db.get().map_err(|e| e.to_string())?;
+        let refresh: Option<String> = conn.query_row(
+            "SELECT value FROM config WHERE key = 'gfit_refresh_token'", [], |r| r.get(0),
+        ).ok().flatten();
+        let client_id: Option<String> = conn.query_row(
+            "SELECT value FROM config WHERE key = 'gfit_client_id'", [], |r| r.get(0),
+        ).ok().flatten();
+        (refresh, client_id)
+    }; // conn dropped here
+
+    let refresh = refresh.ok_or("No refresh token — please reconnect Google Fit.")?;
+    let client_id = client_id.ok_or("No Google client ID configured.")?;
+
+    // Phase 2: HTTP (no conn held)
+    let http = reqwest::Client::new();
+    let resp = http.post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("client_id", client_id.as_str()),
+            ("refresh_token", refresh.as_str()),
+            ("grant_type", "refresh_token"),
+        ])
+        .send().await.map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Token refresh failed: {}", resp.text().await.unwrap_or_default()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let new_token = json["access_token"].as_str()
+        .ok_or("No access_token in refresh response")?.to_string();
+
+    // Phase 3: save new token
+    let conn = db.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_access_token', ?1)",
+        rusqlite::params![new_token],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(new_token)
+}
+
+/// Core sync logic. `days_back` controls how far back to fetch (30 on full sync, 1 on incremental).
+pub async fn gfit_sync_inner(
+    state: AppStateHandle,
+    days_back: i64,
+) -> Result<String, String> {
+    // Phase 1: read token from DB synchronously, drop conn before any await
+    let db = { state.read().await.db.clone() };
+
+    let mut token: Option<String> = {
+        let conn = db.get().map_err(|e| e.to_string())?;
+        conn.query_row(
             "SELECT value FROM config WHERE key = 'gfit_access_token'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
+            [], |r| r.get(0),
+        ).ok().flatten()
+    }; // conn dropped
 
-    let token = token.ok_or("Not connected to Google Fit. Please connect first in Settings.")?;
+    if token.is_none() {
+        return Err("Not connected to Google Fit. Please connect first in Settings.".into());
+    }
 
     let client = reqwest::Client::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let day_ago_ms = now_ms - 86_400_000;
+    let start_ms = now_ms - days_back * 86_400_000;
 
-    let steps_body = serde_json::json!({
-        "aggregateBy": [{"dataTypeName": "com.google.step_count.delta"}],
-        "bucketByTime": {"durationMillis": 86400000},
-        "startTimeMillis": day_ago_ms,
-        "endTimeMillis": now_ms
+    // Aggregate body: fetch all metrics in one request per day bucket
+    let agg_body = serde_json::json!({
+        "aggregateBy": [
+            {"dataTypeName": "com.google.step_count.delta"},
+            {"dataTypeName": "com.google.heart_rate.bpm"},
+            {"dataTypeName": "com.google.calories.expended"},
+            {"dataTypeName": "com.google.distance.delta"},
+            {"dataTypeName": "com.google.active_minutes"},
+            {"dataTypeName": "com.google.weight"},
+            {"dataTypeName": "com.google.sleep.segment"},
+            {"dataTypeName": "com.google.oxygen_saturation"},
+        ],
+        "bucketByTime": {"durationMillis": 86_400_000i64},
+        "startTimeMillis": start_ms,
+        "endTimeMillis": now_ms,
     });
 
-    let resp = client
+    let mut resp = client
         .post("https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate")
-        .bearer_auth(&token)
-        .json(&steps_body)
+        .bearer_auth(token.as_deref().unwrap_or(""))
+        .json(&agg_body)
         .send()
         .await
-        .map_err(|e| format!("Google Fit API error: {}", e))?;
+        .map_err(|e| format!("Google Fit request failed: {e}"))?;
 
-    let status = resp.status();
-    let body = resp.text().await.map_err(|e| e.to_string())?;
-
-    if !status.is_success() {
-        return Err(format!("Google Fit API returned {}: {}", status, body));
+    // If 401, try refreshing the token once
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let new_token = gfit_refresh_token(&db).await?;
+        token = Some(new_token.clone());
+        resp = client
+            .post("https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate")
+            .bearer_auth(&new_token)
+            .json(&agg_body)
+            .send()
+            .await
+            .map_err(|e| format!("Google Fit request failed after refresh: {e}"))?;
     }
 
-    Ok(format!(
-        "Synced successfully. Raw: {}",
-        &body[..body.len().min(500)]
-    ))
+    if !resp.status().is_success() {
+        let code = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Google Fit API {code}: {body}"));
+    }
+
+    let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let buckets = data["bucket"].as_array().cloned().unwrap_or_default();
+
+    let now_rfc = chrono::Utc::now().to_rfc3339();
+    let mut days_synced = 0usize;
+
+    for bucket in &buckets {
+        // Derive the date string from the bucket start time
+        let start_ns = bucket["startTimeMillis"]
+            .as_str()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        if start_ns == 0 { continue; }
+        let dt = chrono::DateTime::from_timestamp_millis(start_ns)
+            .unwrap_or_else(chrono::Utc::now);
+        let date = dt.format("%Y-%m-%d").to_string();
+
+        let mut steps: Option<i64> = None;
+        let mut hr_sum = 0f64; let mut hr_count = 0i64;
+        let mut hr_min: Option<i64> = None; let mut hr_max: Option<i64> = None;
+        let mut calories: Option<i64> = None;
+        let mut distance: Option<f64> = None;
+        let mut active_min: Option<i64> = None;
+        let mut weight: Option<f64> = None;
+        let mut sleep_s: Option<i64> = None;
+        let mut spo2: Option<f64> = None;
+
+        for ds in bucket["dataset"].as_array().unwrap_or(&vec![]) {
+            let type_name = ds["dataSourceId"].as_str().unwrap_or("");
+            for pt in ds["point"].as_array().unwrap_or(&vec![]) {
+                let vals = pt["value"].as_array();
+                macro_rules! fp { ($arr:expr, $i:expr) => {
+                    $arr.and_then(|a| a.get($i)).and_then(|v| v["fpVal"].as_f64())
+                }}
+                macro_rules! ip { ($arr:expr, $i:expr) => {
+                    $arr.and_then(|a| a.get($i)).and_then(|v| v["intVal"].as_i64())
+                }}
+
+                if type_name.contains("step_count") {
+                    steps = Some(steps.unwrap_or(0) + ip!(vals, 0).unwrap_or(0));
+                } else if type_name.contains("heart_rate") {
+                    let v = fp!(vals, 0).unwrap_or(0.0);
+                    if v > 0.0 { hr_sum += v; hr_count += 1; }
+                    let min_v = fp!(vals, 1).unwrap_or(v) as i64;
+                    let max_v = fp!(vals, 2).unwrap_or(v) as i64;
+                    hr_min = Some(hr_min.unwrap_or(min_v).min(min_v));
+                    hr_max = Some(hr_max.unwrap_or(max_v).max(max_v));
+                } else if type_name.contains("calories") {
+                    calories = Some(calories.unwrap_or(0) + fp!(vals, 0).unwrap_or(0.0) as i64);
+                } else if type_name.contains("distance") {
+                    distance = Some(distance.unwrap_or(0.0) + fp!(vals, 0).unwrap_or(0.0));
+                } else if type_name.contains("active_minutes") {
+                    active_min = Some(active_min.unwrap_or(0) + ip!(vals, 0).unwrap_or(0));
+                } else if type_name.contains("weight") {
+                    weight = fp!(vals, 0).or(weight);
+                } else if type_name.contains("sleep") {
+                    // sleep segment: each point has a duration
+                    let end_ns = pt["endTimeNanos"].as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                    let st_ns = pt["startTimeNanos"].as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                    sleep_s = Some(sleep_s.unwrap_or(0) + (end_ns - st_ns) / 1_000_000_000);
+                } else if type_name.contains("oxygen_saturation") {
+                    spo2 = fp!(vals, 0).or(spo2);
+                }
+            }
+        }
+
+        let hr_avg = if hr_count > 0 { Some((hr_sum / hr_count as f64) as i64) } else { None };
+        let sleep_hours = sleep_s.map(|s| s as f64 / 3600.0);
+
+        // Skip entirely empty days
+        if steps.is_none() && hr_avg.is_none() && calories.is_none()
+            && weight.is_none() && sleep_hours.is_none() { continue; }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let conn = db.get().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO fitness_metrics
+             (id, date, steps, heart_rate_avg, heart_rate_min, heart_rate_max,
+              sleep_hours, weight_kg, calories_out, distance_m, active_minutes,
+              spo2_avg, source, synced_at, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'gfit',?13,?13)
+             ON CONFLICT(date) DO UPDATE SET
+               steps         = COALESCE(excluded.steps, steps),
+               heart_rate_avg= COALESCE(excluded.heart_rate_avg, heart_rate_avg),
+               heart_rate_min= COALESCE(excluded.heart_rate_min, heart_rate_min),
+               heart_rate_max= COALESCE(excluded.heart_rate_max, heart_rate_max),
+               sleep_hours   = COALESCE(excluded.sleep_hours, sleep_hours),
+               weight_kg     = COALESCE(excluded.weight_kg, weight_kg),
+               calories_out  = COALESCE(excluded.calories_out, calories_out),
+               distance_m    = COALESCE(excluded.distance_m, distance_m),
+               active_minutes= COALESCE(excluded.active_minutes, active_minutes),
+               spo2_avg      = COALESCE(excluded.spo2_avg, spo2_avg),
+               source        = 'gfit',
+               synced_at     = excluded.synced_at",
+            rusqlite::params![
+                id, date, steps, hr_avg, hr_min, hr_max,
+                sleep_hours, weight, calories, distance, active_min,
+                spo2, now_rfc,
+            ],
+        ).map_err(|e| e.to_string())?;
+        days_synced += 1;
+    }
+
+    // Sync activity sessions (workouts)
+    let sessions_resp = client
+        .get("https://www.googleapis.com/fitness/v1/users/me/sessions")
+        .bearer_auth(token.as_deref().unwrap_or(""))
+        .query(&[
+            ("startTime", chrono::DateTime::from_timestamp_millis(start_ms)
+                .unwrap_or_else(chrono::Utc::now)
+                .to_rfc3339()),
+            ("endTime", chrono::Utc::now().to_rfc3339()),
+        ])
+        .send()
+        .await;
+
+    if let Ok(sr) = sessions_resp {
+        if sr.status().is_success() {
+            if let Ok(sdata) = sr.json::<serde_json::Value>().await {
+                for session in sdata["session"].as_array().unwrap_or(&vec![]) {
+                    let id = session["id"].as_str().unwrap_or("").to_string();
+                    if id.is_empty() { continue; }
+                    let name = session["name"].as_str().unwrap_or("Unknown").to_string();
+                    let start_ns: i64 = session["startTimeMillis"].as_str()
+                        .and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let end_ns: i64 = session["endTimeMillis"].as_str()
+                        .and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let duration_s = ((end_ns - start_ns) / 1000).max(0);
+                    let date = chrono::DateTime::from_timestamp_millis(start_ns)
+                        .unwrap_or_else(chrono::Utc::now)
+                        .format("%Y-%m-%d").to_string();
+
+                    if let Ok(wconn) = db.get() {
+                        wconn.execute(
+                            "INSERT OR IGNORE INTO fitness_workouts_gfit
+                             (id, date, activity, duration_s, source, synced_at)
+                             VALUES (?1,?2,?3,?4,'gfit',?5)",
+                            rusqlite::params![id, date, name, duration_s, now_rfc],
+                        ).ok();
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(format!("Synced {} days of Google Fit data (last {} days).", days_synced, days_back))
 }
 
 #[tauri::command]

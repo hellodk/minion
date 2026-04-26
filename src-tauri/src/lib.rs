@@ -56,9 +56,36 @@ pub fn run() {
 
             // Background worker: flips blog_platform_publications from
             // scheduled → published when their scheduled_at fires.
-            blog_publish::spawn_scheduled_publisher(state_arc, db_handle);
+            blog_publish::spawn_scheduled_publisher(state_arc.clone(), db_handle);
 
             sysmon_commands::spawn_sysmon_poller(app.handle().clone(), sysmon_db);
+
+            // Background worker: auto-sync Google Fit every 15 minutes
+            let gfit_state = state_arc.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(
+                    std::time::Duration::from_secs(15 * 60)
+                );
+                interval.tick().await; // skip immediate first tick
+                loop {
+                    interval.tick().await;
+                    let st = gfit_state.read().await;
+                    let connected = st.db.get()
+                        .ok()
+                        .and_then(|conn| conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM config WHERE key='gfit_access_token')",
+                            [], |r| r.get::<_, bool>(0),
+                        ).ok())
+                        .unwrap_or(false);
+                    drop(st);
+                    if connected {
+                        match commands::gfit_sync_inner(gfit_state.clone(), 1).await {
+                            Ok(msg) => tracing::debug!("GFit auto-sync: {}", msg),
+                            Err(e)  => tracing::warn!("GFit auto-sync failed: {}", e),
+                        }
+                    }
+                }
+            });
 
             // Open DevTools in debug builds
             #[cfg(debug_assertions)]
