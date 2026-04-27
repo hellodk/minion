@@ -37,6 +37,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("017_fitness_gfit_columns", migrate_017_fitness_gfit_columns),
         ("018_blog_llm", migrate_018_blog_llm),
         ("019_health_extract", migrate_019_health_extract),
+        ("020_health_intelligence", migrate_020_health_intelligence),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -1257,6 +1258,52 @@ fn migrate_019_health_extract(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_020_health_intelligence(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS location_visits (
+            id         TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            visit_date TEXT NOT NULL,
+            city       TEXT NOT NULL,
+            country    TEXT,
+            source     TEXT NOT NULL,
+            notes      TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_location_visits_patient
+            ON location_visits(patient_id, visit_date DESC);
+
+        CREATE TABLE IF NOT EXISTS health_timeline_events (
+            id            TEXT PRIMARY KEY,
+            patient_id    TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            event_date    TEXT NOT NULL,
+            category      TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            description   TEXT,
+            source_type   TEXT NOT NULL,
+            source_id     TEXT,
+            severity      TEXT,
+            metadata_json TEXT,
+            created_at    TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_timeline_patient_date
+            ON health_timeline_events(patient_id, event_date DESC);
+
+        CREATE TABLE IF NOT EXISTS health_intelligence_reports (
+            id             TEXT PRIMARY KEY,
+            patient_id     TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            generated_at   TEXT NOT NULL,
+            model_used     TEXT NOT NULL,
+            report_text    TEXT NOT NULL,
+            anomalies_json TEXT,
+            created_at     TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1375,7 +1422,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 19);
+        assert_eq!(count, 20);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn
@@ -1583,5 +1630,34 @@ mod tests {
              VALUES ('p2', 'Test2', 'test2', 'body2', 'draft', '2026-01-01', '2026-01-01')",
             [],
         ).expect("insert without draft_content failed");
+    }
+
+    #[test]
+    fn test_migration_020_health_intelligence_schema() {
+        let conn = setup_test_db();
+        run(&conn).expect("migrations failed");
+        for table in &["location_visits", "health_timeline_events", "health_intelligence_reports"] {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+                [table], |r| r.get(0),
+            ).unwrap_or(false);
+            assert!(exists, "table {} missing after migration 020", table);
+        }
+        // Verify timeline event cascade
+        conn.execute(
+            "INSERT INTO patients (id, phone_number, full_name, relationship, is_primary)
+             VALUES ('p_c', '+10000000002', 'Test', 'self', 0)", [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO health_timeline_events
+             (id, patient_id, event_date, category, title, source_type)
+             VALUES ('te1', 'p_c', '2026-01-01', 'lab', 'Test Event', 'test')", [],
+        ).unwrap();
+        conn.execute("DELETE FROM patients WHERE id = 'p_c'", []).unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM health_timeline_events WHERE patient_id = 'p_c'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "timeline events should cascade on patient delete");
     }
 }
