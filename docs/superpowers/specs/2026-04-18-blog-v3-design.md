@@ -201,108 +201,191 @@ Reuses the Google OAuth2 infrastructure already present in `calendar_integration
 ---
 
 ## Phase C — LLM Assistant
+_Revised 2026-04-27 — corrected migration reference, fixed line-number issue, separated rule-based from LLM checks, added full feature set._
 
 ### Principles
 
-1. **Never mutate source content** — all LLM outputs are ephemeral previews or stored separately
-2. **Graceful degradation** — if no LLM endpoint configured, show "Configure LLM in Settings" in assistant panel, no errors
-3. **Reuse existing infrastructure** — calls `llm_endpoints` table, uses `reqwest` same as `sysmon_analysis.rs`
+1. **Never mutate source content** — all LLM outputs are ephemeral previews or stored separately in `blog_post_variants`
+2. **Graceful degradation** — if no LLM endpoint configured, show "Configure LLM in Settings"; no errors surfaced to user
+3. **Rule-based checks are NOT LLM calls** — structural checks (broken markdown, heading gaps, word count) run as deterministic Rust code; LLM is called only for genuine language-quality tasks
+4. **Anchor-based positioning, not line numbers** — fix locations use heading text anchors or paragraph hashes, never raw line numbers (LLMs cannot reliably produce these)
+5. **Token estimate before call** — any call that sends >500 tokens shows an estimate and requires confirmation; prevents surprise cost/latency
+6. **Reuse existing infrastructure** — calls `llm_endpoints` table, uses `reqwest` same as `sysmon_analysis.rs`
 
-### Three modes
+---
 
-#### 1. Format Fixer
-Scans post for structural issues and returns annotated suggestions:
-- Broken Markdown syntax (unclosed code fences, malformed links)
-- Missing alt text on images
-- Heading hierarchy violations (H1 → H3 with no H2)
-- Paragraphs >300 words (readability)
-- Missing meta description / excerpt
-- Duplicate headings
+### Feature Catalogue
 
-Returns a structured list of `{ line: number, issue: string, suggestion: string }` items. User can apply each individually with "Apply" button (patches the editor content) or "Apply All".
+#### Group 1 — Rule-Based Checks (Rust only, no LLM)
 
-Complements (does not replace) existing `blog_analyze_seo` — SEO score focuses on keywords; format fixer focuses on structure.
+Run instantly as the user types (debounced 1s). Return structured issues with paragraph-level anchors.
 
-#### 2. Platform Adapter
-Given a target platform and the post content, produces a **platform-optimised variant**:
-
-| Platform | Adaptations |
+| Check | What it flags |
 |---|---|
-| Dev.to | Add `:::note` callout blocks, shorter intro, canonical URL note |
-| Hashnode | Add cover image suggestion, subtitle, series tag |
-| Medium | Remove code-heavy sections, add narrative bridges |
-| Substack | Add personal opener, newsletter CTA at end, casual tone |
-| LinkedIn | Compress to 3000 chars, add bullet takeaways, 3 hashtags |
+| Broken markdown | Unclosed code fences, malformed links `[text](` with no closing `)` |
+| Missing alt text | `![]()` images with empty alt text |
+| Heading hierarchy | H1 → H3 with no H2; multiple H1s |
+| Duplicate headings | Two headings with identical text |
+| Thin sections | Heading with <50 words below it before the next heading |
+| Missing excerpt | `excerpt` field empty at publish time |
+| Orphan images | Images in asset vault not referenced in post |
+| Long paragraphs | Any paragraph >250 words (readability signal) |
+| Reading level | Flesch-Kincaid grade estimate (computed from sentence length + syllable count) |
 
-Output shown in a diff view (original left, adapted right). User can copy adapted version or save as a named variant in new `blog_post_variants` table (migration 016).
+#### Group 2 — LLM: Writing Quality
 
-#### 3. Social Snippets (per-platform)
+Called on-demand, one feature at a time. Each shows token estimate before firing.
 
-Extends existing `social_snippet()` function. Generates per-platform with correct limits:
+| Feature | What it does |
+|---|---|
+| **Title generator** ⭐ | Generates 5 alternative titles per post: one SEO-optimised, one curiosity-gap, one direct/declarative, one question-form, one listicle. Shows character count and click-prediction rationale for each. |
+| **Hook rewriter** | Rewrites the opening paragraph for maximum retention. Returns 3 variants (direct, story-led, question-led). User picks one. |
+| **Conclusion + CTA generator** | Suggests a stronger ending with a platform-appropriate call to action. |
+| **Sentence simplifier** | Flags sentences above Grade 12 Flesch-Kincaid and suggests plain-English rewrites. |
+| **Tone adjuster** | Shifts register on a 3-point scale: Technical → Balanced → Conversational. Rewrites the full post in the target tone. |
+| **Grammar + language quality** | Passive voice detection, weak verbs ("is", "was", "get"), filler words ("very", "just", "really", "thing"), redundant phrases. Returns a list; user applies each fix individually. |
 
-| Platform | Limit | Format |
-|---|---|---|
-| Twitter/X | 270 chars | Hook + link |
-| LinkedIn | 3000 chars | Hook + takeaways + link + hashtags |
-| Substack teaser | 500 chars | Curiosity-gap opener |
-| Dev.to | No limit | First paragraph + tags |
-| Generic | 280 chars | Existing `social_snippet()` output |
+#### Group 3 — LLM: SEO & Discoverability
 
-All shown in the assistant panel with one-click copy per platform. Stored in `blog_posts.social_snippets_json` (new column, migration 016) as `{ "twitter": "...", "linkedin": "...", ... }`.
+| Feature | What it does |
+|---|---|
+| **Meta description generator** | Generates a 150–160 char SEO-optimised description (different from social snippet). Stores in `blog_posts.excerpt`. |
+| **Keyword density analyser** | Given a target keyword entered by user, shows current density and natural insertion points. |
+| **Tag/category suggester** | Reads post content, suggests tags from existing tag library + up to 3 new ones. |
+| **Search intent classifier** | Labels the post: Informational / Transactional / Navigational. Flags mismatches (e.g., post answers "how to" questions but title implies a product page). |
+| **FAQ extractor** | Identifies the questions the post implicitly answers; formats them as a `## FAQ` section suitable for Google featured snippets. |
+
+#### Group 4 — LLM: Content Structure
+
+| Feature | What it does |
+|---|---|
+| **Content gap detector** | Compares post to a short topic description; identifies standard subtopics typically covered that are missing. |
+| **Section expander** | User selects a thin section; LLM adds 3 supporting points or examples. Output shown as a suggestion, not applied automatically. |
+| **Post compressor** | Condenses the post to a target word count (user specifies). Produces a variant, never overwrites. |
+| **Table of contents generator** | Extracts all headings and generates anchor-linked TOC markdown. Inserted at cursor position. No LLM needed — deterministic. |
+| **Series planner** | Suggests how to split a long post (>2000 words) into a 2–4 part series with logical break points. |
+| **Code block explainer** | For each fenced code block, generates a plain-English explanation paragraph. Applied as suggestions above each block. |
+
+#### Group 5 — LLM: Distribution & Social
+
+| Feature | What it does |
+|---|---|
+| **Social snippets (per-platform)** | Twitter/X (270 chars), LinkedIn (3000 chars), Substack teaser (500 chars), Generic (280 chars). One-click copy per platform. |
+| **Platform adapter** | Rewrites post for a target platform's conventions (tone, structure, formatting). Stored as a named variant. |
+| **Newsletter version** | Email-ready version: greeting, scannable summary bullets, unsubscribe-aware CTA. Different from Substack adaptation. |
+| **Twitter/X thread generator** | Splits post into numbered tweets ≤270 chars at paragraph boundaries. |
+| **Internal link suggester** | Compares current post against all other posts in the DB; suggests where to add cross-links. No LLM needed for basic version — uses TF-IDF similarity from existing minion-rag. |
+
+---
+
+### Architecture
+
+#### Rule-based checks (Group 1)
+
+Implemented in `src-tauri/src/blog_lint.rs`. No LLM. Returns:
+
+```rust
+pub struct LintIssue {
+    pub id: String,              // deterministic hash of (rule, anchor)
+    pub rule: String,            // "missing_alt_text" | "heading_gap" | etc.
+    pub anchor: String,          // nearest heading text above the issue
+    pub description: String,     // human-readable problem
+    pub suggestion: String,      // human-readable fix
+    pub auto_fixable: bool,      // can be applied without LLM
+}
+```
+
+Apply uses the anchor to locate the correct paragraph, never a line number.
+
+#### LLM features (Groups 2–5)
+
+All in `src-tauri/src/blog_llm.rs`. Each call:
+1. Estimates token count from post length
+2. If >2000 tokens, shows estimate in UI before proceeding
+3. Returns result as a `BlogLlmResult` (text + metadata)
+4. Stores outputs in `blog_post_variants` — never overwrites `content`
+
+#### Platform adapter — no diff view
+
+The original spec proposed a diff view. Dropped: markdown diffs of LLM-rewritten content are noisy and unhelpful (everything changes). Instead: show original and adapted versions side by side as two read-only panes. User copies the adapted version.
+
+---
 
 ### New files
 
 | File | Purpose |
 |---|---|
-| `src-tauri/src/blog_llm.rs` | `blog_fix_format`, `blog_adapt_for_platform`, `blog_generate_snippets` commands |
-| `ui/src/pages/blog/LlmAssistantPanel.tsx` | Floating panel: Format Fixer tab + Platform Adapter tab + Snippets tab |
+| `src-tauri/src/blog_lint.rs` | Rule-based lint checks (no LLM) |
+| `src-tauri/src/blog_llm.rs` | All LLM features: writing quality, SEO, structure, distribution |
+| `ui/src/pages/blog/LlmAssistantPanel.tsx` | Slide-out panel: Lint tab + AI tab with grouped features |
+
+### Modified files
+
+| File | Change |
+|---|---|
+| `crates/minion-db/src/migrations.rs` | Migration 018 — blog_post_variants + social_snippets_json column |
+| `src-tauri/src/lib.rs` | Register new commands |
+| `ui/src/pages/Blog.tsx` | Wire LlmAssistantPanel into editor |
 
 ### New Tauri commands
 
 | Command | Description |
 |---|---|
-| `blog_fix_format(post_id)` | Returns `Vec<FormatIssue>` |
-| `blog_apply_fix(post_id, fix)` | Applies single fix to `draft_content` |
-| `blog_adapt_for_platform(post_id, platform)` | Returns adapted markdown string |
-| `blog_generate_snippets(post_id)` | Returns `HashMap<platform, snippet>`, stores in DB |
-| `blog_get_snippets(post_id)` | Returns stored snippets |
+| `blog_lint(post_id)` | Rule-based checks, returns `Vec<LintIssue>` instantly |
+| `blog_apply_lint_fix(post_id, issue_id)` | Apply an auto-fixable lint issue to `draft_content` |
+| `blog_llm_titles(post_id)` | Generate 5 title alternatives |
+| `blog_llm_hook(post_id)` | Rewrite opening paragraph (3 variants) |
+| `blog_llm_conclusion(post_id)` | Suggest conclusion + CTA |
+| `blog_llm_simplify(post_id)` | Flag complex sentences |
+| `blog_llm_tone(post_id, target)` | Rewrite for tone: technical/balanced/conversational |
+| `blog_llm_grammar(post_id)` | Passive voice, weak verbs, filler words |
+| `blog_llm_meta_description(post_id)` | Generate SEO excerpt |
+| `blog_llm_keywords(post_id, keyword)` | Keyword density + insertion points |
+| `blog_llm_tags(post_id)` | Suggest tags |
+| `blog_llm_faq(post_id)` | Extract FAQ section |
+| `blog_llm_gaps(post_id, topic)` | Content gap analysis |
+| `blog_llm_expand_section(post_id, anchor)` | Expand a thin section |
+| `blog_llm_compress(post_id, target_words)` | Compress to target word count |
+| `blog_llm_code_explain(post_id)` | Add explanations above code blocks |
+| `blog_llm_snippets(post_id)` | Generate all social snippets |
+| `blog_llm_adapt(post_id, platform)` | Platform-adapted variant |
+| `blog_llm_newsletter(post_id)` | Email-ready version |
+| `blog_llm_thread(post_id)` | Twitter/X thread split |
+| `blog_get_variants(post_id)` | List all stored variants |
+| `blog_delete_variant(variant_id)` | Delete a stored variant |
+| `blog_toc(post_id)` | Generate TOC from headings (deterministic, no LLM) |
+| `blog_internal_links(post_id)` | Suggest internal links via minion-rag similarity |
 
-### Migration 016 additions (Phase C)
+### Migration 018 (Phase C)
 
 ```sql
+-- Social snippets per post (cached LLM output)
 ALTER TABLE blog_posts ADD COLUMN social_snippets_json TEXT;
--- Stored as JSON: {"twitter":"...","linkedin":"...","substack":"..."}
+-- Format: {"twitter":"...","linkedin":"...","substack":"...","newsletter":"..."}
 
+-- LLM-generated variants (platform adaptations, compressions, tone rewrites)
+-- Stores multiple versions per post+type without overwriting originals
 CREATE TABLE IF NOT EXISTS blog_post_variants (
-    id          TEXT PRIMARY KEY,
-    post_id     TEXT NOT NULL REFERENCES blog_posts(id) ON DELETE CASCADE,
-    platform    TEXT NOT NULL,   -- 'devto' | 'medium' | 'linkedin' | etc.
-    content     TEXT NOT NULL,   -- adapted markdown
-    created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(post_id, platform)
+    id           TEXT PRIMARY KEY,
+    post_id      TEXT NOT NULL REFERENCES blog_posts(id) ON DELETE CASCADE,
+    variant_type TEXT NOT NULL,   -- 'platform_devto' | 'tone_casual' | 'compressed_1500' | etc.
+    label        TEXT NOT NULL,   -- human-readable: "Dev.to adaptation" | "Casual tone" | etc.
+    content      TEXT NOT NULL,   -- adapted markdown
+    created_at   TEXT DEFAULT CURRENT_TIMESTAMP
+    -- No UNIQUE constraint: multiple variants of the same type are kept as history
 );
+CREATE INDEX IF NOT EXISTS idx_blog_variants_post ON blog_post_variants(post_id);
 ```
 
 ---
 
-## Migration 016 — Full Summary
+## Migration Summary
 
-```sql
--- Phase A
-ALTER TABLE blog_posts ADD COLUMN draft_content TEXT;
-
--- Phase C
-ALTER TABLE blog_posts ADD COLUMN social_snippets_json TEXT;
-
-CREATE TABLE IF NOT EXISTS blog_post_variants (
-    id          TEXT PRIMARY KEY,
-    post_id     TEXT NOT NULL REFERENCES blog_posts(id) ON DELETE CASCADE,
-    platform    TEXT NOT NULL,
-    content     TEXT NOT NULL,
-    created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(post_id, platform)
-);
-```
+| Migration | Phase | Contents | Status |
+|---|---|---|---|
+| 016 | A | `draft_content TEXT` on `blog_posts` | ✅ Applied |
+| 017 | — | Fitness gfit columns (unrelated) | ✅ Applied |
+| 018 | C | `social_snippets_json` on `blog_posts` + `blog_post_variants` table | ⏳ Pending |
 
 ---
 
