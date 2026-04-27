@@ -40,6 +40,7 @@ mod tests {
             watched_dirs: HashMap::new(),
             scan_tasks: HashMap::new(),
             scan_cache: None,
+            gfit_sync_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })))
     }
 

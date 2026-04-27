@@ -4,6 +4,7 @@
 
 mod blog_assets;
 mod blog_import;
+mod blog_lint;
 mod blog_preview;
 mod blog_publish;
 mod calendar_integration;
