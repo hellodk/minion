@@ -5168,10 +5168,9 @@ pub async fn gfit_sync_inner(
     let now_ms = chrono::Utc::now().timestamp_millis();
     let start_ms = now_ms - days_back * 86_400_000;
 
-    // Aggregate body: fetch all metrics in one request per day bucket.
-    // Note: distance.delta requires fitness.location.read scope (added to GFIT_SCOPE).
-    // Existing tokens without that scope will 403 on distance — it is intentionally
-    // omitted here and will be populated on next re-authentication.
+    // Google Fit aggregate API requires startTimeMillis / endTimeMillis / durationMillis
+    // to be JSON STRINGS (int64 format), NOT integers. Sending integers causes Google
+    // to silently return empty buckets. This is a documented quirk of Google's REST API.
     let agg_body = serde_json::json!({
         "aggregateBy": [
             {"dataTypeName": "com.google.step_count.delta"},
@@ -5182,9 +5181,9 @@ pub async fn gfit_sync_inner(
             {"dataTypeName": "com.google.sleep.segment"},
             {"dataTypeName": "com.google.oxygen_saturation"},
         ],
-        "bucketByTime": {"durationMillis": 86_400_000i64},
-        "startTimeMillis": start_ms,
-        "endTimeMillis": now_ms,
+        "bucketByTime": {"durationMillis": "86400000"},
+        "startTimeMillis": start_ms.to_string(),
+        "endTimeMillis": now_ms.to_string(),
     });
 
     let mut resp = client
@@ -5222,10 +5221,11 @@ pub async fn gfit_sync_inner(
     let mut days_synced = 0usize;
 
     for bucket in &buckets {
-        // Derive the date string from the bucket start time
+        // Derive the date string from the bucket start time.
+        // Google Fit returns startTimeMillis as a string OR integer depending on the endpoint.
         let start_ns = bucket["startTimeMillis"]
-            .as_str()
-            .and_then(|s| s.parse::<i64>().ok())
+            .as_str().and_then(|s| s.parse::<i64>().ok())
+            .or_else(|| bucket["startTimeMillis"].as_i64())
             .unwrap_or(0);
         if start_ns == 0 { continue; }
         let dt = chrono::DateTime::from_timestamp_millis(start_ns)
@@ -5341,9 +5341,11 @@ pub async fn gfit_sync_inner(
                     if id.is_empty() { continue; }
                     let name = session["name"].as_str().unwrap_or("Unknown").to_string();
                     let start_ns: i64 = session["startTimeMillis"].as_str()
-                        .and_then(|s| s.parse().ok()).unwrap_or(0);
+                        .and_then(|s| s.parse().ok())
+                        .or_else(|| session["startTimeMillis"].as_i64()).unwrap_or(0);
                     let end_ns: i64 = session["endTimeMillis"].as_str()
-                        .and_then(|s| s.parse().ok()).unwrap_or(0);
+                        .and_then(|s| s.parse().ok())
+                        .or_else(|| session["endTimeMillis"].as_i64()).unwrap_or(0);
                     let duration_s = ((end_ns - start_ns) / 1000).max(0);
                     let date = chrono::DateTime::from_timestamp_millis(start_ns)
                         .unwrap_or_else(chrono::Utc::now)
