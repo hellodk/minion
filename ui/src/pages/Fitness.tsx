@@ -984,113 +984,137 @@ const HeartTab: Component<{
   );
 };
 
-const ActivityTab: Component = () => {
-  const maxSteps = Math.max(...WEEKLY_STEPS.map((d) => d.steps));
+const ActivityTab: Component<{
+  metrics: () => FitnessMetricResponse[];
+  gfitConnected: () => boolean;
+  onSync: () => Promise<void>;
+}> = (props) => {
+  const activityRows = () =>
+    props.metrics()
+      .filter((m) => m.steps !== null || m.distance_m !== null || m.active_minutes !== null)
+      .slice(0, 7)
+      .reverse();
+  const hasActivityData = () => activityRows().length > 0;
+  const latest = () => activityRows()[activityRows().length - 1] ?? null;
+  const maxSteps = () => Math.max(...activityRows().map((m) => m.steps ?? 0), 1);
+  const weeklySteps = () => activityRows().reduce((s, m) => s + (m.steps ?? 0), 0);
+  const dailyAvgSteps = () => {
+    const rows = activityRows();
+    return rows.length > 0 ? Math.round(weeklySteps() / rows.length) : 0;
+  };
+  const distanceKm = () =>
+    latest()?.distance_m !== null && latest()?.distance_m !== undefined
+      ? ((latest()!.distance_m ?? 0) / 1000).toFixed(2)
+      : null;
+  const activeMin = () => latest()?.active_minutes ?? null;
+  const dayLabel = (dateStr: string) => {
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    return days[new Date(dateStr).getDay()];
+  };
+  const isToday = (dateStr: string) => dateStr === new Date().toISOString().slice(0, 10);
+  const caloriesOut = () => latest()?.calories_out ?? null;
+  const caloriesActive = () => caloriesOut() !== null ? Math.round((caloriesOut() ?? 0) * 0.2) : null;
+  const caloriesBasal = () => caloriesOut() !== null ? Math.round((caloriesOut() ?? 0) - (caloriesActive() ?? 0)) : null;
 
   return (
     <div class="space-y-6">
-      {/* Top metrics */}
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Steps */}
-        <div class="card p-5 flex flex-col items-center">
-          <CircularProgress value={8432} max={10000} size="w-24 h-24" colorClass="text-blue-500" sublabel="steps" />
-          <p class="mt-2 text-sm font-medium text-gray-600 dark:text-gray-300">Steps</p>
-          <p class="text-xs text-gray-400">Goal: 10,000</p>
-        </div>
-
-        {/* Distance */}
-        <div class="card p-5 flex flex-col items-center">
-          <div class="p-3 rounded-full bg-green-100 dark:bg-green-900/40 text-green-500 mb-2">
-            <Icon name="distance" class="w-8 h-8" />
+      <Show when={props.gfitConnected()}>
+        <SyncStatusBar onSync={props.onSync} />
+      </Show>
+      <Show
+        when={hasActivityData()}
+        fallback={
+          <EmptyState
+            icon="steps"
+            message="No activity data yet. Sync Google Fit or log steps using the Log Today's Data form above."
+          />
+        }
+      >
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div class="card p-5 flex flex-col items-center">
+            <CircularProgress value={latest()?.steps ?? 0} max={10000} size="w-24 h-24" colorClass="text-blue-500" sublabel="steps" />
+            <p class="mt-2 text-sm font-medium text-gray-600 dark:text-gray-300">Steps</p>
+            <p class="text-xs text-gray-400">Goal: 10,000</p>
           </div>
-          <p class="text-2xl font-bold text-gray-900 dark:text-white">6.2</p>
-          <p class="text-sm text-gray-400">km</p>
-          <MiniBar value={6.2} max={8} colorClass="bg-green-500" />
-        </div>
-
-        {/* Active Minutes */}
-        <div class="card p-5 flex flex-col items-center">
-          <div class="p-3 rounded-full bg-orange-100 dark:bg-orange-900/40 text-orange-500 mb-2">
-            <Icon name="clock" class="w-8 h-8" />
+          <div class="card p-5 flex flex-col items-center">
+            <div class="p-3 rounded-full bg-green-100 dark:bg-green-900/40 text-green-500 mb-2">
+              <Icon name="distance" class="w-8 h-8" />
+            </div>
+            <Show when={distanceKm() !== null} fallback={<p class="text-2xl font-bold text-gray-400">—</p>}>
+              <p class="text-2xl font-bold text-gray-900 dark:text-white">{distanceKm()}</p>
+              <p class="text-sm text-gray-400">km</p>
+              <MiniBar value={parseFloat(distanceKm() ?? '0')} max={8} colorClass="bg-green-500" />
+            </Show>
           </div>
-          <p class="text-2xl font-bold text-gray-900 dark:text-white">47</p>
-          <p class="text-sm text-gray-400">active min</p>
-          <MiniBar value={47} max={60} colorClass="bg-orange-500" />
-        </div>
-
-        {/* Flights Climbed */}
-        <div class="card p-5 flex flex-col items-center">
-          <div class="p-3 rounded-full bg-purple-100 dark:bg-purple-900/40 text-purple-500 mb-2">
-            <Icon name="stairs" class="w-8 h-8" />
+          <div class="card p-5 flex flex-col items-center">
+            <div class="p-3 rounded-full bg-orange-100 dark:bg-orange-900/40 text-orange-500 mb-2">
+              <Icon name="clock" class="w-8 h-8" />
+            </div>
+            <Show when={activeMin() !== null} fallback={<p class="text-2xl font-bold text-gray-400">—</p>}>
+              <p class="text-2xl font-bold text-gray-900 dark:text-white">{activeMin()}</p>
+              <p class="text-sm text-gray-400">active min</p>
+              <MiniBar value={activeMin() ?? 0} max={60} colorClass="bg-orange-500" />
+            </Show>
           </div>
-          <p class="text-2xl font-bold text-gray-900 dark:text-white">14</p>
-          <p class="text-sm text-gray-400">flights</p>
-          <MiniBar value={14} max={20} colorClass="bg-purple-500" />
+          <div class="card p-5 flex flex-col items-center">
+            <div class="p-3 rounded-full bg-red-100 dark:bg-red-900/40 text-red-500 mb-2">
+              <Icon name="fire" class="w-8 h-8" />
+            </div>
+            <Show when={caloriesOut() !== null} fallback={<p class="text-2xl font-bold text-gray-400">—</p>}>
+              <p class="text-2xl font-bold text-gray-900 dark:text-white">{Math.round(caloriesOut() ?? 0).toLocaleString()}</p>
+              <p class="text-sm text-gray-400">cal burned</p>
+              <MiniBar value={caloriesOut() ?? 0} max={3000} colorClass="bg-red-500" />
+            </Show>
+          </div>
         </div>
-      </div>
-
-      {/* Weekly Activity Bars */}
-      <div class="card p-6">
-        <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">
-          Weekly Steps
-        </h3>
-        <div class="flex items-end gap-3 h-44">
-          <For each={WEEKLY_STEPS}>
-            {(entry) => {
-              const isToday = entry.day === 'Sun';
-              return (
-                <div class="flex-1 flex flex-col items-center gap-1">
-                  <span class="text-xs text-gray-400">{(entry.steps / 1000).toFixed(1)}k</span>
-                  <div class="w-full flex justify-center">
-                    <div
-                      class={`w-full max-w-[40px] rounded-t-md transition-all duration-500 ${
-                        isToday
-                          ? 'bg-minion-500 dark:bg-minion-400'
-                          : 'bg-gray-300 dark:bg-gray-600'
-                      }`}
-                      style={{ height: `${(entry.steps / maxSteps) * 140}px` }}
-                    />
+        <div class="card p-6">
+          <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">Weekly Steps</h3>
+          <div class="flex items-end gap-3 h-44">
+            <For each={activityRows()}>
+              {(entry) => {
+                const today = isToday(entry.date);
+                return (
+                  <div class="flex-1 flex flex-col items-center gap-1">
+                    <span class="text-xs text-gray-400">{((entry.steps ?? 0) / 1000).toFixed(1)}k</span>
+                    <div class="w-full flex justify-center">
+                      <div
+                        class={`w-full max-w-[40px] rounded-t-md transition-all duration-500 ${today ? 'bg-minion-500 dark:bg-minion-400' : 'bg-gray-300 dark:bg-gray-600'}`}
+                        style={{ height: `${((entry.steps ?? 0) / maxSteps()) * 140}px` }}
+                      />
+                    </div>
+                    <span class={`text-xs font-medium ${today ? 'text-minion-600 dark:text-minion-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                      {dayLabel(entry.date)}
+                    </span>
                   </div>
-                  <span
-                    class={`text-xs font-medium ${
-                      isToday
-                        ? 'text-minion-600 dark:text-minion-400'
-                        : 'text-gray-500 dark:text-gray-400'
-                    }`}
-                  >
-                    {entry.day}
-                  </span>
-                </div>
-              );
-            }}
-          </For>
-        </div>
-        <div class="flex items-center justify-between mt-4 text-sm text-gray-500 dark:text-gray-400">
-          <span>Weekly total: <strong class="text-gray-900 dark:text-white">64,332</strong> steps</span>
-          <span>Daily avg: <strong class="text-gray-900 dark:text-white">9,190</strong> steps</span>
-        </div>
-      </div>
-
-      {/* Calorie Breakdown */}
-      <div class="card p-6">
-        <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">
-          Calorie Breakdown
-        </h3>
-        <div class="grid grid-cols-3 gap-4 text-center">
-          <div>
-            <p class="text-3xl font-bold text-gray-900 dark:text-white">1,547</p>
-            <p class="text-sm text-gray-400">Basal</p>
+                );
+              }}
+            </For>
           </div>
-          <div>
-            <p class="text-3xl font-bold text-orange-500">300</p>
-            <p class="text-sm text-gray-400">Active</p>
-          </div>
-          <div>
-            <p class="text-3xl font-bold text-gray-900 dark:text-white">1,847</p>
-            <p class="text-sm text-gray-400">Total</p>
+          <div class="flex items-center justify-between mt-4 text-sm text-gray-500 dark:text-gray-400">
+            <span>Weekly total: <strong class="text-gray-900 dark:text-white">{weeklySteps().toLocaleString()}</strong> steps</span>
+            <span>Daily avg: <strong class="text-gray-900 dark:text-white">{dailyAvgSteps().toLocaleString()}</strong> steps</span>
           </div>
         </div>
-      </div>
+        <Show when={caloriesOut() !== null}>
+          <div class="card p-6">
+            <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">Calorie Breakdown (Latest Day)</h3>
+            <div class="grid grid-cols-3 gap-4 text-center">
+              <div>
+                <p class="text-3xl font-bold text-gray-900 dark:text-white">{(caloriesBasal() ?? 0).toLocaleString()}</p>
+                <p class="text-sm text-gray-400">Basal (est.)</p>
+              </div>
+              <div>
+                <p class="text-3xl font-bold text-orange-500">{(caloriesActive() ?? 0).toLocaleString()}</p>
+                <p class="text-sm text-gray-400">Active (est.)</p>
+              </div>
+              <div>
+                <p class="text-3xl font-bold text-gray-900 dark:text-white">{Math.round(caloriesOut() ?? 0).toLocaleString()}</p>
+                <p class="text-sm text-gray-400">Total</p>
+              </div>
+            </div>
+          </div>
+        </Show>
+      </Show>
     </div>
   );
 };
@@ -2211,7 +2235,11 @@ const Fitness: Component = () => {
             />
           </Match>
           <Match when={activeTab() === 'activity'}>
-            <ActivityTab />
+            <ActivityTab
+              metrics={metrics}
+              gfitConnected={gfitConnected}
+              onSync={async () => { await invoke('gfit_sync'); await loadData(); }}
+            />
           </Match>
           <Match when={activeTab() === 'ai'}>
             <AiAnalysisTab dashboard={dashboard} metrics={metrics} />
