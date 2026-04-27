@@ -295,7 +295,7 @@ cmd_release() {
     # Bump version
     info "Bumping version…"
     "$SCRIPT_DIR/version.sh" "$bump"
-    git add Cargo.toml ui/package.json src-tauri/tauri.conf.json
+    git add Cargo.toml src-tauri/Cargo.toml ui/package.json src-tauri/tauri.conf.json
     git commit -m "chore: bump version to $new_ver"
 
     # Build — default to deb only for release (fastest, what you usually deploy)
@@ -525,7 +525,7 @@ cmd_version() {
             fi
             "$SCRIPT_DIR/version.sh" "$sub"
             local new_ver; new_ver=$(current_version)
-            git add Cargo.toml ui/package.json src-tauri/tauri.conf.json
+            git add Cargo.toml src-tauri/Cargo.toml ui/package.json src-tauri/tauri.conf.json
             git commit -m "chore: bump version to $new_ver"
             success "Version bumped to $new_ver"
             ;;
