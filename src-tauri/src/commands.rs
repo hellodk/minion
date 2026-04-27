@@ -5070,65 +5070,184 @@ pub async fn gfit_open_auth(
     }
     drop(st);
 
+    // Trigger initial 30-day sync in background so data appears immediately after connect
+    let bg_state = state.inner().clone();
+    let bg_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        use tauri::Emitter;
+        if let Ok(msg) = gfit_sync_inner(bg_state, 30).await {
+            tracing::info!("Post-connect GFit sync: {}", msg);
+            let _ = bg_app.emit("fitness-data-updated", ());
+        }
+    });
+
     close_gfit_auth_window(&app);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn gfit_sync(state: State<'_, AppStateHandle>) -> Result<String, String> {
-    gfit_sync_inner(state.inner().clone(), 30).await
+    use std::sync::atomic::Ordering;
+
+    // Check if sync is already running
+    let sync_running = { state.read().await.gfit_sync_running.clone() };
+    if sync_running.load(Ordering::Relaxed) {
+        return Err("Sync already in progress".into());
+    }
+
+    // Check if synced recently (within 30 minutes)
+    let db = { state.read().await.db.clone() };
+    let last_synced: Option<String> = {
+        let conn = db.get().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT MAX(synced_at) FROM fitness_metrics WHERE source='gfit'",
+            [],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten()
+    };
+
+    if let Some(ref ts) = last_synced {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+            let age_min = chrono::Utc::now()
+                .signed_duration_since(dt)
+                .num_minutes();
+            if age_min < 30 {
+                let days_count: i64 = {
+                    let conn = db.get().map_err(|e| e.to_string())?;
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM fitness_metrics WHERE source='gfit'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                };
+                return Ok(format!(
+                    "Already synced {} minute(s) ago ({} days of data). Use Full Sync to force.",
+                    age_min, days_count
+                ));
+            }
+        }
+    }
+
+    sync_running.store(true, Ordering::Relaxed);
+    gfit_update_sync_status(&db, true, 0, "Syncing last 30 days…");
+    let result = gfit_sync_inner(state.inner().clone(), 30).await;
+    sync_running.store(false, Ordering::Relaxed);
+    match &result {
+        Ok(msg) => gfit_update_sync_status(&db, false, 100, msg),
+        Err(e) => gfit_update_sync_status(&db, false, 0, &format!("Error: {e}")),
+    }
+    result
 }
 
 /// Full historical sync — fetches all available data in 90-day chunks going back
 /// up to 3 years, emitting progress events so the UI can show a progress bar.
+/// Supports resume: saves a cursor so an interrupted sync can pick up where it
+/// left off. Guarded by the gfit_sync_running mutex.
 #[tauri::command]
 pub async fn gfit_sync_full(
     app: tauri::AppHandle,
     state: State<'_, AppStateHandle>,
 ) -> Result<String, String> {
+    use std::sync::atomic::Ordering;
     use tauri::Emitter;
 
-    // Google Fit keeps data for ~2 years; we go back 3 years in 90-day chunks.
+    let sync_running = { state.read().await.gfit_sync_running.clone() };
+    if sync_running.load(Ordering::Relaxed) {
+        return Err("Sync already in progress. Wait for it to finish.".into());
+    }
+    sync_running.store(true, Ordering::Relaxed);
+
+    let db = { state.read().await.db.clone() };
+
     const CHUNK_DAYS: i64 = 90;
     const MAX_DAYS: i64 = 3 * 365;
     let total_chunks = (MAX_DAYS + CHUNK_DAYS - 1) / CHUNK_DAYS;
 
+    // Resume: find the furthest-back date already saved by a previous full-sync
+    let cursor_ms: Option<i64> = {
+        let conn = db.get().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT value FROM config WHERE key = 'gfit_sync_cursor'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|s| s.parse().ok())
+    };
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let full_start_ms = now_ms - MAX_DAYS * 86_400_000;
+
+    // If we have a cursor, resume from where we left off; otherwise start from now
+    let resume_from_ms = cursor_ms.unwrap_or(now_ms);
+
     let mut total_synced = 0usize;
-    let state_arc = state.inner().clone();
+    let mut current_end_ms = resume_from_ms;
+    let mut chunk = 0i64;
 
-    for chunk in 0..total_chunks {
-        let chunk_end_days   = chunk * CHUNK_DAYS;
-        let chunk_start_days = (chunk + 1) * CHUNK_DAYS;
+    while current_end_ms > full_start_ms {
+        let chunk_start_ms = (current_end_ms - CHUNK_DAYS * 86_400_000).max(full_start_ms);
 
-        // Emit progress
-        let pct = ((chunk as f64 / total_chunks as f64) * 100.0) as u32;
-        let _ = app.emit("gfit-sync-progress", serde_json::json!({
-            "chunk": chunk + 1,
-            "total_chunks": total_chunks,
-            "pct": pct,
-            "years_ago": chunk_start_days / 365,
-        }));
+        let pct =
+            (((now_ms - current_end_ms) as f64 / (now_ms - full_start_ms) as f64) * 100.0) as u32;
+        let msg = format!(
+            "Syncing… {}% (going back {} days)",
+            pct,
+            (now_ms - chunk_start_ms) / 86_400_000
+        );
+        let _ = app.emit(
+            "gfit-sync-progress",
+            serde_json::json!({
+                "chunk": chunk + 1,
+                "total_chunks": total_chunks,
+                "pct": pct,
+            }),
+        );
+        gfit_update_sync_status(&db, true, pct, &msg);
 
-        // Sync this chunk by computing an offset window
-        let now_ms   = chrono::Utc::now().timestamp_millis();
-        let end_ms   = now_ms - chunk_end_days * 86_400_000;
-        let start_ms = now_ms - chunk_start_days * 86_400_000;
-
-        // Inline the chunk sync (reuses token refresh / db logic from gfit_sync_inner)
-        match gfit_sync_chunk(state_arc.clone(), start_ms, end_ms).await {
-            Ok(n) => total_synced += n,
+        match gfit_sync_chunk(state.inner().clone(), chunk_start_ms, current_end_ms).await {
+            Ok(n) => {
+                total_synced += n;
+                // Save cursor so we can resume if interrupted
+                if let Ok(conn) = db.get() {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_sync_cursor', ?1)",
+                        rusqlite::params![chunk_start_ms.to_string()],
+                    )
+                    .ok();
+                }
+            }
             Err(e) => {
                 tracing::warn!("GFit full-sync chunk {} failed: {}", chunk, e);
                 // Continue — don't abort the whole sync for one failing chunk
             }
         }
+
+        current_end_ms = chunk_start_ms;
+        chunk += 1;
     }
 
-    let _ = app.emit("gfit-sync-progress", serde_json::json!({
-        "chunk": total_chunks, "total_chunks": total_chunks, "pct": 100,
-    }));
+    // Clear cursor on completion
+    if let Ok(conn) = db.get() {
+        conn.execute("DELETE FROM config WHERE key = 'gfit_sync_cursor'", [])
+            .ok();
+    }
 
-    Ok(format!("Full sync complete: {} days of data pulled.", total_synced))
+    let _ = app.emit(
+        "gfit-sync-progress",
+        serde_json::json!({
+            "chunk": total_chunks, "total_chunks": total_chunks, "pct": 100,
+        }),
+    );
+
+    let result_msg = format!("Full sync complete: {} days of data synced.", total_synced);
+    gfit_update_sync_status(&db, false, 100, &result_msg);
+    sync_running.store(false, Ordering::Relaxed);
+
+    Ok(result_msg)
 }
 
 /// Sync a specific time window [start_ms, end_ms]. Extracted so gfit_sync_full
@@ -5733,6 +5852,72 @@ pub async fn gfit_get_client_id(
         |row| row.get(0),
     );
     Ok(row.ok())
+}
+
+fn gfit_update_sync_status(db: &minion_db::Database, running: bool, pct: u32, message: &str) {
+    let json = serde_json::json!({
+        "running": running,
+        "pct": pct,
+        "message": message,
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+    })
+    .to_string();
+    if let Ok(conn) = db.get() {
+        conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_sync_status', ?1)",
+            rusqlite::params![json],
+        )
+        .ok();
+    }
+}
+
+#[tauri::command]
+pub async fn gfit_get_sync_status(
+    state: State<'_, AppStateHandle>,
+) -> Result<serde_json::Value, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    // Last synced timestamp
+    let last_synced: Option<String> = conn
+        .query_row(
+            "SELECT MAX(synced_at) FROM fitness_metrics WHERE source='gfit'",
+            [],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+
+    // Days synced
+    let days_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM fitness_metrics WHERE source='gfit'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    // Sync status JSON
+    let status_json: Option<String> = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'gfit_sync_status'",
+            [],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let status: serde_json::Value = status_json
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({"running": false, "pct": 0, "message": ""}));
+
+    Ok(serde_json::json!({
+        "last_synced": last_synced,
+        "days_count": days_count,
+        "running": status["running"].as_bool().unwrap_or(false),
+        "pct": status["pct"].as_i64().unwrap_or(0),
+        "message": status["message"].as_str().unwrap_or(""),
+    }))
 }
 
 // ============================================================================

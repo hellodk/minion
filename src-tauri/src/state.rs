@@ -5,6 +5,7 @@ use minion_db::Database;
 use minion_files::{DuplicateGroup, FileInfo};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 /// Scan task status
@@ -82,6 +83,9 @@ pub struct AppState {
 
     /// Scan results cache
     pub scan_cache: Option<ScanCache>,
+
+    /// Mutex flag to prevent concurrent Google Fit syncs
+    pub gfit_sync_running: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -117,6 +121,7 @@ impl AppState {
             watched_dirs: HashMap::new(),
             scan_tasks: HashMap::new(),
             scan_cache: None,
+            gfit_sync_running: Arc::new(AtomicBool::new(false)),
         })
     }
 }

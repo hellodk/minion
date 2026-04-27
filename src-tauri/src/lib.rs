@@ -63,12 +63,20 @@ pub fn run() {
             // Background worker: auto-sync Google Fit every 15 minutes
             let gfit_state = state_arc.clone();
             tauri::async_runtime::spawn(async move {
+                use chrono::Timelike;
                 let mut interval = tokio::time::interval(
                     std::time::Duration::from_secs(15 * 60)
                 );
                 interval.tick().await; // skip immediate first tick
                 loop {
                     interval.tick().await;
+
+                    // Only sync between 06:00 and 23:00 local time (no 3am API waste)
+                    let hour = chrono::Local::now().hour();
+                    if hour < 6 || hour >= 23 {
+                        continue;
+                    }
+
                     let st = gfit_state.read().await;
                     let connected = st.db.get()
                         .ok()
@@ -77,8 +85,10 @@ pub fn run() {
                             [], |r| r.get::<_, bool>(0),
                         ).ok())
                         .unwrap_or(false);
+                    let already_running = st.gfit_sync_running.load(std::sync::atomic::Ordering::Relaxed);
                     drop(st);
-                    if connected {
+
+                    if connected && !already_running {
                         match commands::gfit_sync_inner(gfit_state.clone(), 1).await {
                             Ok(msg) => tracing::debug!("GFit auto-sync: {}", msg),
                             Err(e)  => tracing::warn!("GFit auto-sync failed: {}", e),
@@ -203,6 +213,7 @@ pub fn run() {
             commands::gfit_disconnect,
             commands::gfit_exchange_auth_code,
             commands::gfit_get_client_id,
+            commands::gfit_get_sync_status,
             // Calendar commands
             commands::calendar_add_event,
             commands::calendar_list_events,

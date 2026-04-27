@@ -1,5 +1,6 @@
-import { Component, createSignal, For, Show, Switch, Match, onMount } from 'solid-js';
+import { Component, createSignal, For, Show, Switch, Match, onMount, onCleanup } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1842,6 +1843,11 @@ const Fitness: Component = () => {
   };
 
   onMount(loadData);
+
+  onMount(async () => {
+    const unlisten = await listen('fitness-data-updated', () => { loadData(); });
+    onCleanup(() => unlisten());
+  });
 
   const handleLogMetric = async () => {
     setLogSaving(true);

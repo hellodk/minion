@@ -1,4 +1,4 @@
-import { Component, createSignal, For, onMount, Show } from 'solid-js';
+import { Component, createSignal, For, onMount, onCleanup, Show } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { SystemInfo } from '../App';
@@ -21,6 +21,9 @@ const Settings: Component = () => {
   const [gfitStatus, setGfitStatus] = createSignal<'idle' | 'saving' | 'syncing' | 'success' | 'error'>('idle');
   const [gfitMessage, setGfitMessage] = createSignal('');
   const [gfitSyncPct, setGfitSyncPct] = createSignal(0);
+  const [gfitLastSynced, setGfitLastSynced] = createSignal<string | null>(null);
+  const [gfitDaysCount, setGfitDaysCount] = createSignal(0);
+  let gfitProgressUnlisten: (() => void) | null = null;
 
   type CalendarAccountRow = { id: string; provider: string; email: string | null };
   const [calAccounts, setCalAccounts] = createSignal<CalendarAccountRow[]>([]);
@@ -203,6 +206,25 @@ const Settings: Component = () => {
       }
 
       try {
+        const status = await invoke<any>('gfit_get_sync_status');
+        setGfitLastSynced(status.last_synced ?? null);
+        setGfitDaysCount(status.days_count ?? 0);
+        if (status.running) {
+          // A sync was running when we navigated away — show it's still running
+          setGfitStatus('syncing');
+          setGfitMessage(status.message || 'Sync in progress…');
+          setGfitSyncPct(status.pct ?? 0);
+          // Re-attach listener
+          gfitProgressUnlisten = await listen<any>('gfit-sync-progress', (e) => {
+            setGfitSyncPct(e.payload.pct ?? 0);
+            setGfitMessage(`Syncing… ${e.payload.pct}%`);
+          });
+        }
+      } catch (_) {
+        // ignore
+      }
+
+      try {
         await loadLlmEndpoints();
       } catch (_) {
         // ignore
@@ -210,6 +232,10 @@ const Settings: Component = () => {
     } catch (e) {
       console.error('Failed to load settings:', e);
     }
+  });
+
+  onCleanup(() => {
+    if (gfitProgressUnlisten) { gfitProgressUnlisten(); gfitProgressUnlisten = null; }
   });
 
   const updateTheme = async (newTheme: string) => {
@@ -607,15 +633,28 @@ const Settings: Component = () => {
                 {gfitConnected() ? 'Connected to Google Fit' : 'Not connected'}
               </p>
             </div>
-            <span
-              class="px-2 py-1 text-xs rounded"
-              classList={{
-                'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300': gfitConnected(),
-                'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400': !gfitConnected(),
-              }}
-            >
-              {gfitConnected() ? 'Connected' : 'Disconnected'}
-            </span>
+            <div class="flex flex-col items-end gap-1">
+              <span
+                class="px-2 py-1 text-xs rounded"
+                classList={{
+                  'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300': gfitConnected(),
+                  'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400': !gfitConnected(),
+                }}
+              >
+                {gfitConnected() ? 'Connected' : 'Disconnected'}
+              </span>
+              <Show when={gfitDaysCount() > 0}>
+                <div class="text-xs text-gray-500 dark:text-gray-400">
+                  {gfitDaysCount()} days synced
+                  <Show when={gfitLastSynced()}>
+                    {' · '}Last synced: {new Date(gfitLastSynced()!).toLocaleString()}
+                  </Show>
+                </div>
+              </Show>
+              <Show when={gfitDaysCount() === 0 && gfitConnected()}>
+                <div class="text-xs text-amber-600 dark:text-amber-400">No data synced yet. Click Full Sync to import your history.</div>
+              </Show>
+            </div>
           </div>
 
           {/* Client ID + Connect */}
@@ -732,12 +771,14 @@ const Settings: Component = () => {
                   disabled={gfitStatus() === 'syncing'}
                   onClick={async () => {
                     setGfitStatus('syncing');
-                    setGfitMessage('Syncing last 30 days…');
+                    setGfitMessage('Checking…');
                     setGfitSyncPct(0);
                     try {
                       const result = await invoke<string>('gfit_sync');
-                      setGfitMessage('✓ ' + result);
-                      setGfitStatus('success');
+                      setGfitMessage(result);
+                      setGfitStatus(result.startsWith('Already') ? 'idle' : 'success');
+                      const s = await invoke<any>('gfit_get_sync_status');
+                      setGfitLastSynced(s.last_synced); setGfitDaysCount(s.days_count);
                     } catch (e: any) {
                       setGfitMessage('Sync failed: ' + String(e));
                       setGfitStatus('error');
@@ -752,24 +793,25 @@ const Settings: Component = () => {
                   disabled={gfitStatus() === 'syncing'}
                   onClick={async () => {
                     setGfitStatus('syncing');
-                    setGfitMessage('Full sync in progress — pulling up to 3 years of data…');
+                    setGfitMessage('Starting full sync…');
                     setGfitSyncPct(0);
-                    const unlisten = await listen<any>('gfit-sync-progress', (e) => {
+                    if (gfitProgressUnlisten) gfitProgressUnlisten();
+                    gfitProgressUnlisten = await listen<any>('gfit-sync-progress', (e) => {
                       setGfitSyncPct(e.payload.pct ?? 0);
-                      if (e.payload.pct < 100) {
-                        setGfitMessage(`Syncing… ${e.payload.pct}% (chunk ${e.payload.chunk}/${e.payload.total_chunks})`);
-                      }
+                      setGfitMessage(`Syncing… ${e.payload.pct}% — going back through your history`);
                     });
                     try {
                       const result = await invoke<string>('gfit_sync_full');
-                      setGfitMessage('✓ ' + result);
+                      setGfitMessage(result);
                       setGfitStatus('success');
                       setGfitSyncPct(100);
+                      const s = await invoke<any>('gfit_get_sync_status');
+                      setGfitLastSynced(s.last_synced); setGfitDaysCount(s.days_count);
                     } catch (e: any) {
                       setGfitMessage('Full sync failed: ' + String(e));
                       setGfitStatus('error');
                     } finally {
-                      unlisten();
+                      if (gfitProgressUnlisten) { gfitProgressUnlisten(); gfitProgressUnlisten = null; }
                     }
                   }}
                 >
@@ -796,18 +838,19 @@ const Settings: Component = () => {
                 </button>
               </div>
 
-              {/* Progress bar — shown during full sync */}
-              <Show when={gfitStatus() === 'syncing' && gfitSyncPct() > 0}>
+              {/* Progress bar — shown during any sync */}
+              <Show when={gfitStatus() === 'syncing'}>
                 <div>
                   <div class="flex justify-between text-xs text-gray-500 mb-1">
                     <span>Google Fit sync progress</span>
-                    <span>{gfitSyncPct()}%</span>
+                    <span>{gfitSyncPct() > 0 ? `${gfitSyncPct()}%` : '…'}</span>
                   </div>
                   <div class="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                    <div
-                      class="h-2 bg-sky-500 rounded-full transition-all duration-300"
-                      style={{ width: `${gfitSyncPct()}%` }}
-                    />
+                    <Show when={gfitSyncPct() > 0}
+                      fallback={<div class="h-2 bg-sky-400 rounded-full animate-pulse w-full" />}>
+                      <div class="h-2 bg-sky-500 rounded-full transition-all duration-300"
+                        style={{ width: `${gfitSyncPct()}%` }} />
+                    </Show>
                   </div>
                 </div>
               </Show>
