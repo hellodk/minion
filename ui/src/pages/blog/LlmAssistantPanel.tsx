@@ -25,135 +25,262 @@ interface BlogVariant {
   created_at: string;
 }
 
+interface LlmEndpoint {
+  id: string;
+  name: string;
+}
+
 type PanelTab = 'lint' | 'writing' | 'seo' | 'distribute';
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+const Spinner: Component = () => (
+  <svg class="animate-spin h-3 w-3 text-current" viewBox="0 0 24 24" fill="none">
+    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+  </svg>
+);
+
+const ActionBtn: Component<{ label: string; loading: boolean; onClick: () => void; color?: string }> = (p) => (
+  <button
+    onClick={p.onClick}
+    disabled={p.loading}
+    class={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors cursor-pointer
+            disabled:opacity-60 disabled:cursor-not-allowed
+            ${(p.color ?? 'sky') === 'sky'
+              ? 'bg-sky-50 dark:bg-sky-900/20 border-sky-200 dark:border-sky-800 text-sky-700 dark:text-sky-300 hover:bg-sky-100'
+              : 'bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+            }`}
+  >
+    <Show when={p.loading} fallback={p.label}>
+      <Spinner /><span>Working…</span>
+    </Show>
+  </button>
+);
+
+const ResultBox: Component<{ content: string; onCopy?: () => void }> = (p) => (
+  <div class="relative mt-2 p-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
+    {p.content}
+    <Show when={p.onCopy}>
+      <button
+        onClick={p.onCopy}
+        class="absolute top-2 right-2 px-2 py-0.5 text-[10px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded text-gray-500 hover:text-gray-800 dark:hover:text-gray-200"
+      >Copy</button>
+    </Show>
+  </div>
+);
+
+const NoEndpointBanner: Component = () => (
+  <div class="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
+    <p class="text-xs font-medium text-amber-700 dark:text-amber-300 mb-1">No AI endpoint configured</p>
+    <p class="text-[11px] text-amber-600 dark:text-amber-400">
+      Go to <strong>Settings → AI Endpoints</strong> and add an Ollama or OpenAI-compatible endpoint to enable these features.
+    </p>
+  </div>
+);
+
+const ErrorNote: Component<{ msg: string }> = (p) => (
+  <p class="text-[11px] text-red-500 dark:text-red-400 mt-1">⚠ {p.msg}</p>
+);
+
+const EmptyNote: Component<{ tried: boolean }> = (p) => (
+  <Show when={p.tried}>
+    <p class="text-[11px] text-gray-400 mt-1 italic">No response from AI. The model may need more context, or try again.</p>
+  </Show>
+);
+
+// ── Main panel ────────────────────────────────────────────────────────────────
 
 const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void }> = (props) => {
   const [tab, setTab] = createSignal<PanelTab>('lint');
+  const [hasEndpoint, setHasEndpoint] = createSignal<boolean | null>(null); // null = checking
 
-  // Lint state
+  // ── Lint ──────────────────────────────────────────────────────────────────
   const [lintIssues, setLintIssues] = createSignal<LintIssue[]>([]);
   const [lintLoading, setLintLoading] = createSignal(false);
+  const [lintError, setLintError] = createSignal('');
+  const [lintRan, setLintRan] = createSignal(false);
 
   const runLint = async () => {
     if (!props.postId) return;
-    setLintLoading(true);
+    setLintLoading(true); setLintError('');
     try {
       const issues = await invoke<LintIssue[]>('blog_lint', { postId: props.postId });
       setLintIssues(issues);
-    } catch { setLintIssues([]); }
-    finally { setLintLoading(false); }
+      setLintRan(true);
+    } catch (e) {
+      setLintError(String(e));
+      setLintIssues([]);
+    } finally { setLintLoading(false); }
   };
 
-  // Writing state
+  // ── Writing ───────────────────────────────────────────────────────────────
   const [titles, setTitles] = createSignal<TitleSuggestion[]>([]);
   const [titlesLoading, setTitlesLoading] = createSignal(false);
+  const [titlesError, setTitlesError] = createSignal('');
+  const [titlesTried, setTitlesTried] = createSignal(false);
+
   const [hook, setHook] = createSignal<string[]>([]);
   const [hookLoading, setHookLoading] = createSignal(false);
+  const [hookError, setHookError] = createSignal('');
+  const [hookTried, setHookTried] = createSignal(false);
+
   const [conclusion, setConclusion] = createSignal('');
   const [conclusionLoading, setConclusionLoading] = createSignal(false);
+  const [conclusionError, setConclusionError] = createSignal('');
+  const [conclusionTried, setConclusionTried] = createSignal(false);
+
   const [grammar, setGrammar] = createSignal<string[]>([]);
   const [grammarLoading, setGrammarLoading] = createSignal(false);
+  const [grammarError, setGrammarError] = createSignal('');
+  const [grammarTried, setGrammarTried] = createSignal(false);
 
   const runTitles = async () => {
     if (!props.postId) return;
-    setTitlesLoading(true);
-    try { setTitles((await invoke<TitleSuggestion[] | null>('blog_llm_titles', { postId: props.postId })) ?? []); }
-    catch { } finally { setTitlesLoading(false); }
+    setTitlesLoading(true); setTitlesError(''); setTitlesTried(false);
+    try {
+      const res = await invoke<TitleSuggestion[] | null>('blog_llm_titles', { postId: props.postId });
+      setTitles(res ?? []);
+    } catch (e) { setTitlesError(String(e)); setTitles([]); }
+    finally { setTitlesLoading(false); setTitlesTried(true); }
   };
 
   const runHook = async () => {
     if (!props.postId) return;
-    setHookLoading(true);
-    try { setHook((await invoke<string[] | null>('blog_llm_hook', { postId: props.postId })) ?? []); }
-    catch { } finally { setHookLoading(false); }
+    setHookLoading(true); setHookError(''); setHookTried(false);
+    try {
+      const res = await invoke<string[] | null>('blog_llm_hook', { postId: props.postId });
+      setHook(res ?? []);
+    } catch (e) { setHookError(String(e)); setHook([]); }
+    finally { setHookLoading(false); setHookTried(true); }
   };
 
   const runConclusion = async () => {
     if (!props.postId) return;
-    setConclusionLoading(true);
-    try { setConclusion((await invoke<string | null>('blog_llm_conclusion', { postId: props.postId })) ?? ''); }
-    catch { } finally { setConclusionLoading(false); }
+    setConclusionLoading(true); setConclusionError(''); setConclusionTried(false);
+    try {
+      const res = await invoke<string | null>('blog_llm_conclusion', { postId: props.postId });
+      setConclusion(res ?? '');
+    } catch (e) { setConclusionError(String(e)); setConclusion(''); }
+    finally { setConclusionLoading(false); setConclusionTried(true); }
   };
 
   const runGrammar = async () => {
     if (!props.postId) return;
-    setGrammarLoading(true);
-    try { setGrammar((await invoke<string[] | null>('blog_llm_grammar', { postId: props.postId })) ?? []); }
-    catch { } finally { setGrammarLoading(false); }
+    setGrammarLoading(true); setGrammarError(''); setGrammarTried(false);
+    try {
+      const res = await invoke<string[] | null>('blog_llm_grammar', { postId: props.postId });
+      setGrammar(res ?? []);
+    } catch (e) { setGrammarError(String(e)); setGrammar([]); }
+    finally { setGrammarLoading(false); setGrammarTried(true); }
   };
 
-  // SEO state
+  // ── SEO ───────────────────────────────────────────────────────────────────
   const [metaDesc, setMetaDesc] = createSignal('');
   const [metaLoading, setMetaLoading] = createSignal(false);
+  const [metaError, setMetaError] = createSignal('');
+  const [metaTried, setMetaTried] = createSignal(false);
+  const [metaSaved, setMetaSaved] = createSignal(false);
+
   const [tags, setTags] = createSignal<string[]>([]);
   const [tagsLoading, setTagsLoading] = createSignal(false);
+  const [tagsError, setTagsError] = createSignal('');
+  const [tagsTried, setTagsTried] = createSignal(false);
 
-  const runMetaDesc = async () => {
+  const runMetaDesc = async (save: boolean) => {
     if (!props.postId) return;
-    setMetaLoading(true);
-    try { setMetaDesc((await invoke<string | null>('blog_llm_meta_description', { postId: props.postId, saveToExcerpt: true })) ?? ''); }
-    catch { } finally { setMetaLoading(false); }
+    setMetaLoading(true); setMetaError(''); setMetaTried(false); setMetaSaved(false);
+    try {
+      const res = await invoke<string | null>('blog_llm_meta_description', { postId: props.postId, saveToExcerpt: save });
+      setMetaDesc(res ?? '');
+      if (save && res) setMetaSaved(true);
+    } catch (e) { setMetaError(String(e)); setMetaDesc(''); }
+    finally { setMetaLoading(false); setMetaTried(true); }
   };
 
   const runTags = async () => {
     if (!props.postId) return;
-    setTagsLoading(true);
-    try { setTags((await invoke<string[] | null>('blog_llm_tags', { postId: props.postId })) ?? []); }
-    catch { } finally { setTagsLoading(false); }
+    setTagsLoading(true); setTagsError(''); setTagsTried(false);
+    try {
+      const res = await invoke<string[] | null>('blog_llm_tags', { postId: props.postId });
+      setTags(res ?? []);
+    } catch (e) { setTagsError(String(e)); setTags([]); }
+    finally { setTagsLoading(false); setTagsTried(true); }
   };
 
-  // Distribution state
+  // ── Distribute ────────────────────────────────────────────────────────────
   const [snippets, setSnippets] = createSignal<Record<string, string>>({});
   const [snippetsLoading, setSnippetsLoading] = createSignal(false);
+  const [snippetsError, setSnippetsError] = createSignal('');
+  const [snippetsTried, setSnippetsTried] = createSignal(false);
+
   const [variants, setVariants] = createSignal<BlogVariant[]>([]);
   const [adaptLoading, setAdaptLoading] = createSignal(false);
+  const [adaptError, setAdaptError] = createSignal('');
   const [adaptPlatform, setAdaptPlatform] = createSignal('devto');
+
   const [toneLoading, setToneLoading] = createSignal(false);
+  const [toneError, setToneError] = createSignal('');
   const [tonePlatform, setTonePlatform] = createSignal('balanced');
 
   const runSnippets = async () => {
     if (!props.postId) return;
-    setSnippetsLoading(true);
+    setSnippetsLoading(true); setSnippetsError(''); setSnippetsTried(false);
     try {
       const s = await invoke<Record<string, string> | null>('blog_llm_snippets', { postId: props.postId });
       setSnippets(s ?? {});
-    } catch { } finally { setSnippetsLoading(false); }
+    } catch (e) { setSnippetsError(String(e)); setSnippets({}); }
+    finally { setSnippetsLoading(false); setSnippetsTried(true); }
   };
 
   const loadVariants = async () => {
     if (!props.postId) return;
     try { setVariants(await invoke<BlogVariant[]>('blog_get_variants', { postId: props.postId })); }
-    catch { }
+    catch { setVariants([]); }
   };
 
   const runAdapt = async () => {
     if (!props.postId) return;
-    setAdaptLoading(true);
+    setAdaptLoading(true); setAdaptError('');
     try {
       await invoke('blog_llm_adapt', { postId: props.postId, platform: adaptPlatform() });
       await loadVariants();
-    } catch { } finally { setAdaptLoading(false); }
+    } catch (e) { setAdaptError(String(e)); }
+    finally { setAdaptLoading(false); }
   };
 
   const runTone = async () => {
     if (!props.postId) return;
-    setToneLoading(true);
+    setToneLoading(true); setToneError('');
     try {
       await invoke('blog_llm_tone', { postId: props.postId, target: tonePlatform() });
       await loadVariants();
-    } catch { } finally { setToneLoading(false); }
+    } catch (e) { setToneError(String(e)); }
+    finally { setToneLoading(false); }
   };
 
   const deleteVariant = async (id: string) => {
-    await invoke('blog_delete_variant', { variantId: id }).catch(() => {});
+    try { await invoke('blog_delete_variant', { variantId: id }); }
+    catch { /* ignore */ }
     await loadVariants();
   };
 
   onMount(async () => {
+    // Check if any LLM endpoint is configured
+    try {
+      const endpoints = await invoke<LlmEndpoint[]>('llm_list_endpoints');
+      setHasEndpoint(endpoints.length > 0);
+    } catch { setHasEndpoint(false); }
+
+    // Load lint (rule-based, always works)
     await runLint();
+
+    // Load cached data
     if (props.postId) {
-      const s = await invoke<Record<string,string> | null>('blog_get_snippets', { postId: props.postId }).catch(() => null);
-      if (s) setSnippets(s);
+      try {
+        const s = await invoke<Record<string, string> | null>('blog_get_snippets', { postId: props.postId });
+        if (s) setSnippets(s);
+      } catch { /* ignore */ }
       await loadVariants();
     }
   });
@@ -166,33 +293,7 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
   ];
 
   const noPost = () => !props.postId;
-
-  const ActionBtn: Component<{ label: string; loading: boolean; onClick: () => void; color?: string }> = (p) => (
-    <button
-      onClick={p.onClick}
-      disabled={p.loading}
-      class={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors cursor-pointer
-              disabled:opacity-50 disabled:cursor-not-allowed
-              ${(p.color ?? 'sky') === 'sky'
-                ? 'bg-sky-50 dark:bg-sky-900/20 border-sky-200 dark:border-sky-800 text-sky-700 dark:text-sky-300 hover:bg-sky-100'
-                : 'bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
-              }`}
-    >
-      {p.loading ? '…' : p.label}
-    </button>
-  );
-
-  const ResultBox: Component<{ content: string; onCopy?: () => void }> = (p) => (
-    <div class="relative mt-2 p-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
-      {p.content}
-      <Show when={p.onCopy}>
-        <button
-          onClick={p.onCopy}
-          class="absolute top-2 right-2 px-2 py-0.5 text-[10px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded text-gray-500 hover:text-gray-800 dark:hover:text-gray-200"
-        >Copy</button>
-      </Show>
-    </div>
-  );
+  const noLlm = () => hasEndpoint() === false;
 
   return (
     <div class="flex flex-col h-full bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 w-80 shrink-0">
@@ -229,13 +330,16 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
           <p class="text-xs text-gray-400 text-center pt-8">Open a post to use the assistant.</p>
         </Show>
 
-        {/* LINT TAB */}
+        {/* ── LINT TAB ──────────────────────────────────────────────────── */}
         <Show when={tab() === 'lint' && !noPost()}>
           <div class="flex items-center justify-between">
             <span class="text-xs font-semibold text-gray-600 dark:text-gray-300">Rule-Based Checks</span>
             <ActionBtn label="↻ Re-run" loading={lintLoading()} onClick={runLint} color="gray" />
           </div>
-          <Show when={lintIssues().length === 0 && !lintLoading()}>
+          <Show when={lintError()}>
+            <ErrorNote msg={lintError()} />
+          </Show>
+          <Show when={lintRan() && lintIssues().length === 0 && !lintLoading() && !lintError()}>
             <p class="text-xs text-green-600 dark:text-green-400">✓ No issues found.</p>
           </Show>
           <For each={lintIssues()}>
@@ -256,14 +360,20 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
           </For>
         </Show>
 
-        {/* WRITING TAB */}
+        {/* ── WRITING TAB ───────────────────────────────────────────────── */}
         <Show when={tab() === 'writing' && !noPost()}>
-          {/* Titles */}
+          <Show when={noLlm()}>
+            <NoEndpointBanner />
+          </Show>
+
+          {/* Title Generator */}
           <div>
             <div class="flex items-center justify-between mb-2">
               <span class="text-xs font-semibold text-gray-600 dark:text-gray-300">Title Generator</span>
               <ActionBtn label="Generate" loading={titlesLoading()} onClick={runTitles} />
             </div>
+            <Show when={titlesError()}><ErrorNote msg={titlesError()} /></Show>
+            <EmptyNote tried={titlesTried() && titles().length === 0 && !titlesError()} />
             <Show when={titles().length > 0}>
               <div class="space-y-2">
                 <For each={titles()}>
@@ -282,12 +392,14 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
             </Show>
           </div>
 
-          {/* Hook */}
+          {/* Hook Rewriter */}
           <div class="border-t border-gray-100 dark:border-gray-700 pt-3">
             <div class="flex items-center justify-between mb-2">
               <span class="text-xs font-semibold text-gray-600 dark:text-gray-300">Hook Rewriter</span>
               <ActionBtn label="Rewrite" loading={hookLoading()} onClick={runHook} />
             </div>
+            <Show when={hookError()}><ErrorNote msg={hookError()} /></Show>
+            <EmptyNote tried={hookTried() && hook().length === 0 && !hookError()} />
             <Show when={hook().length > 0}>
               <div class="space-y-2">
                 <For each={hook()}>
@@ -305,23 +417,27 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
             </Show>
           </div>
 
-          {/* Conclusion */}
+          {/* Conclusion + CTA */}
           <div class="border-t border-gray-100 dark:border-gray-700 pt-3">
             <div class="flex items-center justify-between mb-2">
               <span class="text-xs font-semibold text-gray-600 dark:text-gray-300">Conclusion + CTA</span>
               <ActionBtn label="Generate" loading={conclusionLoading()} onClick={runConclusion} />
             </div>
+            <Show when={conclusionError()}><ErrorNote msg={conclusionError()} /></Show>
+            <EmptyNote tried={conclusionTried() && !conclusion() && !conclusionError()} />
             <Show when={conclusion()}>
               <ResultBox content={conclusion()} onCopy={() => navigator.clipboard.writeText(conclusion())} />
             </Show>
           </div>
 
-          {/* Grammar */}
+          {/* Grammar & Style */}
           <div class="border-t border-gray-100 dark:border-gray-700 pt-3">
             <div class="flex items-center justify-between mb-2">
               <span class="text-xs font-semibold text-gray-600 dark:text-gray-300">Grammar & Style</span>
               <ActionBtn label="Analyse" loading={grammarLoading()} onClick={runGrammar} />
             </div>
+            <Show when={grammarError()}><ErrorNote msg={grammarError()} /></Show>
+            <EmptyNote tried={grammarTried() && grammar().length === 0 && !grammarError()} />
             <Show when={grammar().length > 0}>
               <div class="space-y-1">
                 <For each={grammar()}>
@@ -336,45 +452,78 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
           </div>
         </Show>
 
-        {/* SEO TAB */}
+        {/* ── SEO TAB ───────────────────────────────────────────────────── */}
         <Show when={tab() === 'seo' && !noPost()}>
+          <Show when={noLlm()}>
+            <NoEndpointBanner />
+          </Show>
+
+          {/* Meta Description */}
           <div>
-            <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center justify-between mb-1">
               <span class="text-xs font-semibold text-gray-600 dark:text-gray-300">Meta Description</span>
-              <ActionBtn label="Generate" loading={metaLoading()} onClick={runMetaDesc} />
+              <div class="flex gap-1">
+                <ActionBtn label="Generate" loading={metaLoading()} onClick={() => runMetaDesc(false)} color="gray" />
+                <ActionBtn label="Generate & Save" loading={metaLoading()} onClick={() => runMetaDesc(true)} />
+              </div>
             </div>
+            <p class="text-[10px] text-gray-400 mb-2">"Generate & Save" overwrites the post excerpt.</p>
+            <Show when={metaError()}><ErrorNote msg={metaError()} /></Show>
+            <EmptyNote tried={metaTried() && !metaDesc() && !metaError()} />
             <Show when={metaDesc()}>
               <ResultBox content={metaDesc()} onCopy={() => navigator.clipboard.writeText(metaDesc())} />
-              <p class="text-[10px] text-green-600 dark:text-green-400 mt-1">✓ Saved to post excerpt</p>
+              <div class="flex items-center justify-between mt-1">
+                <span class={`text-[10px] ${metaDesc().length > 160 ? 'text-red-500' : metaDesc().length >= 140 ? 'text-green-600' : 'text-gray-400'}`}>
+                  {metaDesc().length} chars {metaDesc().length > 160 ? '(too long)' : metaDesc().length >= 140 ? '(ideal)' : '(short)'}
+                </span>
+                <Show when={metaSaved()}>
+                  <span class="text-[10px] text-green-600 dark:text-green-400">✓ Saved to excerpt</span>
+                </Show>
+              </div>
             </Show>
           </div>
 
+          {/* Tag Suggestions */}
           <div class="border-t border-gray-100 dark:border-gray-700 pt-3">
             <div class="flex items-center justify-between mb-2">
               <span class="text-xs font-semibold text-gray-600 dark:text-gray-300">Tag Suggestions</span>
               <ActionBtn label="Suggest" loading={tagsLoading()} onClick={runTags} />
             </div>
+            <Show when={tagsError()}><ErrorNote msg={tagsError()} /></Show>
+            <EmptyNote tried={tagsTried() && tags().length === 0 && !tagsError()} />
             <Show when={tags().length > 0}>
               <div class="flex flex-wrap gap-1 mt-2">
                 <For each={tags()}>
                   {(tag) => (
-                    <span class="px-2 py-0.5 bg-sky-50 dark:bg-sky-900/30 border border-sky-200 dark:border-sky-800 text-sky-700 dark:text-sky-300 text-[11px] rounded-full">
+                    <button
+                      onClick={() => navigator.clipboard.writeText(tag)}
+                      title="Click to copy"
+                      class="px-2 py-0.5 bg-sky-50 dark:bg-sky-900/30 border border-sky-200 dark:border-sky-800 text-sky-700 dark:text-sky-300 text-[11px] rounded-full hover:bg-sky-100 cursor-copy"
+                    >
                       {tag}
-                    </span>
+                    </button>
                   )}
                 </For>
               </div>
+              <p class="text-[10px] text-gray-400 mt-1">Click any tag to copy it.</p>
             </Show>
           </div>
         </Show>
 
-        {/* DISTRIBUTE TAB */}
+        {/* ── DISTRIBUTE TAB ────────────────────────────────────────────── */}
         <Show when={tab() === 'distribute' && !noPost()}>
+          <Show when={noLlm()}>
+            <NoEndpointBanner />
+          </Show>
+
+          {/* Social Snippets */}
           <div>
             <div class="flex items-center justify-between mb-2">
               <span class="text-xs font-semibold text-gray-600 dark:text-gray-300">Social Snippets</span>
               <ActionBtn label="Generate All" loading={snippetsLoading()} onClick={runSnippets} />
             </div>
+            <Show when={snippetsError()}><ErrorNote msg={snippetsError()} /></Show>
+            <EmptyNote tried={snippetsTried() && Object.keys(snippets()).length === 0 && !snippetsError()} />
             <Show when={Object.keys(snippets()).length > 0}>
               <div class="space-y-2">
                 <For each={Object.entries(snippets())}>
@@ -392,6 +541,7 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
             </Show>
           </div>
 
+          {/* Platform Adapter */}
           <div class="border-t border-gray-100 dark:border-gray-700 pt-3">
             <span class="text-xs font-semibold text-gray-600 dark:text-gray-300 block mb-2">Platform Adapter</span>
             <div class="flex gap-2">
@@ -408,8 +558,13 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
               </select>
               <ActionBtn label="Adapt" loading={adaptLoading()} onClick={runAdapt} />
             </div>
+            <Show when={adaptError()}><ErrorNote msg={adaptError()} /></Show>
+            <Show when={adaptLoading()}>
+              <p class="text-[10px] text-gray-400 mt-1 italic">Rewriting post… this may take up to 90 seconds.</p>
+            </Show>
           </div>
 
+          {/* Tone Rewrite */}
           <div class="border-t border-gray-100 dark:border-gray-700 pt-3">
             <span class="text-xs font-semibold text-gray-600 dark:text-gray-300 block mb-2">Tone Rewrite</span>
             <div class="flex gap-2">
@@ -424,8 +579,13 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
               </select>
               <ActionBtn label="Rewrite" loading={toneLoading()} onClick={runTone} />
             </div>
+            <Show when={toneError()}><ErrorNote msg={toneError()} /></Show>
+            <Show when={toneLoading()}>
+              <p class="text-[10px] text-gray-400 mt-1 italic">Rewriting post… this may take up to 90 seconds.</p>
+            </Show>
           </div>
 
+          {/* Saved Variants */}
           <Show when={variants().length > 0}>
             <div class="border-t border-gray-100 dark:border-gray-700 pt-3">
               <span class="text-xs font-semibold text-gray-600 dark:text-gray-300 block mb-2">Saved Variants ({variants().length})</span>
