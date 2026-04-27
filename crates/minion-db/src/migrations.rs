@@ -36,6 +36,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("016_blog_draft_content", migrate_016_blog_draft_content),
         ("017_fitness_gfit_columns", migrate_017_fitness_gfit_columns),
         ("018_blog_llm", migrate_018_blog_llm),
+        ("019_health_extract", migrate_019_health_extract),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -1199,6 +1200,63 @@ fn migrate_018_blog_llm(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_019_health_extract(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS prescriptions (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            source_file_id TEXT REFERENCES file_manifest(id) ON DELETE SET NULL,
+            prescribed_date TEXT NOT NULL,
+            prescriber_name TEXT,
+            prescriber_specialty TEXT,
+            facility_name TEXT,
+            location_city TEXT,
+            diagnosis_text TEXT,
+            raw_text TEXT,
+            confirmed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS prescription_items (
+            id TEXT PRIMARY KEY,
+            prescription_id TEXT NOT NULL REFERENCES prescriptions(id) ON DELETE CASCADE,
+            drug_name TEXT NOT NULL,
+            dosage TEXT,
+            frequency TEXT,
+            duration_days INTEGER,
+            instructions TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS structured_lab_results (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+            source_file_id TEXT REFERENCES file_manifest(id) ON DELETE SET NULL,
+            lab_name TEXT,
+            report_date TEXT NOT NULL,
+            location_city TEXT,
+            confirmed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS structured_lab_values (
+            id TEXT PRIMARY KEY,
+            result_id TEXT NOT NULL REFERENCES structured_lab_results(id) ON DELETE CASCADE,
+            test_name TEXT NOT NULL,
+            value_text TEXT NOT NULL,
+            value_numeric REAL,
+            unit TEXT,
+            reference_low REAL,
+            reference_high REAL,
+            flag TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_prescriptions_patient ON prescriptions(patient_id);
+        CREATE INDEX IF NOT EXISTS idx_lab_results_patient ON structured_lab_results(patient_id);
+        CREATE INDEX IF NOT EXISTS idx_lab_values_result ON structured_lab_values(result_id);
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1317,7 +1375,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 18);
+        assert_eq!(count, 19);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn
@@ -1451,6 +1509,55 @@ mod tests {
              VALUES ('v1','p1','test','Test','content')",
             [],
         ).expect("blog_post_variants insert failed");
+    }
+
+    #[test]
+    fn test_migration_019_health_extract_schema() {
+        let conn = setup_test_db();
+        run(&conn).expect("migrations failed");
+
+        for table in &[
+            "prescriptions",
+            "prescription_items",
+            "structured_lab_results",
+            "structured_lab_values",
+        ] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            assert!(exists, "table {} missing after migration 019", table);
+        }
+
+        // Insert test data without FK enforcement (source_file_id FK references a table that
+        // is not yet created in the migration sequence; ON DELETE SET NULL means it's optional).
+        conn.execute(
+            "INSERT INTO patients (id, phone_number, full_name, relationship, is_primary)
+             VALUES ('p1', '+10000000001', 'Test Patient', 'self', 0)",
+            [],
+        )
+        .expect("insert patient failed");
+        conn.execute(
+            "INSERT INTO prescriptions (id, patient_id, prescribed_date) VALUES ('rx1', 'p1', '2026-01-01')",
+            [],
+        )
+        .expect("insert prescription failed");
+        conn.execute(
+            "INSERT INTO prescription_items (id, prescription_id, drug_name) VALUES ('ri1', 'rx1', 'TestDrug')",
+            [],
+        )
+        .expect("insert prescription_item failed");
+
+        // Enable FK enforcement for the cascade test and verify patient delete cascades.
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute("DELETE FROM patients WHERE id = 'p1'", []).expect("delete patient failed");
+        let rx_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM prescriptions WHERE id = 'rx1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rx_count, 0, "prescription should cascade on patient delete");
     }
 
     #[test]
