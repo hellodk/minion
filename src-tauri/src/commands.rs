@@ -364,6 +364,16 @@ pub async fn set_config(
                 state.config.ui.animations = enabled;
             }
         }
+        // AI / Health Vault Ollama settings (stored directly in config table)
+        "ai_ollama_url" | "ai_model" => {
+            let v = value.as_str().unwrap_or("").to_string();
+            let conn = state.db.get().map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)",
+                rusqlite::params![key, v],
+            ).map_err(|e| e.to_string())?;
+            return Ok(());
+        }
         _ => return Err(format!("Unknown config key: {}", key)),
     }
 

@@ -12,6 +12,7 @@ const Settings: Component = () => {
   const [aiTestStatus, setAiTestStatus] = createSignal<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [aiTestMessage, setAiTestMessage] = createSignal('');
   const [aiSaving, setAiSaving] = createSignal(false);
+  const [aiDiscoveredModels, setAiDiscoveredModels] = createSignal<string[]>([]);
 
   // Google Fit state
   const [gfitConnected, setGfitConnected] = createSignal(false);
@@ -348,13 +349,28 @@ const Settings: Component = () => {
 
           <div>
             <label class="block text-sm font-medium mb-2">Model Name</label>
-            <input
-              type="text"
-              class="input w-full"
-              value={aiModel()}
-              onInput={(e) => setAiModel(e.currentTarget.value)}
-              placeholder="llama3.2:3b"
-            />
+            <Show
+              when={aiDiscoveredModels().length > 0}
+              fallback={
+                <input
+                  type="text"
+                  class="input w-full"
+                  value={aiModel()}
+                  onInput={(e) => setAiModel(e.currentTarget.value)}
+                  placeholder="llama3.2:3b — click Test Connection to auto-populate"
+                />
+              }
+            >
+              <select
+                class="input w-full"
+                value={aiModel()}
+                onChange={(e) => setAiModel(e.currentTarget.value)}
+              >
+                <For each={aiDiscoveredModels()}>
+                  {(m) => <option value={m}>{m}</option>}
+                </For>
+              </select>
+            </Show>
           </div>
 
           <div class="flex items-center gap-3">
@@ -364,11 +380,14 @@ const Settings: Component = () => {
               onClick={async () => {
                 setAiTestStatus('testing');
                 setAiTestMessage('');
+                setAiDiscoveredModels([]);
                 try {
                   const result = await invoke<string>('ai_test_connection', { url: ollamaUrl() });
                   const parsed = JSON.parse(result);
-                  const models = parsed.models?.map((m: any) => m.name).join(', ') || 'none';
-                  setAiTestMessage(`Connected! Available models: ${models}`);
+                  const models: string[] = parsed.models?.map((m: any) => m.name) ?? [];
+                  setAiDiscoveredModels(models);
+                  if (models.length > 0 && !aiModel()) setAiModel(models[0]);
+                  setAiTestMessage(`Connected! ${models.length} model(s) found.`);
                   setAiTestStatus('success');
                 } catch (e: any) {
                   setAiTestMessage(String(e));
