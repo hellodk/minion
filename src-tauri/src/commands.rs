@@ -4758,7 +4758,8 @@ const GFIT_SCOPE: &str = concat!(
     "https://www.googleapis.com/auth/fitness.heart_rate.read ",
     "https://www.googleapis.com/auth/fitness.blood_glucose.read ",
     "https://www.googleapis.com/auth/fitness.oxygen_saturation.read ",
-    "https://www.googleapis.com/auth/fitness.nutrition.read",
+    "https://www.googleapis.com/auth/fitness.nutrition.read ",
+    "https://www.googleapis.com/auth/fitness.location.read",  // required for distance.delta
 );
 
 fn parse_gfit_oauth_callback(buf: &[u8]) -> Result<(String, String), String> {
@@ -5167,13 +5168,15 @@ pub async fn gfit_sync_inner(
     let now_ms = chrono::Utc::now().timestamp_millis();
     let start_ms = now_ms - days_back * 86_400_000;
 
-    // Aggregate body: fetch all metrics in one request per day bucket
+    // Aggregate body: fetch all metrics in one request per day bucket.
+    // Note: distance.delta requires fitness.location.read scope (added to GFIT_SCOPE).
+    // Existing tokens without that scope will 403 on distance — it is intentionally
+    // omitted here and will be populated on next re-authentication.
     let agg_body = serde_json::json!({
         "aggregateBy": [
             {"dataTypeName": "com.google.step_count.delta"},
             {"dataTypeName": "com.google.heart_rate.bpm"},
             {"dataTypeName": "com.google.calories.expended"},
-            {"dataTypeName": "com.google.distance.delta"},
             {"dataTypeName": "com.google.active_minutes"},
             {"dataTypeName": "com.google.weight"},
             {"dataTypeName": "com.google.sleep.segment"},

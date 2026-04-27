@@ -305,6 +305,7 @@ pub fn run() {
             llm_commands::llm_create_endpoint,
             llm_commands::llm_delete_endpoint,
             llm_commands::llm_test_endpoint,
+            llm_commands::llm_list_models,
             // Health Vault classification + extraction (week 3)
             health_classify::health_classify_pending,
             health_classify::health_reclassify_file,

@@ -52,6 +52,8 @@ const Settings: Component = () => {
   const [newLlmModel, setNewLlmModel] = createSignal('');
   const [llmFormSaving, setLlmFormSaving] = createSignal(false);
   const [llmFormError, setLlmFormError] = createSignal<string | null>(null);
+  const [llmDiscoveredModels, setLlmDiscoveredModels] = createSignal<string[]>([]);
+  const [llmDetecting, setLlmDetecting] = createSignal(false);
 
   const LLM_PROVIDER_HINTS: Record<string, { url: string; model: string }> = {
     ollama: { url: 'http://localhost:11434', model: 'llama3.2:3b' },
@@ -99,7 +101,45 @@ const Settings: Component = () => {
     setNewLlmBaseUrl('');
     setNewLlmApiKey('');
     setNewLlmModel('');
+    setLlmDiscoveredModels([]);
     setLlmFormError(null);
+  };
+
+  const detectLlmModels = async (endpointId?: string) => {
+    // Detect models for a saved endpoint OR by saving a temp one first
+    setLlmDetecting(true);
+    setLlmFormError(null);
+    try {
+      if (endpointId) {
+        const models = await invoke<string[]>('llm_list_models', { endpointId });
+        // Update the endpoint's status display inline (no signal needed, just reload)
+        setLlmDiscoveredModels(models);
+        if (models.length > 0 && !newLlmModel()) setNewLlmModel(models[0]);
+      } else {
+        if (!newLlmBaseUrl().trim()) { setLlmFormError('Enter a Base URL first.'); return; }
+        // Create temp endpoint, detect, delete it
+        const tmp = await invoke<LlmEndpoint>('llm_create_endpoint', {
+          request: {
+            name: '__detect_tmp__',
+            provider_type: newLlmProvider(),
+            base_url: newLlmBaseUrl().trim(),
+            api_key: newLlmApiKey().trim() || null,
+            default_model: null,
+          },
+        });
+        try {
+          const models = await invoke<string[]>('llm_list_models', { endpointId: tmp.id });
+          setLlmDiscoveredModels(models);
+          if (models.length > 0 && !newLlmModel()) setNewLlmModel(models[0]);
+        } finally {
+          await invoke('llm_delete_endpoint', { endpointId: tmp.id }).catch(() => {});
+        }
+      }
+    } catch (e) {
+      setLlmFormError('Model detection failed: ' + String(e));
+    } finally {
+      setLlmDetecting(false);
+    }
   };
 
   const saveLlmEndpoint = async () => {
@@ -414,6 +454,20 @@ const Settings: Component = () => {
                         {llmTestStatus()[ep.id] === 'testing' ? 'Testing…' : 'Test'}
                       </button>
                       <button
+                        class="btn btn-secondary text-xs text-sky-600 dark:text-sky-400"
+                        onClick={async () => {
+                          try {
+                            const models = await invoke<string[]>('llm_list_models', { endpointId: ep.id });
+                            alert(`Available models:\n${models.join('\n')}`);
+                          } catch (e) {
+                            alert('Detection failed: ' + String(e));
+                          }
+                        }}
+                        title="Detect available models"
+                      >
+                        Models
+                      </button>
+                      <button
                         class="btn btn-secondary text-xs text-red-600"
                         onClick={() => deleteLlmEndpoint(ep.id)}
                       >
@@ -480,14 +534,39 @@ const Settings: Component = () => {
                     />
                   </div>
                   <div>
-                    <label class="block text-xs font-medium mb-1">Default model</label>
-                    <input
-                      type="text"
-                      class="input w-full"
-                      placeholder={LLM_PROVIDER_HINTS[newLlmProvider()]?.model || ''}
-                      value={newLlmModel()}
-                      onInput={(e) => setNewLlmModel(e.currentTarget.value)}
-                    />
+                    <div class="flex items-center justify-between mb-1">
+                      <label class="text-xs font-medium">Default model</label>
+                      <button
+                        type="button"
+                        class="text-xs text-sky-600 dark:text-sky-400 hover:underline disabled:opacity-50"
+                        disabled={!newLlmBaseUrl().trim() || llmDetecting()}
+                        onClick={() => detectLlmModels()}
+                      >
+                        {llmDetecting() ? 'Detecting…' : '⟳ Detect models'}
+                      </button>
+                    </div>
+                    <Show
+                      when={llmDiscoveredModels().length > 0}
+                      fallback={
+                        <input
+                          type="text"
+                          class="input w-full"
+                          placeholder={LLM_PROVIDER_HINTS[newLlmProvider()]?.model || 'e.g. llama3'}
+                          value={newLlmModel()}
+                          onInput={(e) => setNewLlmModel(e.currentTarget.value)}
+                        />
+                      }
+                    >
+                      <select
+                        class="input w-full"
+                        value={newLlmModel()}
+                        onChange={(e) => setNewLlmModel(e.currentTarget.value)}
+                      >
+                        <For each={llmDiscoveredModels()}>
+                          {(m) => <option value={m}>{m}</option>}
+                        </For>
+                      </select>
+                    </Show>
                   </div>
                 </div>
                 <Show when={llmFormError()}>

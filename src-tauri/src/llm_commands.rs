@@ -156,3 +156,89 @@ pub async fn llm_test_endpoint(
     let provider = create_provider(cfg);
     provider.health_check().await.map_err(|e| e.to_string())
 }
+
+/// Probe the endpoint and return the list of available model names.
+/// Supports Ollama (/api/tags) and OpenAI-compatible (/v1/models).
+/// Cloud providers (Anthropic, Gemini, OpenAI) return a curated static list.
+#[tauri::command]
+pub async fn llm_list_models(
+    state: State<'_, AppStateHandle>,
+    endpoint_id: String,
+) -> Result<Vec<String>, String> {
+    let (provider_type, base_url, api_key): (String, String, Option<String>) = {
+        let st = state.read().await;
+        let conn = st.db.get().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT provider_type, base_url, api_key_encrypted FROM llm_endpoints WHERE id = ?1",
+            rusqlite::params![endpoint_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| e.to_string())?
+    };
+
+    let base = base_url.trim_end_matches('/');
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match provider_type.as_str() {
+        "ollama" => {
+            // Ollama: GET /api/tags → {"models":[{"name":"llama3"},...]}
+            let resp = client
+                .get(format!("{base}/api/tags"))
+                .send().await
+                .map_err(|e| format!("Cannot reach Ollama: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("Ollama /api/tags returned {}", resp.status()));
+            }
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            let models = json["models"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
+                .collect();
+            Ok(models)
+        }
+        "openai_compatible" | "airllm" => {
+            // OpenAI-compatible: GET /v1/models → {"data":[{"id":"model-name"},...]}
+            let mut req = client.get(format!("{base}/v1/models"));
+            if let Some(key) = &api_key {
+                if !key.is_empty() {
+                    req = req.bearer_auth(key);
+                }
+            }
+            let resp = req.send().await
+                .map_err(|e| format!("Cannot reach endpoint: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("Model list returned {}", resp.status()));
+            }
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            let models = json["data"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+                .collect();
+            Ok(models)
+        }
+        "openai" => Ok(vec![
+            "gpt-4o".into(), "gpt-4o-mini".into(),
+            "gpt-4-turbo".into(), "gpt-4".into(),
+            "gpt-3.5-turbo".into(),
+        ]),
+        "anthropic" => Ok(vec![
+            "claude-opus-4-7".into(),
+            "claude-sonnet-4-6".into(),
+            "claude-haiku-4-5-20251001".into(),
+        ]),
+        "google_gemini" => Ok(vec![
+            "gemini-2.5-pro".into(),
+            "gemini-2.0-flash".into(),
+            "gemini-1.5-flash".into(),
+            "gemini-1.5-pro".into(),
+        ]),
+        _ => Err(format!("Model discovery not supported for provider: {provider_type}")),
+    }
+}
