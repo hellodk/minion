@@ -65,19 +65,6 @@ interface Habit {
 }
 
 
-interface AiRecommendation {
-  category: string;
-  icon: string;
-  text: string;
-  color: string;
-}
-
-interface DoctorSuggestion {
-  specialty: string;
-  reason: string;
-  icon: string;
-}
-
 interface WorkoutResponse {
   id: string;
   name: string;
@@ -106,88 +93,6 @@ interface NutritionDaySummary {
   total_fat: number;
   meals: NutritionResponse[];
 }
-
-// ---------------------------------------------------------------------------
-// Mock data (structured for future Google Fit API integration)
-// ---------------------------------------------------------------------------
-
-const WEEKLY_STEPS = [
-  { day: 'Mon', steps: 9200 },
-  { day: 'Tue', steps: 7800 },
-  { day: 'Wed', steps: 11400 },
-  { day: 'Thu', steps: 6500 },
-  { day: 'Fri', steps: 8900 },
-  { day: 'Sat', steps: 12100 },
-  { day: 'Sun', steps: 8432 },
-];
-
-
-const AI_HEALTH_SCORES = [
-  { label: 'Sleep Quality', score: 78, color: 'bg-indigo-500' },
-  { label: 'Cardiovascular', score: 82, color: 'bg-red-500' },
-  { label: 'Activity Level', score: 65, color: 'bg-green-500' },
-  { label: 'Recovery', score: 71, color: 'bg-yellow-500' },
-  { label: 'Consistency', score: 88, color: 'bg-blue-500' },
-];
-
-const AI_RECOMMENDATIONS: AiRecommendation[] = [
-  {
-    category: 'Supplements',
-    icon: 'pill',
-    text: 'Based on your activity level, consider Vitamin D3 (2000 IU) and Magnesium Glycinate (400mg) before bed for improved recovery and sleep quality.',
-    color: 'text-purple-500',
-  },
-  {
-    category: 'Nutrition',
-    icon: 'nutrition',
-    text: 'Your recovery metrics suggest increasing protein intake to 1.6g/kg body weight. Add more omega-3 rich foods like salmon, walnuts, and flaxseed.',
-    color: 'text-green-500',
-  },
-  {
-    category: 'Exercise',
-    icon: 'exercise',
-    text: 'Your heart rate recovery is improving. You\'re ready to increase cardio intensity by 10%. Consider adding interval training 2x per week.',
-    color: 'text-orange-500',
-  },
-  {
-    category: 'Sleep',
-    icon: 'sleep',
-    text: 'Your deep sleep percentage is below optimal (23% vs 25% target). Avoid screens 1 hour before bed and keep room temperature at 18-19 C.',
-    color: 'text-indigo-500',
-  },
-  {
-    category: 'Medical',
-    icon: 'medical',
-    text: 'Your resting heart rate trend is healthy (62 BPM avg). Schedule an annual checkup if not done in the last 12 months.',
-    color: 'text-red-500',
-  },
-];
-
-const DOCTOR_SUGGESTIONS: DoctorSuggestion[] = [
-  {
-    specialty: 'Nutritionist',
-    reason: 'Optimize diet based on your activity level and recovery needs',
-    icon: 'nutrition',
-  },
-  {
-    specialty: 'Sports Medicine',
-    reason: 'Fine-tune training intensity and prevent overtraining',
-    icon: 'exercise',
-  },
-  {
-    specialty: 'Sleep Specialist',
-    reason: 'Address below-optimal deep sleep percentage',
-    icon: 'sleep',
-  },
-];
-
-const DEFAULT_HABITS: Habit[] = [
-  { id: '1', name: 'Exercise 30 min', streak: 12, completedToday: true },
-  { id: '2', name: 'Drink 8 glasses of water', streak: 5, completedToday: false },
-  { id: '3', name: 'Read for 30 minutes', streak: 8, completedToday: true },
-  { id: '4', name: 'Meditate 10 min', streak: 3, completedToday: false },
-  { id: '5', name: 'No sugar after 6 PM', streak: 15, completedToday: true },
-];
 
 // ---------------------------------------------------------------------------
 // Reusable sub-components
@@ -524,10 +429,9 @@ const DashboardTab: Component<{
 
   // Build weekly steps from recent metrics
   const weeklyStepsData = () => {
-    if (!props.hasRealData()) return WEEKLY_STEPS;
     const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const last7 = props.metrics().slice(0, 7).reverse();
-    if (last7.length === 0) return WEEKLY_STEPS;
+    if (last7.length === 0) return [] as { day: string; steps: number }[];
     return last7.map((m) => {
       const d = new Date(m.date);
       return { day: days[d.getDay()], steps: m.steps ?? 0 };
@@ -1194,88 +1098,43 @@ const AiAnalysisTab: Component<{
         </Show>
       </div>
 
-      {/* Health Score Breakdown */}
+      {/* AI Health Score Breakdown — placeholder until AI endpoint is configured */}
       <div class="card p-6">
-        <div class="flex items-center gap-2 mb-6">
+        <div class="flex items-center gap-2 mb-4">
           <Icon name="sparkle" class="w-5 h-5 text-minion-500" />
           <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">
             Health Score Breakdown
           </h3>
         </div>
-        <div class="space-y-4">
-          <For each={AI_HEALTH_SCORES}>
-            {(item) => (
-              <div>
-                <div class="flex items-center justify-between mb-1">
-                  <span class="text-sm font-medium text-gray-700 dark:text-gray-200">
-                    {item.label}
-                  </span>
-                  <span
-                    class="text-sm font-bold"
-                    classList={{
-                      'text-green-500': item.score >= 70,
-                      'text-yellow-500': item.score >= 40 && item.score < 70,
-                      'text-red-500': item.score < 40,
-                    }}
-                  >
-                    {item.score}/100
-                  </span>
-                </div>
-                <div class="w-full h-3 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
-                  <div
-                    class={`h-full rounded-full ${item.color} transition-all duration-700`}
-                    style={{ width: `${item.score}%` }}
-                  />
-                </div>
-              </div>
-            )}
-          </For>
-        </div>
-        <div class="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between">
-          <span class="text-sm text-gray-500 dark:text-gray-400">Overall Score</span>
-          <span class="text-2xl font-bold text-gray-900 dark:text-white">
-            {Math.round(AI_HEALTH_SCORES.reduce((a, s) => a + s.score, 0) / AI_HEALTH_SCORES.length)}/100
-          </span>
+        <div class="flex flex-col items-center justify-center py-8 gap-3 text-center">
+          <Icon name="sparkle" class="w-10 h-10 text-gray-300 dark:text-gray-600" />
+          <p class="text-sm text-gray-500 dark:text-gray-400 max-w-sm leading-relaxed">
+            Connect an AI endpoint in{' '}
+            <strong class="text-gray-700 dark:text-gray-300">Settings → AI Endpoints</strong>{' '}
+            to generate personalised health scores from your real data.
+          </p>
         </div>
       </div>
 
-      {/* AI Recommendations */}
-      <div>
+      {/* AI Recommendations — placeholder */}
+      <div class="card p-6">
         <div class="flex items-center gap-2 mb-4">
           <Icon name="sparkle" class="w-5 h-5 text-minion-500" />
           <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">
             AI Recommendations
           </h3>
         </div>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <For each={AI_RECOMMENDATIONS}>
-            {(rec) => (
-              <div class="card p-5">
-                <div class="flex items-center gap-3 mb-3">
-                  <div
-                    class={`p-2 rounded-lg ${rec.color}`}
-                    classList={{
-                      'bg-purple-100 dark:bg-purple-900/40': rec.category === 'Supplements',
-                      'bg-green-100 dark:bg-green-900/40': rec.category === 'Nutrition',
-                      'bg-orange-100 dark:bg-orange-900/40': rec.category === 'Exercise',
-                      'bg-indigo-100 dark:bg-indigo-900/40': rec.category === 'Sleep',
-                      'bg-red-100 dark:bg-red-900/40': rec.category === 'Medical',
-                    }}
-                  >
-                    <Icon name={rec.icon} class="w-5 h-5" />
-                  </div>
-                  <h4 class="font-medium text-gray-900 dark:text-white">{rec.category}</h4>
-                </div>
-                <p class="text-sm text-gray-600 dark:text-gray-300 leading-relaxed">
-                  {rec.text}
-                </p>
-              </div>
-            )}
-          </For>
+        <div class="flex flex-col items-center justify-center py-8 gap-3 text-center">
+          <Icon name="sparkle" class="w-10 h-10 text-gray-300 dark:text-gray-600" />
+          <p class="text-sm text-gray-500 dark:text-gray-400 max-w-sm leading-relaxed">
+            Connect an AI endpoint in{' '}
+            <strong class="text-gray-700 dark:text-gray-300">Settings → AI Endpoints</strong>{' '}
+            to generate personalised supplement, nutrition, and exercise recommendations.
+          </p>
         </div>
       </div>
 
-      {/* Suggested Doctors */}
+      {/* Suggested Consultations — placeholder */}
       <div class="card p-6">
         <div class="flex items-center gap-2 mb-4">
           <Icon name="medical" class="w-5 h-5 text-minion-500" />
@@ -1283,21 +1142,13 @@ const AiAnalysisTab: Component<{
             Suggested Consultations
           </h3>
         </div>
-        <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-          Based on your health profile, consider consulting:
-        </p>
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <For each={DOCTOR_SUGGESTIONS}>
-            {(doc) => (
-              <div class="p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-minion-300 dark:hover:border-minion-600 transition-colors">
-                <div class="flex items-center gap-2 mb-2">
-                  <Icon name={doc.icon} class="w-5 h-5 text-minion-500" />
-                  <h4 class="font-medium text-gray-900 dark:text-white text-sm">{doc.specialty}</h4>
-                </div>
-                <p class="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">{doc.reason}</p>
-              </div>
-            )}
-          </For>
+        <div class="flex flex-col items-center justify-center py-8 gap-3 text-center">
+          <Icon name="medical" class="w-10 h-10 text-gray-300 dark:text-gray-600" />
+          <p class="text-sm text-gray-500 dark:text-gray-400 max-w-sm leading-relaxed">
+            Connect an AI endpoint in{' '}
+            <strong class="text-gray-700 dark:text-gray-300">Settings → AI Endpoints</strong>{' '}
+            to receive personalised specialist consultation recommendations based on your health trends.
+          </p>
         </div>
       </div>
     </div>
@@ -1858,7 +1709,7 @@ const TABS: { id: TabId; label: string }[] = [
 
 const Fitness: Component = () => {
   const [activeTab, setActiveTab] = createSignal<TabId>('dashboard');
-  const [habits, setHabits] = createSignal<Habit[]>(DEFAULT_HABITS);
+  const [habits, setHabits] = createSignal<Habit[]>([]);
 
   // Real data from backend
   const [dashboard, setDashboard] = createSignal<FitnessDashboard | null>(null);
