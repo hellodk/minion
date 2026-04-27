@@ -300,6 +300,91 @@ const CircularProgress: Component<{
   );
 };
 
+const EmptyState: Component<{ icon: string; message: string }> = (props) => (
+  <div class="flex flex-col items-center justify-center py-16 gap-4 text-center">
+    <div class="p-4 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-400">
+      <Icon name={props.icon} class="w-10 h-10" />
+    </div>
+    <p class="text-sm text-gray-500 dark:text-gray-400 max-w-xs leading-relaxed">
+      {props.message}
+    </p>
+  </div>
+);
+
+const SyncStatusBar: Component<{ onSync: () => Promise<void> }> = (props) => {
+  const [status, setStatus] = createSignal<GfitSyncStatus | null>(null);
+  const [syncing, setSyncing] = createSignal(false);
+
+  const load = async () => {
+    try {
+      const s = await invoke<GfitSyncStatus>('gfit_get_sync_status');
+      setStatus(s);
+    } catch {
+      // ignore — command may not exist in older builds
+    }
+  };
+
+  onMount(load);
+
+  const relativeTime = () => {
+    const s = status();
+    if (!s?.last_synced) return 'never';
+    const diff = Date.now() - new Date(s.last_synced).getTime();
+    const mins = Math.floor(diff / 60_000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins} min ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
+  };
+
+  const handleSync = async () => {
+    setSyncing(true);
+    try {
+      await props.onSync();
+      await load();
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  return (
+    <div class="flex items-center justify-between px-4 py-2 mb-4 rounded-lg
+                bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800
+                text-xs text-green-700 dark:text-green-300">
+      <div class="flex items-center gap-2">
+        <div class="w-1.5 h-1.5 rounded-full bg-green-500" />
+        <span>
+          Google Fit — last synced: <strong>{relativeTime()}</strong>
+          <Show when={(status()?.days_count ?? 0) > 0}>
+            {' '}({status()?.days_count} days)
+          </Show>
+        </span>
+        <Show when={status()?.running}>
+          <span class="animate-pulse ml-1">syncing…</span>
+        </Show>
+      </div>
+      <button
+        class="flex items-center gap-1 px-2 py-0.5 rounded bg-green-100 dark:bg-green-800
+               hover:bg-green-200 dark:hover:bg-green-700 transition-colors font-medium"
+        disabled={syncing() || status()?.running}
+        onClick={handleSync}
+        title="Sync Google Fit data now"
+      >
+        <svg
+          class={`w-3 h-3 ${syncing() ? 'animate-spin' : ''}`}
+          fill="none" stroke="currentColor" viewBox="0 0 24 24"
+        >
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003
+               8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+        {syncing() ? 'Syncing…' : '↻ Sync'}
+      </button>
+    </div>
+  );
+};
+
 /** Mini inline progress bar */
 const MiniBar: Component<{ value: number; max: number; colorClass?: string }> = (props) => {
   const pct = () => Math.min((props.value / props.max) * 100, 100);
