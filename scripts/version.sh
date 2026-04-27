@@ -58,7 +58,10 @@ update_version() {
     
     # Update workspace Cargo.toml
     sed -i "s/^version = \"$old_version\"/version = \"$new_version\"/" "$CARGO_TOML"
-    
+
+    # Update src-tauri/Cargo.toml (has its own version — controls env!("CARGO_PKG_VERSION") in binary)
+    sed -i "s/^version = \"$old_version\"/version = \"$new_version\"/" "src-tauri/Cargo.toml"
+
     # Update package.json
     if [ -f "$PACKAGE_JSON" ]; then
         sed -i "s/\"version\": \"$old_version\"/\"version\": \"$new_version\"/" "$PACKAGE_JSON"
