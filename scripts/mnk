@@ -1,0 +1,558 @@
+#!/usr/bin/env bash
+# ──────────────────────────────────────────────────────────────────────────────
+# mnk — Unified CLI for MINION Desktop App
+# ──────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ── Colors ────────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+info()    { echo -e "${BLUE}[info]${NC}  $*"; }
+success() { echo -e "${GREEN}[ok]${NC}    $*"; }
+warn()    { echo -e "${YELLOW}[warn]${NC}  $*"; }
+error()   { echo -e "${RED}[error]${NC} $*"; exit 1; }
+header()  { echo -e "\n${BOLD}${CYAN}── $* ──${NC}\n"; }
+
+PROMPT_RESULT=""
+
+_prompt_select() {
+    local prompt="$1"; shift
+    local options=("$@")
+    echo -e "\n${BOLD}${prompt}${NC}"
+    for i in "${!options[@]}"; do
+        echo -e "  ${CYAN}$((i+1)))${NC} ${options[$i]}"
+    done
+    local choice
+    while true; do
+        echo -en "${DIM}  Select [1-${#options[@]}]: ${NC}"
+        read -r choice </dev/tty || true
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#options[@]} )); then
+            echo -e "  ${GREEN}→${NC} ${options[$((choice-1))]}"
+            PROMPT_RESULT="${options[$((choice-1))]}"
+            return
+        fi
+        echo -e "  ${RED}Invalid. Try again.${NC}"
+    done
+}
+
+_prompt_input() {
+    local prompt="$1" default="${2:-}"
+    local value
+    echo -en "${DIM}  ${prompt}${default:+ [${default}]}: ${NC}"
+    read -r value </dev/tty || true
+    PROMPT_RESULT="${value:-$default}"
+}
+
+prompt_confirm() {
+    local reply
+    echo -en "${BOLD}  $1 (y/N): ${NC}"
+    read -r reply </dev/tty || true
+    [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+cd "$ROOT_DIR"
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+current_version() { grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/'; }
+
+db_path() {
+    # Installed app stores DB at ~/.minion/data/minion.db
+    echo "${HOME}/.minion/data/minion.db"
+}
+
+restore_node_modules() {
+    if [[ ! -d ui/node_modules ]]; then
+        info "Restoring frontend deps…"
+        pnpm install --prefix ui --frozen-lockfile
+    fi
+}
+
+latest_deb() {
+    find target/release/bundle/deb -name "*.deb" 2>/dev/null | sort -V | tail -1
+}
+
+disk_summary() {
+    df -h / | awk 'NR==2{printf "  Disk: %s used / %s total (%s full)\n", $3, $2, $5}'
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMMANDS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── mnk dev ───────────────────────────────────────────────────────────────────
+cmd_dev() {
+    header "Starting MINION dev server"
+    restore_node_modules
+    info "Launching cargo tauri dev (Ctrl+C to stop)…"
+    exec cargo tauri dev
+}
+
+# ── mnk test ─────────────────────────────────────────────────────────────────
+cmd_test() {
+    local sub="${1:-}"
+    shift 2>/dev/null || true
+
+    if [[ -z "$sub" ]]; then
+        _prompt_select "What would you like to test?" \
+            "all" "rust" "clippy" "fmt" "frontend"
+        sub="$PROMPT_RESULT"
+    fi
+
+    case "$sub" in
+        all)
+            cmd_test rust
+            cmd_test clippy
+            cmd_test fmt
+            cmd_test frontend
+            ;;
+        rust)
+            header "Rust tests"
+            cargo test --workspace
+            success "All Rust tests passed"
+            ;;
+        clippy)
+            header "Clippy"
+            cargo clippy --workspace -- -D warnings
+            success "Clippy clean"
+            ;;
+        fmt)
+            header "Format check"
+            cargo fmt --all -- --check
+            success "Formatting OK"
+            ;;
+        frontend)
+            header "Frontend typecheck + lint"
+            restore_node_modules
+            (cd ui && pnpm typecheck)
+            (cd ui && pnpm lint)
+            success "Frontend checks passed"
+            ;;
+        *)
+            error "Unknown test type: $sub  (all|rust|clippy|fmt|frontend)"
+            ;;
+    esac
+}
+
+# ── mnk build ─────────────────────────────────────────────────────────────────
+cmd_build() {
+    local sub="${1:-}"
+    shift 2>/dev/null || true
+
+    if [[ -z "$sub" ]]; then
+        _prompt_select "What would you like to build?" \
+            "release (deb+AppImage+rpm)" "debug" "frontend only"
+        sub="$PROMPT_RESULT"
+    fi
+
+    case "$sub" in
+        release*|deb*)
+            header "Building Tauri release bundles"
+            restore_node_modules
+            cargo tauri build
+            local deb; deb=$(latest_deb)
+            echo ""
+            info "Bundles:"
+            ls -lh target/release/bundle/deb/*.deb  2>/dev/null | awk '{print "    .deb      → " $NF " (" $5 ")"}'
+            ls -lh target/release/bundle/rpm/*.rpm  2>/dev/null | awk '{print "    .rpm      → " $NF " (" $5 ")"}' || true
+            ls -lh target/release/bundle/appimage/*.AppImage 2>/dev/null | awk '{print "    .AppImage → " $NF " (" $5 ")"}' || true
+            success "Build complete"
+            ;;
+        debug)
+            header "Debug build"
+            cargo build
+            success "Debug build complete: target/debug/"
+            ;;
+        frontend*)
+            header "Frontend build"
+            restore_node_modules
+            (cd ui && pnpm build)
+            success "Frontend built: ui/dist/"
+            ;;
+        *)
+            error "Unknown build target. Choose: release | debug | frontend"
+            ;;
+    esac
+}
+
+# ── mnk install ───────────────────────────────────────────────────────────────
+cmd_install() {
+    header "Install .deb"
+    local deb; deb=$(latest_deb)
+    if [[ -z "$deb" ]]; then
+        error "No .deb found in target/release/bundle/deb/. Run: mnk build release"
+    fi
+    info "Installing $deb…"
+    sudo dpkg -i "$deb"
+    success "MINION $(current_version) installed"
+}
+
+# ── mnk release ───────────────────────────────────────────────────────────────
+cmd_release() {
+    local bump="${1:-}"
+    shift 2>/dev/null || true
+
+    if [[ -z "$bump" ]]; then
+        _prompt_select "Version bump type:" "patch" "minor" "major"
+        bump="$PROMPT_RESULT"
+    fi
+
+    header "Release — $bump bump"
+
+    # Guard: clean working tree
+    if [[ -n "$(git status --porcelain)" ]]; then
+        error "Uncommitted changes detected. Commit or stash first."
+    fi
+
+    local branch; branch=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$branch" != "main" && "$branch" != "master" ]]; then
+        warn "Not on main/master (current: $branch)"
+        prompt_confirm "Continue anyway?" || { echo "Aborted."; exit 0; }
+    fi
+
+    local old_ver; old_ver=$(current_version)
+    IFS='.' read -r ma mi pa <<< "$old_ver"
+    local new_ver
+    case "$bump" in
+        patch) new_ver="$ma.$mi.$((pa+1))" ;;
+        minor) new_ver="$ma.$((mi+1)).0" ;;
+        major) new_ver="$((ma+1)).0.0" ;;
+    esac
+
+    echo ""
+    info "  Current : v$old_ver"
+    info "  New     : v$new_ver"
+    echo ""
+
+    local skip_tests=false
+    for arg in "$@"; do [[ "$arg" == "--skip-tests" ]] && skip_tests=true; done
+
+    if ! $skip_tests; then
+        cmd_test all
+    fi
+
+    # Bump version
+    info "Bumping version…"
+    "$SCRIPT_DIR/version.sh" "$bump"
+    git add Cargo.toml ui/package.json src-tauri/tauri.conf.json
+    git commit -m "chore: bump version to $new_ver"
+
+    # Build
+    cmd_build "release"
+
+    # Tag
+    git tag -a "v$new_ver" -m "Release v$new_ver"
+    info "Tagged: v$new_ver"
+
+    # Install
+    prompt_confirm "Install the new .deb now?" && cmd_install || true
+
+    # Clean
+    prompt_confirm "Clean build artifacts?" && cmd_clean || true
+
+    echo ""
+    echo -e "${BOLD}${GREEN}╔════════════════════════════════════╗${NC}"
+    printf  "${BOLD}${GREEN}║  ✓ MINION v%-24s║${NC}\n" "$new_ver released"
+    echo -e "${BOLD}${GREEN}╠════════════════════════════════════╣${NC}"
+    echo -e "${BOLD}${GREEN}║  git push && git push --tags       ║${NC}"
+    echo -e "${BOLD}${GREEN}╚════════════════════════════════════╝${NC}"
+}
+
+# ── mnk clean ─────────────────────────────────────────────────────────────────
+cmd_clean() {
+    local sub="${1:-}"
+
+    if [[ -z "$sub" ]]; then
+        _prompt_select "What to clean?" \
+            "all (debug + node_modules + cargo src)" \
+            "debug builds only" \
+            "node_modules only" \
+            "cargo registry src only" \
+            "docker (unused images + build cache)"
+        sub="$PROMPT_RESULT"
+    fi
+
+    header "Cleanup"
+    local before; before=$(df / | awk 'NR==2{print $3}')
+
+    case "$sub" in
+        all*)
+            rm -rf target/debug
+            rm -rf ui/node_modules
+            rm -rf ~/.cargo/registry/src
+            ;;
+        debug*)
+            rm -rf target/debug
+            ;;
+        node*)
+            rm -rf ui/node_modules
+            ;;
+        cargo*)
+            rm -rf ~/.cargo/registry/src
+            ;;
+        docker*)
+            docker image prune -f
+            docker builder prune -f
+            ;;
+        *)
+            error "Unknown clean target"
+            ;;
+    esac
+
+    local after; after=$(df / | awk 'NR==2{print $3}')
+    local freed_mb=$(( (before - after) / 1024 ))
+    success "Freed ~${freed_mb} MB"
+    disk_summary
+}
+
+# ── mnk push ─────────────────────────────────────────────────────────────────
+cmd_push() {
+    header "Git push"
+    local branch; branch=$(git rev-parse --abbrev-ref HEAD)
+    info "Branch: $branch"
+    git status --short | head -5
+
+    if [[ -n "$(git status --porcelain)" ]]; then
+        error "Uncommitted changes. Commit first."
+    fi
+
+    local tags=""
+    prompt_confirm "Push tags too (git push --tags)?" && tags="--tags"
+
+    git push origin "$branch"
+    [[ -n "$tags" ]] && git push --tags
+    success "Pushed $branch"
+}
+
+# ── mnk status ───────────────────────────────────────────────────────────────
+cmd_status() {
+    header "MINION Status"
+
+    echo -e "${BOLD}App${NC}"
+    local src_ver; src_ver=$(current_version)
+    local inst_ver; inst_ver=$(dpkg -l minion 2>/dev/null | awk '/^ii/{print $3}' || echo "not installed")
+    echo "  Source version  : $src_ver"
+    echo "  Installed       : $inst_ver"
+    local latest; latest=$(latest_deb 2>/dev/null || true)
+    [[ -n "$latest" ]] && echo "  Latest .deb     : $(basename "$latest")"
+
+    echo ""
+    echo -e "${BOLD}Git${NC}"
+    echo "  Branch  : $(git rev-parse --abbrev-ref HEAD)"
+    echo "  Commit  : $(git log --oneline -1)"
+    local changes; changes=$(git status --porcelain | wc -l)
+    echo "  Changes : $changes uncommitted file(s)"
+
+    echo ""
+    echo -e "${BOLD}Database${NC}"
+    local db; db=$(db_path)
+    if [[ -f "$db" ]]; then
+        local migs; migs=$(sqlite3 "$db" "SELECT COUNT(*) FROM schema_migrations;" 2>/dev/null || echo "?")
+        local posts; posts=$(sqlite3 "$db" "SELECT COUNT(*) FROM blog_posts;" 2>/dev/null || echo "?")
+        local patients; patients=$(sqlite3 "$db" "SELECT COUNT(*) FROM patients;" 2>/dev/null || echo "?")
+        local metrics; metrics=$(sqlite3 "$db" "SELECT COUNT(*) FROM fitness_metrics;" 2>/dev/null || echo "?")
+        echo "  Path      : $db"
+        echo "  Migrations: $migs"
+        echo "  Blog posts: $posts"
+        echo "  Patients  : $patients"
+        echo "  Fit days  : $metrics"
+    else
+        echo "  Not found (app not yet run)"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Google Fit${NC}"
+    if [[ -f "$db" ]]; then
+        local gfit_token; gfit_token=$(sqlite3 "$db" "SELECT COUNT(*) FROM config WHERE key='gfit_access_token';" 2>/dev/null || echo "0")
+        [[ "$gfit_token" -gt 0 ]] && echo "  Status: connected" || echo "  Status: not connected"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Disk${NC}"
+    disk_summary
+    local debug_sz; debug_sz=$(du -sh target/debug 2>/dev/null | cut -f1 || echo "0")
+    local nm_sz; nm_sz=$(du -sh ui/node_modules 2>/dev/null | cut -f1 || echo "0")
+    local cargo_sz; cargo_sz=$(du -sh ~/.cargo/registry/src 2>/dev/null | cut -f1 || echo "0")
+    echo "  target/debug        : $debug_sz"
+    echo "  ui/node_modules     : $nm_sz"
+    echo "  ~/.cargo/registry/src: $cargo_sz"
+}
+
+# ── mnk db ───────────────────────────────────────────────────────────────────
+cmd_db() {
+    local sub="${1:-}"
+    shift 2>/dev/null || true
+
+    local db; db=$(db_path)
+    if [[ ! -f "$db" ]]; then
+        error "Database not found at $db. Launch MINION first."
+    fi
+
+    if [[ -z "$sub" ]]; then
+        _prompt_select "Database action:" \
+            "shell (open sqlite3 REPL)" \
+            "migrations (list applied)" \
+            "tables (list all tables + row counts)" \
+            "gfit (Google Fit data summary)"
+        sub="$PROMPT_RESULT"
+    fi
+
+    case "$sub" in
+        shell*)
+            header "SQLite shell — $db"
+            info "Type .quit to exit"
+            sqlite3 "$db"
+            ;;
+        migrations*)
+            header "Applied migrations"
+            sqlite3 "$db" "SELECT version, name, applied_at FROM schema_migrations ORDER BY version;" \
+                | column -t -s '|'
+            ;;
+        tables*)
+            header "Tables + row counts"
+            sqlite3 "$db" "
+              SELECT name,
+                     (SELECT COUNT(*) FROM sqlite_master sm2
+                      WHERE sm2.type='table' AND sm2.name=sm.name)
+              FROM sqlite_master sm
+              WHERE type='table' AND name NOT LIKE 'sqlite_%'
+              ORDER BY name;" | while IFS='|' read -r tbl _; do
+                count=$(sqlite3 "$db" "SELECT COUNT(*) FROM \"$tbl\";" 2>/dev/null || echo "?")
+                printf "  %-40s %s rows\n" "$tbl" "$count"
+            done
+            ;;
+        gfit*)
+            header "Google Fit data"
+            sqlite3 "$db" "
+              SELECT 'Metrics days' as label, COUNT(*) as count FROM fitness_metrics WHERE source='gfit'
+              UNION ALL
+              SELECT 'Latest date', MAX(date) FROM fitness_metrics WHERE source='gfit'
+              UNION ALL
+              SELECT 'Workouts', COUNT(*) FROM fitness_workouts WHERE notes='Synced from Google Fit'
+              UNION ALL
+              SELECT 'Total steps', COALESCE(SUM(steps),0) FROM fitness_metrics WHERE source='gfit';" \
+                | column -t -s '|'
+            ;;
+        *)
+            error "Unknown db subcommand: $sub"
+            ;;
+    esac
+}
+
+# ── mnk version ───────────────────────────────────────────────────────────────
+cmd_version() {
+    local sub="${1:-show}"
+
+    case "$sub" in
+        show|get)
+            echo -e "${BOLD}MINION${NC} v$(current_version)"
+            ;;
+        patch|minor|major)
+            if [[ -n "$(git status --porcelain)" ]]; then
+                error "Uncommitted changes. Commit first."
+            fi
+            "$SCRIPT_DIR/version.sh" "$sub"
+            local new_ver; new_ver=$(current_version)
+            git add Cargo.toml ui/package.json src-tauri/tauri.conf.json
+            git commit -m "chore: bump version to $new_ver"
+            success "Version bumped to $new_ver"
+            ;;
+        *)
+            error "Usage: mnk version [show|patch|minor|major]"
+            ;;
+    esac
+}
+
+# ── mnk logs ─────────────────────────────────────────────────────────────────
+cmd_logs() {
+    header "MINION logs"
+    local log_dir="${HOME}/.minion"
+    if command -v journalctl &>/dev/null; then
+        info "systemd journal for minion:"
+        journalctl --user -u minion -n 100 -f 2>/dev/null \
+            || journalctl -n 100 -f --grep="minion" 2>/dev/null \
+            || warn "No systemd service found. Run MINION from terminal to see logs."
+    else
+        warn "journalctl not available. Run MINION from terminal to see stdout logs."
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+usage() {
+    cat <<EOF
+
+${BOLD}mnk${NC} — MINION CLI v$(current_version)
+
+${BOLD}Usage:${NC}  mnk [command] [subcommand] [flags]
+
+${BOLD}Commands:${NC}
+  ${CYAN}dev${NC}       Start dev server  (cargo tauri dev)
+  ${CYAN}test${NC}      Run tests         (all | rust | clippy | fmt | frontend)
+  ${CYAN}build${NC}     Build bundles     (release | debug | frontend)
+  ${CYAN}install${NC}   Install latest .deb via dpkg
+  ${CYAN}release${NC}   Full release      (bump → test → build → install → clean)
+  ${CYAN}clean${NC}     Remove artifacts  (debug | node_modules | cargo src | docker | all)
+  ${CYAN}push${NC}      Git push current branch (optionally with tags)
+  ${CYAN}status${NC}    Show app / git / DB / disk summary
+  ${CYAN}db${NC}        Database tools    (shell | migrations | tables | gfit)
+  ${CYAN}version${NC}   Show or bump version (show | patch | minor | major)
+  ${CYAN}logs${NC}      Tail MINION logs
+
+${BOLD}Examples:${NC}
+  mnk release patch          # bump patch, build .deb, install, clean
+  mnk release minor --skip-tests
+  mnk build release          # build .deb without bumping version
+  mnk install                # dpkg install the latest built .deb
+  mnk clean all              # free debug + node_modules + cargo src
+  mnk test all               # rust tests + clippy + fmt + frontend
+  mnk db shell               # open SQLite REPL on the live DB
+  mnk db gfit                # show Google Fit sync summary
+  mnk version patch          # bump patch version only (no build)
+
+Run ${BOLD}mnk${NC} with no arguments for interactive mode.
+
+EOF
+}
+
+main() {
+    local cmd="${1:-}"
+    shift 2>/dev/null || true
+
+    if [[ -z "$cmd" ]]; then
+        echo -e "\n${BOLD}${CYAN}mnk${NC} — MINION CLI v$(current_version)"
+        _prompt_select "What would you like to do?" \
+            "dev" "test" "build" "install" "release" "clean" "push" "status" "db" "version" "logs"
+        cmd="$PROMPT_RESULT"
+    fi
+
+    case "$cmd" in
+        dev)     cmd_dev "$@" ;;
+        test)    cmd_test "$@" ;;
+        build)   cmd_build "$@" ;;
+        install) cmd_install "$@" ;;
+        release) cmd_release "$@" ;;
+        clean)   cmd_clean "$@" ;;
+        push)    cmd_push "$@" ;;
+        status)  cmd_status "$@" ;;
+        db)      cmd_db "$@" ;;
+        version|-v|--version) cmd_version "$@" ;;
+        logs)    cmd_logs "$@" ;;
+        help|-h|--help) usage ;;
+        *) echo -e "${RED}[error]${NC} Unknown command: $cmd"; usage; exit 1 ;;
+    esac
+}
+
+main "$@"
