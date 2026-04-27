@@ -64,12 +64,6 @@ interface Habit {
   completedToday: boolean;
 }
 
-interface SleepStage {
-  label: string;
-  duration: string;
-  minutes: number;
-  color: string;
-}
 
 interface HeartRateZone {
   label: string;
@@ -135,22 +129,6 @@ const WEEKLY_STEPS = [
   { day: 'Sun', steps: 8432 },
 ];
 
-const WEEKLY_SLEEP = [
-  { day: 'Mon', hours: 7.2 },
-  { day: 'Tue', hours: 6.8 },
-  { day: 'Wed', hours: 7.5 },
-  { day: 'Thu', hours: 8.1 },
-  { day: 'Fri', hours: 6.5 },
-  { day: 'Sat', hours: 7.8 },
-  { day: 'Sun', hours: 7.4 },
-];
-
-const SLEEP_STAGES: SleepStage[] = [
-  { label: 'Deep Sleep', duration: '1h 42m', minutes: 102, color: 'bg-indigo-600' },
-  { label: 'Light Sleep', duration: '3h 18m', minutes: 198, color: 'bg-blue-400' },
-  { label: 'REM', duration: '1h 53m', minutes: 113, color: 'bg-purple-500' },
-  { label: 'Awake', duration: '0h 30m', minutes: 30, color: 'bg-gray-400' },
-];
 
 const HEART_RATE_ZONES: HeartRateZone[] = [
   { label: 'Rest', bpmRange: '< 100', minutes: 1120, maxMinutes: 1440, color: 'bg-blue-400' },
@@ -724,126 +702,161 @@ const DashboardTab: Component<{
   );
 };
 
-const SleepTab: Component = () => {
-  const maxSleep = Math.max(...WEEKLY_SLEEP.map((d) => d.hours));
-  const totalSleepMin = SLEEP_STAGES.reduce((a, s) => a + s.minutes, 0);
-
-  const SLEEP_QUALITY_FACTORS = [
-    { label: 'Consistency', score: 85, description: 'Regular bedtime schedule' },
-    { label: 'Duration', score: 78, description: '7h 23m avg (target: 7-9h)' },
-    { label: 'Efficiency', score: 93, description: '93% time asleep in bed' },
-    { label: 'Timing', score: 72, description: 'Slightly late average bedtime' },
-  ];
+const SleepTab: Component<{
+  metrics: () => FitnessMetricResponse[];
+  gfitConnected: () => boolean;
+  onSync: () => Promise<void>;
+}> = (props) => {
+  const sleepRows = () =>
+    props.metrics().filter((m) => m.sleep_hours !== null).slice(0, 7).reverse();
+  const hasSleepData = () => sleepRows().length > 0;
+  const latest = () => sleepRows()[sleepRows().length - 1] ?? null;
+  const maxSleep = () => Math.max(...sleepRows().map((m) => m.sleep_hours ?? 0), 1);
+  const sleepScore = () => {
+    const q = latest()?.sleep_quality;
+    if (q !== null && q !== undefined) return Math.round(q);
+    const h = latest()?.sleep_hours ?? 0;
+    return Math.min(Math.round((h / 9) * 100), 100);
+  };
+  const sleepScoreLabel = () => {
+    const s = sleepScore();
+    if (s >= 80) return 'Excellent';
+    if (s >= 65) return 'Good';
+    if (s >= 50) return 'Fair';
+    return 'Poor';
+  };
+  const fmtHours = (h: number | null) => {
+    if (h === null) return '—';
+    const hrs = Math.floor(h);
+    const mins = Math.round((h - hrs) * 60);
+    return `${hrs}h ${mins.toString().padStart(2, '0')}m`;
+  };
+  const avgSleep = () => {
+    const rows = sleepRows();
+    if (rows.length === 0) return 0;
+    return rows.reduce((s, m) => s + (m.sleep_hours ?? 0), 0) / rows.length;
+  };
+  const bestSleep = () => Math.max(...sleepRows().map((m) => m.sleep_hours ?? 0), 0);
+  const worstSleep = () => {
+    const vals = sleepRows().map((m) => m.sleep_hours ?? 0).filter((v) => v > 0);
+    return vals.length > 0 ? Math.min(...vals) : 0;
+  };
+  const dayLabel = (dateStr: string) => {
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    return days[new Date(dateStr).getDay()];
+  };
 
   return (
     <div class="space-y-6">
-      {/* Top: Sleep Score + Last Night Summary */}
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Sleep Score */}
-        <div class="card p-6 flex flex-col items-center justify-center">
-          <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">
-            Sleep Score
-          </h3>
-          <CircularProgress value={78} max={100} size="w-40 h-40" colorClass="text-indigo-500" sublabel="/ 100" />
-          <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">Good</p>
-        </div>
-
-        {/* Last Night Summary */}
-        <div class="lg:col-span-2 card p-6">
-          <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">
-            Last Night Summary
-          </h3>
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
-            <div>
-              <p class="text-xs text-gray-400">Bedtime</p>
-              <p class="text-lg font-semibold text-gray-900 dark:text-white">10:37 PM</p>
+      <Show when={props.gfitConnected()}>
+        <SyncStatusBar onSync={props.onSync} />
+      </Show>
+      <Show
+        when={hasSleepData()}
+        fallback={
+          <EmptyState
+            icon="moon"
+            message="No sleep data yet. Sync Google Fit or log sleep hours using the Log Today's Data form above."
+          />
+        }
+      >
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div class="card p-6 flex flex-col items-center justify-center">
+            <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">Sleep Score</h3>
+            <CircularProgress value={sleepScore()} max={100} size="w-40 h-40" colorClass="text-indigo-500" sublabel="/ 100" />
+            <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">{sleepScoreLabel()}</p>
+          </div>
+          <div class="lg:col-span-2 card p-6">
+            <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">Last Night Summary</h3>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+              <div>
+                <p class="text-xs text-gray-400">Date</p>
+                <p class="text-lg font-semibold text-gray-900 dark:text-white">{latest()?.date ?? '—'}</p>
+              </div>
+              <div>
+                <p class="text-xs text-gray-400">Duration</p>
+                <p class="text-lg font-semibold text-gray-900 dark:text-white">{fmtHours(latest()?.sleep_hours ?? null)}</p>
+              </div>
+              <div>
+                <p class="text-xs text-gray-400">Quality Score</p>
+                <p class="text-lg font-semibold text-gray-900 dark:text-white">
+                  {latest()?.sleep_quality !== null && latest()?.sleep_quality !== undefined ? `${latest()!.sleep_quality}/100` : '—'}
+                </p>
+              </div>
+              <div>
+                <p class="text-xs text-gray-400">vs Target (7h)</p>
+                <p class="text-lg font-semibold"
+                  classList={{
+                    'text-green-500': (latest()?.sleep_hours ?? 0) >= 7,
+                    'text-amber-500': (latest()?.sleep_hours ?? 0) >= 6 && (latest()?.sleep_hours ?? 0) < 7,
+                    'text-red-500': (latest()?.sleep_hours ?? 0) < 6,
+                  }}
+                >
+                  {(latest()?.sleep_hours ?? 0) >= 7 ? 'Met' : `−${fmtHours(7 - (latest()?.sleep_hours ?? 0))}`}
+                </p>
+              </div>
             </div>
-            <div>
-              <p class="text-xs text-gray-400">Wake Time</p>
-              <p class="text-lg font-semibold text-gray-900 dark:text-white">6:00 AM</p>
-            </div>
-            <div>
-              <p class="text-xs text-gray-400">Duration</p>
-              <p class="text-lg font-semibold text-gray-900 dark:text-white">7h 23m</p>
-            </div>
-            <div>
-              <p class="text-xs text-gray-400">Efficiency</p>
-              <p class="text-lg font-semibold text-gray-900 dark:text-white">93%</p>
+            <h4 class="text-xs text-gray-400 mb-3 uppercase tracking-wide">Sleep Quality by Night</h4>
+            <div class="space-y-3">
+              <For each={sleepRows()}>
+                {(row) => {
+                  const score = row.sleep_quality !== null
+                    ? Math.round(row.sleep_quality)
+                    : Math.min(Math.round(((row.sleep_hours ?? 0) / 9) * 100), 100);
+                  return (
+                    <div class="flex items-center gap-3">
+                      <span class="text-sm text-gray-600 dark:text-gray-300 w-10 shrink-0">{dayLabel(row.date)}</span>
+                      <div class="flex-1 h-4 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
+                        <div class="h-full rounded-full bg-indigo-500 transition-all duration-500" style={{ width: `${score}%` }} />
+                      </div>
+                      <span class="text-sm text-gray-500 dark:text-gray-400 w-20 text-right shrink-0">
+                        {fmtHours(row.sleep_hours)} {score > 0 ? `(${score})` : ''}
+                      </span>
+                    </div>
+                  );
+                }}
+              </For>
             </div>
           </div>
-
-          {/* Sleep Stage Bars */}
-          <h4 class="text-xs text-gray-400 mb-3 uppercase tracking-wide">Sleep Stages</h4>
-          <div class="space-y-3">
-            <For each={SLEEP_STAGES}>
-              {(stage) => (
-                <div class="flex items-center gap-3">
-                  <span class="text-sm text-gray-600 dark:text-gray-300 w-24 shrink-0">
-                    {stage.label}
-                  </span>
-                  <div class="flex-1 h-4 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
-                    <div
-                      class={`h-full rounded-full ${stage.color} transition-all duration-500`}
-                      style={{ width: `${(stage.minutes / totalSleepMin) * 100}%` }}
-                    />
+        </div>
+        <div class="card p-6">
+          <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">7-Day Sleep Trend</h3>
+          <div class="flex items-end gap-3 h-40">
+            <For each={sleepRows()}>
+              {(entry) => (
+                <div class="flex-1 flex flex-col items-center gap-1">
+                  <span class="text-xs text-gray-400">{(entry.sleep_hours ?? 0).toFixed(1)}h</span>
+                  <div class="w-full flex justify-center">
+                    <div class="w-full max-w-[40px] rounded-t-md bg-indigo-500 dark:bg-indigo-400 transition-all duration-500"
+                      style={{ height: `${((entry.sleep_hours ?? 0) / maxSleep()) * 120}px` }} />
                   </div>
-                  <span class="text-sm text-gray-500 dark:text-gray-400 w-16 text-right shrink-0">
-                    {stage.duration}
-                  </span>
+                  <span class="text-xs font-medium text-gray-500 dark:text-gray-400">{dayLabel(entry.date)}</span>
                 </div>
               )}
             </For>
           </div>
         </div>
-      </div>
-
-      {/* Sleep Trend */}
-      <div class="card p-6">
-        <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">
-          7-Day Sleep Trend
-        </h3>
-        <div class="flex items-end gap-3 h-40">
-          <For each={WEEKLY_SLEEP}>
-            {(entry) => (
-              <div class="flex-1 flex flex-col items-center gap-1">
-                <span class="text-xs text-gray-400">{entry.hours.toFixed(1)}h</span>
-                <div class="w-full flex justify-center">
-                  <div
-                    class="w-full max-w-[40px] rounded-t-md bg-indigo-500 dark:bg-indigo-400 transition-all duration-500"
-                    style={{ height: `${(entry.hours / maxSleep) * 120}px` }}
-                  />
-                </div>
-                <span class="text-xs font-medium text-gray-500 dark:text-gray-400">{entry.day}</span>
-              </div>
-            )}
-          </For>
+        <div class="card p-6">
+          <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">7-Day Sleep Summary</h3>
+          <div class="grid grid-cols-3 gap-4 text-center">
+            <div>
+              <p class="text-2xl font-bold text-gray-900 dark:text-white">{fmtHours(avgSleep())}</p>
+              <p class="text-xs text-gray-400 mt-1">Average</p>
+              <MiniBar value={avgSleep()} max={9} colorClass={avgSleep() >= 7 ? 'bg-green-500' : avgSleep() >= 6 ? 'bg-amber-500' : 'bg-red-500'} />
+            </div>
+            <div>
+              <p class="text-2xl font-bold text-green-500">{fmtHours(bestSleep())}</p>
+              <p class="text-xs text-gray-400 mt-1">Best night</p>
+              <MiniBar value={bestSleep()} max={9} colorClass="bg-green-500" />
+            </div>
+            <div>
+              <p class="text-2xl font-bold text-red-400">{fmtHours(worstSleep())}</p>
+              <p class="text-xs text-gray-400 mt-1">Worst night</p>
+              <MiniBar value={worstSleep()} max={9} colorClass="bg-red-400" />
+            </div>
+          </div>
         </div>
-      </div>
-
-      {/* Sleep Quality Factors */}
-      <div class="card p-6">
-        <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">
-          Sleep Quality Factors
-        </h3>
-        <div class="space-y-4">
-          <For each={SLEEP_QUALITY_FACTORS}>
-            {(factor) => (
-              <div>
-                <div class="flex items-center justify-between mb-1">
-                  <span class="text-sm font-medium text-gray-700 dark:text-gray-200">
-                    {factor.label}
-                  </span>
-                  <span class="text-sm font-semibold text-gray-900 dark:text-white">
-                    {factor.score}/100
-                  </span>
-                </div>
-                <MiniBar value={factor.score} max={100} colorClass="bg-indigo-500" />
-                <p class="text-xs text-gray-400 mt-1">{factor.description}</p>
-              </div>
-            )}
-          </For>
-        </div>
-      </div>
+      </Show>
     </div>
   );
 };
@@ -2236,7 +2249,11 @@ const Fitness: Component = () => {
             <NutritionTab />
           </Match>
           <Match when={activeTab() === 'sleep'}>
-            <SleepTab />
+            <SleepTab
+              metrics={metrics}
+              gfitConnected={gfitConnected}
+              onSync={async () => { await invoke('gfit_sync'); await loadData(); }}
+            />
           </Match>
           <Match when={activeTab() === 'heart'}>
             <HeartTab />
