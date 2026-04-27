@@ -194,6 +194,7 @@ pub fn run() {
             // Google Fit commands
             commands::gfit_open_auth,
             commands::gfit_sync,
+            commands::gfit_sync_full,
             commands::gfit_save_token,
             commands::gfit_save_client_id,
             commands::gfit_save_client_secret,

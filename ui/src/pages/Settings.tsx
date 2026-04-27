@@ -1,5 +1,6 @@
 import { Component, createSignal, For, onMount, Show } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import type { SystemInfo } from '../App';
 
 const Settings: Component = () => {
@@ -19,6 +20,7 @@ const Settings: Component = () => {
   const [gfitAuthCode, setGfitAuthCode] = createSignal('');
   const [gfitStatus, setGfitStatus] = createSignal<'idle' | 'saving' | 'syncing' | 'success' | 'error'>('idle');
   const [gfitMessage, setGfitMessage] = createSignal('');
+  const [gfitSyncPct, setGfitSyncPct] = createSignal(0);
 
   type CalendarAccountRow = { id: string; provider: string; email: string | null };
   const [calAccounts, setCalAccounts] = createSignal<CalendarAccountRow[]>([]);
@@ -723,57 +725,112 @@ const Settings: Component = () => {
 
           {/* Sync & Disconnect */}
           <Show when={gfitConnected()}>
-            <div class="flex items-center gap-3">
-              <button
-                class="btn btn-primary"
-                disabled={gfitStatus() === 'syncing'}
-                onClick={async () => {
-                  setGfitStatus('syncing');
-                  setGfitMessage('');
-                  try {
-                    const result = await invoke<string>('gfit_sync');
-                    setGfitMessage(result);
-                    setGfitStatus('success');
-                  } catch (e: any) {
-                    setGfitMessage(String(e));
-                    setGfitStatus('error');
-                  }
-                }}
-              >
-                {gfitStatus() === 'syncing' ? 'Syncing...' : 'Sync Now'}
-              </button>
-              <button
-                class="btn btn-secondary text-red-600 dark:text-red-400"
-                onClick={async () => {
-                  try {
-                    await invoke('gfit_disconnect');
-                    setGfitConnected(false);
-                    setGfitMessage('Disconnected from Google Fit.');
-                    setGfitStatus('idle');
-                  } catch (e: any) {
-                    setGfitMessage('Failed to disconnect: ' + String(e));
-                    setGfitStatus('error');
-                  }
-                }}
-              >
-                Disconnect
-              </button>
+            <div class="space-y-3">
+              <div class="flex items-center gap-3 flex-wrap">
+                <button
+                  class="btn btn-secondary"
+                  disabled={gfitStatus() === 'syncing'}
+                  onClick={async () => {
+                    setGfitStatus('syncing');
+                    setGfitMessage('Syncing last 30 days…');
+                    setGfitSyncPct(0);
+                    try {
+                      const result = await invoke<string>('gfit_sync');
+                      setGfitMessage('✓ ' + result);
+                      setGfitStatus('success');
+                    } catch (e: any) {
+                      setGfitMessage('Sync failed: ' + String(e));
+                      setGfitStatus('error');
+                    }
+                  }}
+                >
+                  {gfitStatus() === 'syncing' ? 'Syncing…' : '↻ Sync (30 days)'}
+                </button>
+
+                <button
+                  class="btn btn-primary"
+                  disabled={gfitStatus() === 'syncing'}
+                  onClick={async () => {
+                    setGfitStatus('syncing');
+                    setGfitMessage('Full sync in progress — pulling up to 3 years of data…');
+                    setGfitSyncPct(0);
+                    const unlisten = await listen<any>('gfit-sync-progress', (e) => {
+                      setGfitSyncPct(e.payload.pct ?? 0);
+                      if (e.payload.pct < 100) {
+                        setGfitMessage(`Syncing… ${e.payload.pct}% (chunk ${e.payload.chunk}/${e.payload.total_chunks})`);
+                      }
+                    });
+                    try {
+                      const result = await invoke<string>('gfit_sync_full');
+                      setGfitMessage('✓ ' + result);
+                      setGfitStatus('success');
+                      setGfitSyncPct(100);
+                    } catch (e: any) {
+                      setGfitMessage('Full sync failed: ' + String(e));
+                      setGfitStatus('error');
+                    } finally {
+                      unlisten();
+                    }
+                  }}
+                >
+                  {gfitStatus() === 'syncing' ? `Syncing… ${gfitSyncPct()}%` : '⬇ Full Sync (3 years)'}
+                </button>
+
+                <button
+                  class="btn btn-secondary text-red-600 dark:text-red-400"
+                  disabled={gfitStatus() === 'syncing'}
+                  onClick={async () => {
+                    try {
+                      await invoke('gfit_disconnect');
+                      setGfitConnected(false);
+                      setGfitMessage('Disconnected from Google Fit.');
+                      setGfitStatus('idle');
+                      setGfitSyncPct(0);
+                    } catch (e: any) {
+                      setGfitMessage('Failed to disconnect: ' + String(e));
+                      setGfitStatus('error');
+                    }
+                  }}
+                >
+                  Disconnect
+                </button>
+              </div>
+
+              {/* Progress bar — shown during full sync */}
+              <Show when={gfitStatus() === 'syncing' && gfitSyncPct() > 0}>
+                <div>
+                  <div class="flex justify-between text-xs text-gray-500 mb-1">
+                    <span>Google Fit sync progress</span>
+                    <span>{gfitSyncPct()}%</span>
+                  </div>
+                  <div class="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                    <div
+                      class="h-2 bg-sky-500 rounded-full transition-all duration-300"
+                      style={{ width: `${gfitSyncPct()}%` }}
+                    />
+                  </div>
+                </div>
+              </Show>
+
+              {/* Completion indicator */}
+              <Show when={gfitStatus() === 'success'}>
+                <div class="flex items-center gap-2 p-2 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg text-sm text-green-700 dark:text-green-300">
+                  <span>✓</span>
+                  <span>{gfitMessage()}</span>
+                </div>
+              </Show>
+              <Show when={gfitStatus() === 'error'}>
+                <div class="flex items-center gap-2 p-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-700 dark:text-red-300">
+                  <span>✗</span>
+                  <span>{gfitMessage()}</span>
+                </div>
+              </Show>
+              <Show when={gfitStatus() === 'syncing'}>
+                <p class="text-sm text-gray-500 dark:text-gray-400 animate-pulse">{gfitMessage()}</p>
+              </Show>
             </div>
           </Show>
 
-          {/* Status message */}
-          <Show when={gfitMessage()}>
-            <p
-              class="text-sm"
-              classList={{
-                'text-green-500': gfitStatus() === 'success',
-                'text-red-500': gfitStatus() === 'error',
-                'text-gray-500': gfitStatus() === 'syncing' || gfitStatus() === 'saving',
-              }}
-            >
-              {gfitMessage()}
-            </p>
-          </Show>
         </div>
       </section>
 
