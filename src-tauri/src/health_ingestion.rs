@@ -151,6 +151,24 @@ pub async fn extract_text_from_file(path: &Path) -> Result<String, String> {
             }
             "txt" => std::fs::read_to_string(&p).map_err(|e| e.to_string()),
             "png" | "jpg" | "jpeg" | "tiff" | "tif" | "webp" => ocr_image(&p),
+            "heic" => {
+                let jpg_path = p.with_extension("jpg");
+                let output = std::process::Command::new("magick")
+                    .args(["convert", p.to_str().unwrap_or(""), jpg_path.to_str().unwrap_or("")])
+                    .output()
+                    .map_err(|_| {
+                        "HEIC files require ImageMagick: sudo apt install imagemagick".to_string()
+                    })?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "HEIC conversion failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                let text = ocr_image(&jpg_path)?;
+                let _ = std::fs::remove_file(&jpg_path);
+                Ok(text)
+            }
             _ => Err(format!("Unsupported extension: {}", ext)),
         }
     })
@@ -168,6 +186,7 @@ fn detect_mime(path: &Path) -> Option<String> {
             "tiff" | "tif" => "image/tiff",
             "txt" => "text/plain",
             "webp" => "image/webp",
+            "heic" => "image/heic",
             _ => return None,
         }
         .to_string(),
