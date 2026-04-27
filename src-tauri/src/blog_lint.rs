@@ -81,7 +81,8 @@ fn check_heading_hierarchy(content: &str) -> Vec<LintIssue> {
     let mut issues = Vec::new();
     let mut prev_level = 0u32;
     for (level, text) in &headings {
-        if *level > prev_level + 1 {
+        let threshold = if prev_level == 0 { 2u32 } else { prev_level + 1 };
+        if *level > threshold {
             issues.push(LintIssue::new(
                 "heading_hierarchy",
                 text,
@@ -102,7 +103,7 @@ fn check_duplicate_headings(content: &str) -> Vec<LintIssue> {
     for (_, text) in &headings {
         let key = text.to_lowercase();
         *seen.entry(key.clone()).or_insert(0) += 1;
-        if seen[&key] >= 2 {
+        if seen[&key] == 2 {
             issues.push(LintIssue::new(
                 "duplicate_heading",
                 text,
@@ -313,5 +314,22 @@ mod tests {
             .filter(|i| i.rule != "thin_section")
             .collect();
         assert!(critical.is_empty(), "expected no issues, got: {:?}", critical);
+    }
+
+    #[test]
+    fn h2_as_first_heading_not_flagged() {
+        let md = "## Introduction\n\nContent\n\n### Deep Section\n\nMore";
+        let issues = lint(md);
+        // H2 as first heading is ok; H2→H3 jump (1 level) is ok too
+        let hier: Vec<_> = issues.iter().filter(|i| i.rule == "heading_hierarchy").collect();
+        assert!(hier.is_empty(), "H2 first heading should not be flagged: {:?}", hier);
+    }
+
+    #[test]
+    fn h3_as_first_heading_is_flagged() {
+        let md = "### Skipped H1 and H2\n\nContent";
+        let issues = lint(md);
+        assert!(issues.iter().any(|i| i.rule == "heading_hierarchy"),
+            "H3 as first heading should be flagged");
     }
 }
