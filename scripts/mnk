@@ -145,44 +145,95 @@ cmd_test() {
 }
 
 # ── mnk build ─────────────────────────────────────────────────────────────────
+#
+# Usage:
+#   mnk build              → interactive prompt
+#   mnk build deb          → .deb only  (DEFAULT — fastest)
+#   mnk build rpm          → .rpm only
+#   mnk build appimage     → .AppImage only
+#   mnk build deb rpm      → .deb + .rpm
+#   mnk build all          → .deb + .rpm + .AppImage
+#   mnk build debug        → cargo debug build (no bundle)
+#   mnk build frontend     → pnpm build only (ui/dist/)
+#
 cmd_build() {
-    local sub="${1:-}"
-    shift 2>/dev/null || true
+    local targets=("$@")
 
-    if [[ -z "$sub" ]]; then
+    # No args → interactive
+    if [[ ${#targets[@]} -eq 0 ]]; then
         _prompt_select "What would you like to build?" \
-            "release (deb+AppImage+rpm)" "debug" "frontend only"
-        sub="$PROMPT_RESULT"
+            "deb (Debian — default)" \
+            "rpm (Red Hat / Fedora)" \
+            "appimage (portable)" \
+            "deb + rpm" \
+            "all bundles (deb + rpm + AppImage)" \
+            "debug (cargo build, no bundle)" \
+            "frontend only (pnpm build)"
+        case "$PROMPT_RESULT" in
+            deb*)           targets=("deb") ;;
+            rpm*)           targets=("rpm") ;;
+            appimage*)      targets=("appimage") ;;
+            "deb + rpm")    targets=("deb" "rpm") ;;
+            all*)           targets=("deb" "rpm" "appimage") ;;
+            debug*)         targets=("debug") ;;
+            frontend*)      targets=("frontend") ;;
+        esac
     fi
 
-    case "$sub" in
-        release*|deb*)
-            header "Building Tauri release bundles"
-            restore_node_modules
-            cargo tauri build
-            local deb; deb=$(latest_deb)
-            echo ""
-            info "Bundles:"
-            ls -lh target/release/bundle/deb/*.deb  2>/dev/null | awk '{print "    .deb      → " $NF " (" $5 ")"}'
-            ls -lh target/release/bundle/rpm/*.rpm  2>/dev/null | awk '{print "    .rpm      → " $NF " (" $5 ")"}' || true
-            ls -lh target/release/bundle/appimage/*.AppImage 2>/dev/null | awk '{print "    .AppImage → " $NF " (" $5 ")"}' || true
-            success "Build complete"
-            ;;
-        debug)
-            header "Debug build"
-            cargo build
-            success "Debug build complete: target/debug/"
-            ;;
-        frontend*)
-            header "Frontend build"
-            restore_node_modules
-            (cd ui && pnpm build)
-            success "Frontend built: ui/dist/"
-            ;;
-        *)
-            error "Unknown build target. Choose: release | debug | frontend"
-            ;;
-    esac
+    # Special non-bundle targets
+    if [[ "${targets[*]}" == "debug" ]]; then
+        header "Debug build"
+        cargo build
+        success "Debug build complete: target/debug/"
+        return
+    fi
+    if [[ "${targets[*]}" == "frontend" ]]; then
+        header "Frontend build"
+        restore_node_modules
+        (cd ui && pnpm build)
+        success "Frontend built: ui/dist/"
+        return
+    fi
+
+    # Bundle targets — build frontend first, then Rust with tauri bundler
+    header "Building release bundles: ${targets[*]}"
+    restore_node_modules
+
+    # Build the Rust binary + frontend bundle (runs pnpm build internally)
+    # Then use tauri-bundler selectively per requested format
+    cargo build --release 2>&1 | grep -v "^$"
+
+    # Generate each requested bundle type
+    local built=()
+    for target in "${targets[@]}"; do
+        case "$target" in
+            deb)
+                info "Bundling .deb…"
+                cargo tauri bundle --bundle deb 2>&1 | grep -E "Bundling|Finished|error" | head -5
+                local f; f=$(latest_deb)
+                [[ -n "$f" ]] && built+=("$(ls -lh "$f" | awk '{print ".deb  → " $NF " (" $5 ")"}')")
+                ;;
+            rpm)
+                info "Bundling .rpm…"
+                cargo tauri bundle --bundle rpm 2>&1 | grep -E "Bundling|Finished|error" | head -5
+                local f; f=$(find target/release/bundle/rpm -name "*.rpm" 2>/dev/null | sort -V | tail -1)
+                [[ -n "$f" ]] && built+=("$(ls -lh "$f" | awk '{print ".rpm  → " $NF " (" $5 ")"}')")
+                ;;
+            appimage)
+                info "Bundling .AppImage…"
+                cargo tauri bundle --bundle appimage 2>&1 | grep -E "Bundling|Finished|error" | head -5
+                local f; f=$(find target/release/bundle/appimage -name "*.AppImage" 2>/dev/null | sort -V | tail -1)
+                [[ -n "$f" ]] && built+=("$(ls -lh "$f" | awk '{print ".AppImage → " $NF " (" $5 ")"}')")
+                ;;
+            *)
+                warn "Unknown bundle type: $target (use: deb | rpm | appimage)"
+                ;;
+        esac
+    done
+
+    echo ""
+    success "Build complete:"
+    for b in "${built[@]}"; do info "  $b"; done
 }
 
 # ── mnk install ───────────────────────────────────────────────────────────────
@@ -247,8 +298,8 @@ cmd_release() {
     git add Cargo.toml ui/package.json src-tauri/tauri.conf.json
     git commit -m "chore: bump version to $new_ver"
 
-    # Build
-    cmd_build "release"
+    # Build — default to deb only for release (fastest, what you usually deploy)
+    cmd_build "deb"
 
     # Tag
     git tag -a "v$new_ver" -m "Release v$new_ver"
@@ -512,20 +563,28 @@ ${BOLD}Usage:${NC}  mnk [command] [subcommand] [flags]
 ${BOLD}Commands:${NC}
   ${CYAN}dev${NC}       Start dev server  (cargo tauri dev)
   ${CYAN}test${NC}      Run tests         (all | rust | clippy | fmt | frontend)
-  ${CYAN}build${NC}     Build bundles     (release | debug | frontend)
+  ${CYAN}build${NC}     Build bundles     (deb | rpm | appimage | deb rpm | all | debug | frontend)
   ${CYAN}install${NC}   Install latest .deb via dpkg
-  ${CYAN}release${NC}   Full release      (bump → test → build → install → clean)
-  ${CYAN}clean${NC}     Remove artifacts  (debug | node_modules | cargo src | docker | all)
+  ${CYAN}release${NC}   Full release      (bump → test → build deb → install → clean)
+  ${CYAN}clean${NC}     Remove artifacts  (debug | node_modules | cargo src | release deps | docker | all)
   ${CYAN}push${NC}      Git push current branch (optionally with tags)
   ${CYAN}status${NC}    Show app / git / DB / disk summary
   ${CYAN}db${NC}        Database tools    (shell | migrations | tables | gfit)
   ${CYAN}version${NC}   Show or bump version (show | patch | minor | major)
   ${CYAN}logs${NC}      Tail MINION logs
 
-${BOLD}Examples:${NC}
+${BOLD}Build examples:${NC}
+  mnk build deb              # .deb only — fastest, default for Debian/Ubuntu
+  mnk build rpm              # .rpm only — Red Hat / Fedora
+  mnk build appimage         # .AppImage only — portable, no install needed
+  mnk build deb rpm          # .deb + .rpm in one pass
+  mnk build all              # all three formats
+  mnk build debug            # debug binary only (no bundle, fast compile)
+  mnk build frontend         # ui/dist/ only (pnpm build)
+
+${BOLD}Other examples:${NC}
   mnk release patch          # bump patch, build .deb, install, clean
   mnk release minor --skip-tests
-  mnk build release          # build .deb without bumping version
   mnk install                # dpkg install the latest built .deb
   mnk clean all              # free debug + node_modules + cargo src
   mnk test all               # rust tests + clippy + fmt + frontend
