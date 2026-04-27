@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::state::AppState;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};

@@ -274,6 +274,20 @@ pub fn run() {
             // Blog v3 — rich preview
             blog_preview::blog_render_preview,
             commands::blog_update_draft,
+            // Blog v3 Phase C — Lint + LLM assistant
+            blog_lint::blog_lint,
+            blog_llm::blog_llm_titles,
+            blog_llm::blog_llm_hook,
+            blog_llm::blog_llm_conclusion,
+            blog_llm::blog_llm_grammar,
+            blog_llm::blog_llm_meta_description,
+            blog_llm::blog_llm_tags,
+            blog_llm::blog_llm_snippets,
+            blog_llm::blog_llm_adapt,
+            blog_llm::blog_llm_tone,
+            blog_llm::blog_get_variants,
+            blog_llm::blog_delete_variant,
+            blog_llm::blog_get_snippets,
             // Health Vault commands (week 1)
             health_commands::health_get_consent,
             health_commands::health_accept_consent,
