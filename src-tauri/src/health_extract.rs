@@ -1,6 +1,7 @@
 //! Health Phase B — structured extraction of prescriptions and lab results.
 
 use crate::state::AppState;
+use chrono::Utc;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -301,12 +302,260 @@ pub async fn health_extract_document(
     }
 }
 
-// ── suppress dead-code warnings for types used by future Task 4 commands ─────
-const _: () = {
-    let _ = std::mem::size_of::<PrescriptionWithItems>();
-    let _ = std::mem::size_of::<PrescriptionItemRow>();
-    let _ = std::mem::size_of::<LabResultWithValues>();
-    let _ = std::mem::size_of::<LabValueRow>();
-    let _ = std::mem::size_of::<LabTrendPoint>();
-    let _ = std::mem::size_of::<Uuid>(); // ensure uuid import is used
-};
+// ── Confirm commands ─────────────────────────────────────────────────────────
+
+/// Save confirmed prescription extraction to DB. Returns new prescription id.
+#[tauri::command]
+pub async fn health_confirm_prescription(
+    state: State<'_, AppStateHandle>,
+    patient_id: String,
+    source_file_id: Option<String>,
+    data: PrescriptionExtraction,
+) -> Result<String, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let rx_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO prescriptions
+         (id, patient_id, source_file_id, prescribed_date, prescriber_name,
+          prescriber_specialty, facility_name, location_city, diagnosis_text, raw_text,
+          confirmed, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11)",
+        params![
+            rx_id, patient_id, source_file_id,
+            data.prescribed_date.as_deref().unwrap_or("unknown"),
+            data.prescriber_name, data.prescriber_specialty,
+            data.facility_name, data.location_city,
+            data.diagnosis_text, data.raw_text, now
+        ],
+    ).map_err(|e| e.to_string())?;
+    for item in &data.medications {
+        let item_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO prescription_items
+             (id, prescription_id, drug_name, dosage, frequency, duration_days, instructions, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                item_id, rx_id, item.drug_name, item.dosage,
+                item.frequency, item.duration_days, item.instructions, now
+            ],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(rx_id)
+}
+
+/// Save confirmed lab result extraction to DB. Returns new lab result id.
+#[tauri::command]
+pub async fn health_confirm_lab_result(
+    state: State<'_, AppStateHandle>,
+    patient_id: String,
+    source_file_id: Option<String>,
+    data: LabResultExtraction,
+) -> Result<String, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let result_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO structured_lab_results
+         (id, patient_id, source_file_id, lab_name, report_date, location_city, confirmed, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,1,?7)",
+        params![
+            result_id, patient_id, source_file_id,
+            data.lab_name,
+            data.report_date.as_deref().unwrap_or("unknown"),
+            data.location_city, now
+        ],
+    ).map_err(|e| e.to_string())?;
+    for val in &data.results {
+        let val_id = Uuid::new_v4().to_string();
+        let flag = compute_flag(val.value_numeric, val.reference_low, val.reference_high);
+        conn.execute(
+            "INSERT INTO structured_lab_values
+             (id, result_id, test_name, value_text, value_numeric, unit,
+              reference_low, reference_high, flag, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                val_id, result_id, val.test_name, val.value_text,
+                val.value_numeric, val.unit,
+                val.reference_low, val.reference_high,
+                flag, now
+            ],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(result_id)
+}
+
+// ── List commands ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn health_list_prescriptions(
+    state: State<'_, AppStateHandle>,
+    patient_id: String,
+) -> Result<Vec<PrescriptionWithItems>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, patient_id, source_file_id, prescribed_date, prescriber_name,
+                prescriber_specialty, facility_name, location_city, diagnosis_text,
+                confirmed, created_at
+         FROM prescriptions WHERE patient_id = ?1 ORDER BY prescribed_date DESC"
+    ).map_err(|e| e.to_string())?;
+    let rows: Vec<PrescriptionWithItems> = stmt.query_map(params![patient_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<String>>(5)?,
+            r.get::<_, Option<String>>(6)?,
+            r.get::<_, Option<String>>(7)?,
+            r.get::<_, Option<String>>(8)?,
+            r.get::<_, i64>(9)?,
+            r.get::<_, String>(10)?,
+        ))
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .map(|(id, pid, sfid, date, pname, pspec, fname, lcity, diag, conf, cat)| {
+        let items = {
+            let mut s = conn.prepare(
+                "SELECT id, drug_name, dosage, frequency, duration_days, instructions
+                 FROM prescription_items WHERE prescription_id = ?1 ORDER BY rowid"
+            ).unwrap();
+            s.query_map(params![id], |r| Ok(PrescriptionItemRow {
+                id: r.get(0)?,
+                drug_name: r.get(1)?,
+                dosage: r.get(2)?,
+                frequency: r.get(3)?,
+                duration_days: r.get(4)?,
+                instructions: r.get(5)?,
+            })).unwrap().filter_map(|r| r.ok()).collect()
+        };
+        PrescriptionWithItems {
+            id, patient_id: pid, source_file_id: sfid,
+            prescribed_date: date, prescriber_name: pname,
+            prescriber_specialty: pspec, facility_name: fname,
+            location_city: lcity, diagnosis_text: diag,
+            confirmed: conf != 0, created_at: cat, items,
+        }
+    }).collect();
+    Ok(rows)
+}
+
+#[tauri::command]
+pub async fn health_list_lab_results(
+    state: State<'_, AppStateHandle>,
+    patient_id: String,
+) -> Result<Vec<LabResultWithValues>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, patient_id, source_file_id, lab_name, report_date,
+                location_city, confirmed, created_at
+         FROM structured_lab_results WHERE patient_id = ?1 ORDER BY report_date DESC"
+    ).map_err(|e| e.to_string())?;
+    let rows: Vec<LabResultWithValues> = stmt.query_map(params![patient_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, Option<String>>(5)?,
+            r.get::<_, i64>(6)?,
+            r.get::<_, String>(7)?,
+        ))
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .map(|(id, pid, sfid, lname, date, lcity, conf, cat)| {
+        let (values, abnormal_count) = {
+            let mut s = conn.prepare(
+                "SELECT id, test_name, value_text, value_numeric, unit,
+                        reference_low, reference_high, flag
+                 FROM structured_lab_values WHERE result_id = ?1 ORDER BY rowid"
+            ).unwrap();
+            let vals: Vec<LabValueRow> = s.query_map(params![id], |r| Ok(LabValueRow {
+                id: r.get(0)?,
+                test_name: r.get(1)?,
+                value_text: r.get(2)?,
+                value_numeric: r.get(3)?,
+                unit: r.get(4)?,
+                reference_low: r.get(5)?,
+                reference_high: r.get(6)?,
+                flag: r.get(7)?,
+            })).unwrap().filter_map(|r| r.ok()).collect();
+            let abn = vals.iter().filter(|v| {
+                matches!(v.flag.as_deref(), Some("HIGH") | Some("LOW") | Some("CRITICAL"))
+            }).count() as i64;
+            (vals, abn)
+        };
+        LabResultWithValues {
+            id, patient_id: pid, source_file_id: sfid,
+            lab_name: lname, report_date: date,
+            location_city: lcity, confirmed: conf != 0,
+            created_at: cat, values, abnormal_count,
+        }
+    }).collect();
+    Ok(rows)
+}
+
+// ── Delete commands ────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn health_delete_prescription(
+    state: State<'_, AppStateHandle>,
+    id: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM prescriptions WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn health_delete_lab_result(
+    state: State<'_, AppStateHandle>,
+    id: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM structured_lab_results WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ── Trend query ───────────────────────────────────────────────────────────────
+
+/// Return all numeric values for one test name, ordered by date (for trend charts).
+#[tauri::command]
+pub async fn health_get_lab_trends(
+    state: State<'_, AppStateHandle>,
+    patient_id: String,
+    test_name: String,
+) -> Result<Vec<LabTrendPoint>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT r.report_date, v.value_numeric, v.flag, r.lab_name
+         FROM structured_lab_values v
+         JOIN structured_lab_results r ON r.id = v.result_id
+         WHERE r.patient_id = ?1
+           AND LOWER(v.test_name) LIKE LOWER(?2)
+           AND v.value_numeric IS NOT NULL
+         ORDER BY r.report_date ASC"
+    ).map_err(|e| e.to_string())?;
+    let rows: Vec<LabTrendPoint> = stmt.query_map(
+        params![patient_id, format!("%{}%", test_name)],
+        |r| Ok(LabTrendPoint {
+            date: r.get(0)?,
+            value_numeric: r.get(1)?,
+            flag: r.get(2)?,
+            lab_name: r.get(3)?,
+        }),
+    ).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok()).collect();
+    Ok(rows)
+}

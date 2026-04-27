@@ -324,6 +324,13 @@ pub fn run() {
             health_commands::health_delete_symptom,
             // Health Phase B — structured extraction
             health_extract::health_extract_document,
+            health_extract::health_confirm_prescription,
+            health_extract::health_confirm_lab_result,
+            health_extract::health_list_prescriptions,
+            health_extract::health_list_lab_results,
+            health_extract::health_delete_prescription,
+            health_extract::health_delete_lab_result,
+            health_extract::health_get_lab_trends,
             // Health Vault ingestion (week 2)
             health_ingestion::health_discover_folder,
             health_ingestion::health_start_ingestion,
