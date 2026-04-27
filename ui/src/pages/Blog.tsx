@@ -5,6 +5,7 @@ import AssetsTab from './blog/AssetsTab';
 import PublishTab from './blog/PublishTab';
 import PlatformsTab from './blog/PlatformsTab';
 import PreviewPane from './blog/PreviewPane';
+import LlmAssistantPanel from './blog/LlmAssistantPanel';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -101,6 +102,9 @@ const Blog: Component = () => {
   const [seoKeywords, setSeoKeywords] = createSignal('');
   const [seoResult, setSeoResult] = createSignal<SeoAnalysis | null>(null);
   const [analyzing, setAnalyzing] = createSignal(false);
+
+  // LLM assistant panel
+  const [showLlmPanel, setShowLlmPanel] = createSignal(false);
 
   // Split-view state
   type ViewMode = 'editor' | 'split' | 'preview';
@@ -504,6 +508,19 @@ const Blog: Component = () => {
                 <Show when={renderingPreview()}>
                   <span class="text-xs text-gray-400 ml-2 animate-pulse">rendering…</span>
                 </Show>
+                <div class="ml-auto">
+                  <button
+                    onClick={() => setShowLlmPanel(v => !v)}
+                    class={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                      showLlmPanel()
+                        ? 'bg-sky-500 text-white'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200'
+                    }`}
+                    title="AI Writing Assistant"
+                  >
+                    ✨ AI
+                  </button>
+                </div>
               </div>
               <div class="flex flex-1 overflow-hidden min-h-0">
               {/* Main editor area — shown in editor and split modes */}
@@ -683,6 +700,13 @@ const Blog: Component = () => {
                   </div>
                 </Show>
               </div>
+
+              <Show when={showLlmPanel()}>
+                <LlmAssistantPanel
+                  postId={editingId()}
+                  onClose={() => setShowLlmPanel(false)}
+                />
+              </Show>
               </div>
             </div>
           </Match>
