@@ -7,6 +7,7 @@ import TimelineTab from './health/TimelineTab';
 import EpisodesTab from './health/EpisodesTab';
 import AnalysisTab from './health/AnalysisTab';
 import CloudBackupTab from './health/CloudBackupTab';
+import StructuredRecordsTab from './health/StructuredRecordsTab';
 
 // =====================================================================
 // Types
@@ -150,6 +151,7 @@ type HealthTab =
   | 'import'
   | 'review'
   | 'documents'
+  | 'structured_records'
   | 'cloud_backup';
 
 // =====================================================================
@@ -801,6 +803,7 @@ const Health: Component = () => {
               ['import', 'Import'],
               ['review', 'Review'],
               ['documents', 'Documents'],
+              ['structured_records', 'Extracted Records'],
               ['cloud_backup', 'Cloud Backup'],
             ] as const
           ).map(([tab, label]) => (
@@ -977,6 +980,11 @@ const Health: Component = () => {
         {/* ============== DOCUMENTS ============== */}
         <Show when={activeTab() === 'documents'}>
           <DocumentsTab activePatient={activePatient()!} />
+        </Show>
+
+        {/* ============== STRUCTURED RECORDS ============== */}
+        <Show when={activeTab() === 'structured_records'}>
+          <StructuredRecordsTab patientId={activePatient()!.id} />
         </Show>
 
         {/* ============== CLOUD BACKUP ============== */}

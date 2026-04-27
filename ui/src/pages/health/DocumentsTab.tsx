@@ -92,6 +92,14 @@ const DOC_TYPE_OPTIONS = [
   { value: 'unknown', label: 'Unknown' },
 ];
 
+const EXTRACTABLE_DOC_TYPES = new Set([
+  'prescription',
+  'prescription_note',
+  'lab_report',
+  'lab_result',
+  'blood_test',
+]);
+
 const DocumentsTab: Component<{
   activePatient: Patient;
 }> = (props) => {
@@ -104,6 +112,9 @@ const DocumentsTab: Component<{
   const [typeFilter, setTypeFilter] = createSignal('');
   const [viewFile, setViewFile] = createSignal<FileEntry | null>(null);
   const [reclassifyingId, setReclassifyingId] = createSignal<string | null>(null);
+  const [extractingId, setExtractingId] = createSignal<string | null>(null);
+  const [extractResult, setExtractResult] = createSignal<any>(null);
+  const [showExtractModal, setShowExtractModal] = createSignal(false);
 
   const loadFiles = async () => {
     setLoading(true);
@@ -182,6 +193,26 @@ const DocumentsTab: Component<{
       alert(String(e));
     } finally {
       setReclassifyingId(null);
+    }
+  };
+
+  const handleExtract = async (fileId: string) => {
+    setExtractingId(fileId);
+    try {
+      const result = await invoke<any>('health_extract_document', {
+        fileId,
+        patientId: props.activePatient.id,
+      });
+      if (result) {
+        setExtractResult(result);
+        setShowExtractModal(true);
+      } else {
+        alert('No LLM endpoint configured. Add one in Settings → AI Endpoints.');
+      }
+    } catch (e) {
+      alert('Extraction failed: ' + String(e));
+    } finally {
+      setExtractingId(null);
     }
   };
 
@@ -311,6 +342,16 @@ const DocumentsTab: Component<{
                         >
                           View
                         </button>
+                        <Show when={EXTRACTABLE_DOC_TYPES.has(ex()?.document_type || '')}>
+                          <button
+                            class="text-xs text-emerald-600 hover:underline disabled:opacity-50"
+                            onClick={() => handleExtract(f.id)}
+                            disabled={extractingId() === f.id}
+                            title="Extract structured data with AI"
+                          >
+                            {extractingId() === f.id ? '…' : 'Extract →'}
+                          </button>
+                        </Show>
                         <button
                           class="text-xs text-minion-600 hover:underline disabled:opacity-50"
                           onClick={() => reclassify(f)}
@@ -376,6 +417,58 @@ const DocumentsTab: Component<{
                   {extractions()[viewFile()!.id]!.raw_text}
                 </pre>
               </Show>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      {/* Extraction preview modal */}
+      <Show when={showExtractModal() && extractResult()}>
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div class="card w-full max-w-2xl max-h-[80vh] overflow-auto p-6 shadow-2xl">
+            <h3 class="text-lg font-bold mb-4">Extraction Preview</h3>
+            <pre class="text-xs bg-gray-50 dark:bg-gray-900 p-3 rounded overflow-auto max-h-96 font-mono">
+              {JSON.stringify(extractResult(), null, 2)}
+            </pre>
+            <div class="flex gap-2 mt-4 justify-end">
+              <button
+                class="btn btn-secondary"
+                onClick={() => {
+                  setShowExtractModal(false);
+                  setExtractResult(null);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                class="btn btn-primary"
+                onClick={async () => {
+                  const r = extractResult();
+                  if (!r) return;
+                  try {
+                    if (r.type === 'Prescription') {
+                      await invoke('health_confirm_prescription', {
+                        patientId: props.activePatient.id,
+                        sourceFileId: null,
+                        data: r.data,
+                      });
+                    } else if (r.type === 'Lab') {
+                      await invoke('health_confirm_lab_result', {
+                        patientId: props.activePatient.id,
+                        sourceFileId: null,
+                        data: r.data,
+                      });
+                    }
+                    setShowExtractModal(false);
+                    setExtractResult(null);
+                    alert('Saved successfully!');
+                  } catch (e) {
+                    alert('Save failed: ' + String(e));
+                  }
+                }}
+              >
+                Confirm &amp; Save
+              </button>
             </div>
           </div>
         </div>
