@@ -40,7 +40,7 @@ interface FitnessMetricResponse {
   synced_at: string | null;
 }
 
-export interface GfitSyncStatus {
+interface GfitSyncStatus {
   last_synced: string | null;  // ISO datetime string or null
   days_count: number;
   running: boolean;
@@ -158,7 +158,7 @@ const CircularProgress: Component<{
   );
 };
 
-export const EmptyState: Component<{ icon: string; message: string }> = (props) => (
+const EmptyState: Component<{ icon: string; message: string }> = (props) => (
   <div class="flex flex-col items-center justify-center py-16 gap-4 text-center">
     <div class="p-4 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-400">
       <Icon name={props.icon} class="w-10 h-10" />
@@ -169,7 +169,7 @@ export const EmptyState: Component<{ icon: string; message: string }> = (props) 
   </div>
 );
 
-export const SyncStatusBar: Component<{ onSync: () => Promise<void> }> = (props) => {
+const SyncStatusBar: Component<{ onSync: () => Promise<void> }> = (props) => {
   const [status, setStatus] = createSignal<GfitSyncStatus | null>(null);
   const [syncing, setSyncing] = createSignal(false);
 
@@ -1777,6 +1777,15 @@ const Fitness: Component = () => {
     }
   };
 
+  const handleGfitSync = async () => {
+    try {
+      await invoke('gfit_sync');
+      await loadData();
+    } catch (e) {
+      console.error('Sync failed:', e);
+    }
+  };
+
   onMount(loadData);
 
   onMount(async () => {
@@ -2075,21 +2084,21 @@ const Fitness: Component = () => {
             <SleepTab
               metrics={metrics}
               gfitConnected={gfitConnected}
-              onSync={async () => { await invoke('gfit_sync'); await loadData(); }}
+              onSync={handleGfitSync}
             />
           </Match>
           <Match when={activeTab() === 'heart'}>
             <HeartTab
               metrics={metrics}
               gfitConnected={gfitConnected}
-              onSync={async () => { await invoke('gfit_sync'); await loadData(); }}
+              onSync={handleGfitSync}
             />
           </Match>
           <Match when={activeTab() === 'activity'}>
             <ActivityTab
               metrics={metrics}
               gfitConnected={gfitConnected}
-              onSync={async () => { await invoke('gfit_sync'); await loadData(); }}
+              onSync={handleGfitSync}
             />
           </Match>
           <Match when={activeTab() === 'ai'}>
