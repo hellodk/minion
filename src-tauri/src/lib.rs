@@ -17,6 +17,7 @@ mod health_analysis;
 mod health_drive_sync;
 mod health_extract;
 mod health_ingestion;
+mod health_intelligence;
 mod health_timeline;
 mod llm_commands;
 mod sysmon_collect;
@@ -380,6 +381,15 @@ pub fn run() {
             health_drive_sync::health_drive_restore_now,
             health_drive_sync::health_drive_export_local,
             health_drive_sync::health_drive_import_local,
+            // Health Intelligence Phase C — timeline, anomalies, AI report
+            health_intelligence::health_rebuild_timeline,
+            health_intelligence::health_get_timeline,
+            health_intelligence::health_detect_anomalies,
+            health_intelligence::health_generate_report,
+            health_intelligence::health_list_reports,
+            health_intelligence::health_delete_report,
+            health_intelligence::health_add_location_visit,
+            health_intelligence::health_list_location_visits,
             // System Monitor commands
             sysmon_commands::sysmon_get_current,
             sysmon_commands::sysmon_get_history,
