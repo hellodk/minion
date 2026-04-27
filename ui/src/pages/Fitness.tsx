@@ -65,14 +65,6 @@ interface Habit {
 }
 
 
-interface HeartRateZone {
-  label: string;
-  bpmRange: string;
-  minutes: number;
-  maxMinutes: number;
-  color: string;
-}
-
 interface AiRecommendation {
   category: string;
   icon: string;
@@ -129,23 +121,6 @@ const WEEKLY_STEPS = [
   { day: 'Sun', steps: 8432 },
 ];
 
-
-const HEART_RATE_ZONES: HeartRateZone[] = [
-  { label: 'Rest', bpmRange: '< 100', minutes: 1120, maxMinutes: 1440, color: 'bg-blue-400' },
-  { label: 'Fat Burn', bpmRange: '100-140', minutes: 185, maxMinutes: 1440, color: 'bg-green-500' },
-  { label: 'Cardio', bpmRange: '140-170', minutes: 95, maxMinutes: 1440, color: 'bg-orange-500' },
-  { label: 'Peak', bpmRange: '170+', minutes: 40, maxMinutes: 1440, color: 'bg-red-500' },
-];
-
-const WEEKLY_HEART_RATE = [
-  { day: 'Mon', avg: 68, min: 58, max: 155 },
-  { day: 'Tue', avg: 72, min: 60, max: 162 },
-  { day: 'Wed', avg: 65, min: 56, max: 148 },
-  { day: 'Thu', avg: 70, min: 59, max: 158 },
-  { day: 'Fri', avg: 74, min: 61, max: 170 },
-  { day: 'Sat', avg: 66, min: 55, max: 145 },
-  { day: 'Sun', avg: 69, min: 57, max: 152 },
-];
 
 const AI_HEALTH_SCORES = [
   { label: 'Sleep Quality', score: 78, color: 'bg-indigo-500' },
@@ -861,177 +836,150 @@ const SleepTab: Component<{
   );
 };
 
-const HeartTab: Component = () => {
-  // SVG line chart points for 7 day heart rate
+const HeartTab: Component<{
+  metrics: () => FitnessMetricResponse[];
+  gfitConnected: () => boolean;
+  onSync: () => Promise<void>;
+}> = (props) => {
+  const hrRows = () =>
+    props.metrics().filter((m) => m.heart_rate_avg !== null).slice(0, 7).reverse();
+  const hasHrData = () => hrRows().length > 0;
+  const latest = () => hrRows()[hrRows().length - 1] ?? null;
+  const avgRestingHr = () => {
+    const rows = hrRows();
+    if (rows.length === 0) return 0;
+    return Math.round(rows.reduce((s, m) => s + (m.heart_rate_avg ?? 0), 0) / rows.length);
+  };
+  const dayLabel = (dateStr: string) => {
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    return days[new Date(dateStr).getDay()];
+  };
   const chartWidth = 600;
   const chartHeight = 120;
-  const minHR = Math.min(...WEEKLY_HEART_RATE.map((d) => d.min)) - 5;
-  const maxHR = Math.max(...WEEKLY_HEART_RATE.map((d) => d.max)) + 5;
-  const scaleY = (v: number) => chartHeight - ((v - minHR) / (maxHR - minHR)) * chartHeight;
-  const avgPoints = WEEKLY_HEART_RATE.map(
-    (d, i) => `${(i / (WEEKLY_HEART_RATE.length - 1)) * chartWidth},${scaleY(d.avg)}`
-  ).join(' ');
-  const minPoints = WEEKLY_HEART_RATE.map(
-    (d, i) => `${(i / (WEEKLY_HEART_RATE.length - 1)) * chartWidth},${scaleY(d.min)}`
-  ).join(' ');
-  const maxPoints = WEEKLY_HEART_RATE.map(
-    (d, i) => `${(i / (WEEKLY_HEART_RATE.length - 1)) * chartWidth},${scaleY(d.max)}`
-  ).join(' ');
+  const allAvg = () => hrRows().map((d) => d.heart_rate_avg ?? 0);
+  const allMin = () => hrRows().map((d) => d.heart_rate_min ?? d.heart_rate_avg ?? 0);
+  const allMax = () => hrRows().map((d) => d.heart_rate_max ?? d.heart_rate_avg ?? 0);
+  const hrFloor = () => Math.max(Math.min(...allMin()) - 5, 40);
+  const hrCeil = () => Math.max(...allMax()) + 5;
+  const scaleY = (v: number) => {
+    const floor = hrFloor();
+    const ceil = hrCeil();
+    return chartHeight - ((v - floor) / (ceil - floor)) * chartHeight;
+  };
+  const pointsFor = (vals: () => number[]) => () =>
+    vals().map((v, i) => `${(i / Math.max(vals().length - 1, 1)) * chartWidth},${scaleY(v)}`).join(' ');
+  const avgPoints = pointsFor(allAvg);
+  const minPoints = pointsFor(allMin);
+  const maxPoints = pointsFor(allMax);
+  const hrRangeLabel = () => {
+    const hr = latest()?.heart_rate_avg;
+    if (hr === null || hr === undefined) return '—';
+    if (hr < 60) return 'Low';
+    if (hr <= 100) return 'Normal range';
+    return 'Elevated';
+  };
 
   return (
     <div class="space-y-6">
-      {/* Current BPM + Resting */}
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
-        {/* Current BPM with pulse animation */}
-        <div class="card p-6 flex flex-col items-center justify-center">
-          <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">
-            Current Heart Rate
-          </h3>
-          <div class="flex items-center gap-4">
-            <div class="animate-pulse-heart text-red-500">
-              <Icon name="heart" class="w-12 h-12" />
-            </div>
-            <div>
-              <span class="text-5xl font-bold text-gray-900 dark:text-white">72</span>
-              <span class="text-lg text-gray-400 ml-1">BPM</span>
-            </div>
-          </div>
-          <p class="text-sm text-gray-400 mt-3">Normal range</p>
-          {/* Inline keyframe style for pulse animation */}
-          <style>{`
-            @keyframes pulse-heart {
-              0%, 100% { transform: scale(1); }
-              15% { transform: scale(1.2); }
-              30% { transform: scale(1); }
-              45% { transform: scale(1.15); }
-              60% { transform: scale(1); }
-            }
-            .animate-pulse-heart {
-              animation: pulse-heart 1.2s ease-in-out infinite;
-            }
-          `}</style>
-        </div>
-
-        {/* Resting Heart Rate */}
-        <div class="card p-6 flex flex-col items-center justify-center">
-          <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">
-            Resting Heart Rate
-          </h3>
-          <CircularProgress value={62} max={100} size="w-36 h-36" colorClass="text-red-500" sublabel="BPM" />
-          <div class="flex items-center gap-1 mt-3 text-sm text-green-500">
-            <Icon name="arrow-down" class="w-3 h-3" />
-            <span>2 BPM from last week</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Heart Rate Zones */}
-      <div class="card p-6">
-        <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">
-          Heart Rate Zones (Today)
-        </h3>
-        <div class="space-y-4">
-          <For each={HEART_RATE_ZONES}>
-            {(zone) => (
-              <div>
-                <div class="flex items-center justify-between mb-1">
-                  <div class="flex items-center gap-2">
-                    <div class={`w-3 h-3 rounded-full ${zone.color}`} />
-                    <span class="text-sm font-medium text-gray-700 dark:text-gray-200">
-                      {zone.label}
-                    </span>
-                    <span class="text-xs text-gray-400">({zone.bpmRange} BPM)</span>
-                  </div>
-                  <span class="text-sm text-gray-500 dark:text-gray-400">
-                    {zone.minutes >= 60
-                      ? `${Math.floor(zone.minutes / 60)}h ${zone.minutes % 60}m`
-                      : `${zone.minutes}m`}
-                  </span>
-                </div>
-                <div class="w-full h-3 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
-                  <div
-                    class={`h-full rounded-full ${zone.color} transition-all duration-500`}
-                    style={{ width: `${(zone.minutes / zone.maxMinutes) * 100}%` }}
-                  />
-                </div>
+      <Show when={props.gfitConnected()}>
+        <SyncStatusBar onSync={props.onSync} />
+      </Show>
+      <Show
+        when={hasHrData()}
+        fallback={
+          <EmptyState
+            icon="heart"
+            message="No heart rate data yet. Sync Google Fit or log your average BPM using the Log Today's Data form above."
+          />
+        }
+      >
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+          <div class="card p-6 flex flex-col items-center justify-center">
+            <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">Latest Heart Rate</h3>
+            <div class="flex items-center gap-4">
+              <div class="text-red-500">
+                <Icon name="heart" class="w-12 h-12" />
               </div>
-            )}
-          </For>
-        </div>
-      </div>
-
-      {/* 7-Day Trend (SVG line chart) */}
-      <div class="card p-6">
-        <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">
-          7-Day Heart Rate Trend
-        </h3>
-        <div class="overflow-x-auto">
-          <svg viewBox={`-30 -10 ${chartWidth + 60} ${chartHeight + 40}`} class="w-full h-44">
-            {/* Y-axis labels */}
-            <text x="-10" y={scaleY(60) + 4} class="fill-gray-400 text-xs" text-anchor="end"
-              font-size="10">60</text>
-            <text x="-10" y={scaleY(100) + 4} class="fill-gray-400 text-xs" text-anchor="end"
-              font-size="10">100</text>
-            <text x="-10" y={scaleY(140) + 4} class="fill-gray-400 text-xs" text-anchor="end"
-              font-size="10">140</text>
-            {/* Grid lines */}
-            <line x1="0" y1={scaleY(60)} x2={chartWidth} y2={scaleY(60)}
-              stroke="currentColor" class="text-gray-200 dark:text-gray-700" stroke-dasharray="4" />
-            <line x1="0" y1={scaleY(100)} x2={chartWidth} y2={scaleY(100)}
-              stroke="currentColor" class="text-gray-200 dark:text-gray-700" stroke-dasharray="4" />
-            <line x1="0" y1={scaleY(140)} x2={chartWidth} y2={scaleY(140)}
-              stroke="currentColor" class="text-gray-200 dark:text-gray-700" stroke-dasharray="4" />
-            {/* Max line */}
-            <polyline points={maxPoints} fill="none" stroke="#fca5a5" stroke-width="1.5"
-              stroke-dasharray="4" />
-            {/* Avg line */}
-            <polyline points={avgPoints} fill="none" stroke="#ef4444" stroke-width="2.5"
-              stroke-linecap="round" stroke-linejoin="round" />
-            {/* Min line */}
-            <polyline points={minPoints} fill="none" stroke="#93c5fd" stroke-width="1.5"
-              stroke-dasharray="4" />
-            {/* Dots on avg */}
-            <For each={WEEKLY_HEART_RATE}>
-              {(d, i) => (
-                <circle
-                  cx={(i() / (WEEKLY_HEART_RATE.length - 1)) * chartWidth}
-                  cy={scaleY(d.avg)}
-                  r="4"
-                  fill="#ef4444"
-                />
-              )}
-            </For>
-            {/* X-axis labels */}
-            <For each={WEEKLY_HEART_RATE}>
-              {(d, i) => (
-                <text
-                  x={(i() / (WEEKLY_HEART_RATE.length - 1)) * chartWidth}
-                  y={chartHeight + 18}
-                  text-anchor="middle"
-                  class="fill-gray-400"
-                  font-size="10"
-                >
-                  {d.day}
-                </text>
-              )}
-            </For>
-          </svg>
-        </div>
-        <div class="flex items-center justify-center gap-6 mt-2 text-xs text-gray-400">
-          <div class="flex items-center gap-1">
-            <div class="w-6 h-0.5 bg-red-500 rounded" />
-            <span>Avg</span>
+              <div>
+                <span class="text-5xl font-bold text-gray-900 dark:text-white">{latest()?.heart_rate_avg ?? '—'}</span>
+                <span class="text-lg text-gray-400 ml-1">BPM</span>
+              </div>
+            </div>
+            <p class="text-sm text-gray-400 mt-3">{hrRangeLabel()}</p>
+            <Show when={latest()?.heart_rate_min !== null && latest()?.heart_rate_max !== null}>
+              <p class="text-xs text-gray-400 mt-1">Range: {latest()?.heart_rate_min}–{latest()?.heart_rate_max} BPM</p>
+            </Show>
           </div>
-          <div class="flex items-center gap-1">
-            <div class="w-6 h-0.5 bg-red-300 rounded border-dashed" />
-            <span>Max</span>
-          </div>
-          <div class="flex items-center gap-1">
-            <div class="w-6 h-0.5 bg-blue-300 rounded" />
-            <span>Min</span>
+          <div class="card p-6 flex flex-col items-center justify-center">
+            <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">7-Day Avg Heart Rate</h3>
+            <CircularProgress value={avgRestingHr()} max={200} size="w-36 h-36" colorClass="text-red-500" sublabel="BPM" />
+            <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">{hrRows().length} day{hrRows().length !== 1 ? 's' : ''} of data</p>
           </div>
         </div>
-      </div>
+        <div class="card p-6">
+          <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">7-Day Heart Rate Trend</h3>
+          <Show
+            when={hrRows().length > 1}
+            fallback={<p class="text-sm text-gray-400 text-center py-8">Need at least 2 days of data to draw a trend line.</p>}
+          >
+            <div class="overflow-x-auto">
+              <svg viewBox={`-30 -10 ${chartWidth + 60} ${chartHeight + 40}`} class="w-full h-44">
+                <Show when={hrRows().some((r) => r.heart_rate_max !== null)}>
+                  <polyline points={maxPoints()} fill="none" stroke="#fca5a5" stroke-width="1.5" stroke-dasharray="4" />
+                </Show>
+                <polyline points={avgPoints()} fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+                <Show when={hrRows().some((r) => r.heart_rate_min !== null)}>
+                  <polyline points={minPoints()} fill="none" stroke="#93c5fd" stroke-width="1.5" stroke-dasharray="4" />
+                </Show>
+                <For each={hrRows()}>
+                  {(d, i) => (
+                    <circle cx={(i() / Math.max(hrRows().length - 1, 1)) * chartWidth} cy={scaleY(d.heart_rate_avg ?? 0)} r="4" fill="#ef4444" />
+                  )}
+                </For>
+                <For each={hrRows()}>
+                  {(d, i) => (
+                    <text x={(i() / Math.max(hrRows().length - 1, 1)) * chartWidth} y={chartHeight + 18} text-anchor="middle" class="fill-gray-400" font-size="10">
+                      {dayLabel(d.date)}
+                    </text>
+                  )}
+                </For>
+              </svg>
+            </div>
+            <div class="flex items-center justify-center gap-6 mt-2 text-xs text-gray-400">
+              <div class="flex items-center gap-1"><div class="w-6 h-0.5 bg-red-500 rounded" /><span>Avg</span></div>
+              <div class="flex items-center gap-1"><div class="w-6 h-0.5 bg-red-300 rounded" /><span>Max</span></div>
+              <div class="flex items-center gap-1"><div class="w-6 h-0.5 bg-blue-300 rounded" /><span>Min</span></div>
+            </div>
+          </Show>
+        </div>
+        <div class="card p-6">
+          <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">Daily Breakdown</h3>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm text-left">
+              <thead>
+                <tr class="text-xs text-gray-400 border-b border-gray-200 dark:border-gray-700">
+                  <th class="pb-2 font-medium">Day</th>
+                  <th class="pb-2 font-medium text-right">Min</th>
+                  <th class="pb-2 font-medium text-right">Avg</th>
+                  <th class="pb-2 font-medium text-right">Max</th>
+                </tr>
+              </thead>
+              <tbody>
+                <For each={[...hrRows()].reverse()}>
+                  {(row) => (
+                    <tr class="border-b border-gray-100 dark:border-gray-800 last:border-0">
+                      <td class="py-2 text-gray-700 dark:text-gray-200">{row.date}</td>
+                      <td class="py-2 text-right text-blue-500">{row.heart_rate_min ?? '—'}</td>
+                      <td class="py-2 text-right font-semibold text-gray-900 dark:text-white">{row.heart_rate_avg ?? '—'}</td>
+                      <td class="py-2 text-right text-red-400">{row.heart_rate_max ?? '—'}</td>
+                    </tr>
+                  )}
+                </For>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </Show>
     </div>
   );
 };
@@ -2256,7 +2204,11 @@ const Fitness: Component = () => {
             />
           </Match>
           <Match when={activeTab() === 'heart'}>
-            <HeartTab />
+            <HeartTab
+              metrics={metrics}
+              gfitConnected={gfitConnected}
+              onSync={async () => { await invoke('gfit_sync'); await loadData(); }}
+            />
           </Match>
           <Match when={activeTab() === 'activity'}>
             <ActivityTab />
