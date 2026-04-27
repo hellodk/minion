@@ -5005,13 +5005,13 @@ pub async fn gfit_open_auth(
         .build()
         .map_err(|e| e.to_string())?;
 
-    // Detect when the user manually closes the auth window so we can
-    // immediately cancel rather than waiting out the 5-minute timeout.
+    // Detect when the user manually clicks X on the auth window (CloseRequested only —
+    // NOT Destroyed, which also fires on navigation away from the OAuth URL).
     let (win_close_tx, win_close_rx) = tokio::sync::oneshot::channel::<()>();
     let win_close_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(win_close_tx)));
     let win_close_tx2 = win_close_tx.clone();
     auth_window.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed | tauri::WindowEvent::CloseRequested { .. }) {
+        if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
             if let Ok(mut guard) = win_close_tx2.lock() {
                 if let Some(tx) = guard.take() {
                     let _ = tx.send(());
@@ -5325,11 +5325,21 @@ pub async fn gfit_sync_inner(
                         .format("%Y-%m-%d").to_string();
 
                     if let Ok(wconn) = db.get() {
+                        // Mirror into fitness_workouts_gfit (raw store)
                         wconn.execute(
                             "INSERT OR IGNORE INTO fitness_workouts_gfit
                              (id, date, activity, duration_s, source, synced_at)
                              VALUES (?1,?2,?3,?4,'gfit',?5)",
                             rusqlite::params![id, date, name, duration_s, now_rfc],
+                        ).ok();
+                        // Also upsert into fitness_workouts so it appears in the Workouts UI
+                        let duration_min = duration_s as f64 / 60.0;
+                        let w_id = format!("gfit_{}", id);
+                        wconn.execute(
+                            "INSERT OR IGNORE INTO fitness_workouts
+                             (id, name, duration_minutes, date, notes, created_at)
+                             VALUES (?1,?2,?3,?4,'Synced from Google Fit',?5)",
+                            rusqlite::params![w_id, name, duration_min, date, now_rfc],
                         ).ok();
                     }
                 }
