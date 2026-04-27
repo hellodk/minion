@@ -83,7 +83,7 @@ fn check_heading_hierarchy(content: &str) -> Vec<LintIssue> {
     let mut issues = Vec::new();
     let mut prev_level = 0u32;
     for (level, text) in &headings {
-        if prev_level > 0 && *level > prev_level + 1 {
+        if *level > prev_level + 1 {
             issues.push(LintIssue::new(
                 "heading_hierarchy",
                 text,
@@ -104,7 +104,7 @@ fn check_duplicate_headings(content: &str) -> Vec<LintIssue> {
     for (_, text) in &headings {
         let key = text.to_lowercase();
         *seen.entry(key.clone()).or_insert(0) += 1;
-        if seen[&key] == 2 {
+        if seen[&key] >= 2 {
             issues.push(LintIssue::new(
                 "duplicate_heading",
                 text,
