@@ -5260,7 +5260,7 @@ async fn gfit_sync_chunk(
     let db = { state.read().await.db.clone() };
 
     let dev_key = { get_or_create_device_key(&state.read().await.data_dir) };
-    let mut token: Option<String> = {
+    let token: Option<String> = {
         let conn = db.get().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT value FROM config WHERE key = 'gfit_access_token'",
@@ -5296,12 +5296,12 @@ async fn gfit_sync_chunk(
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         let data_dir = state.read().await.data_dir.clone();
         let new_token = gfit_refresh_token(&db, &data_dir).await?;
-        token = Some(new_token.clone());
         resp = client
             .post("https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate")
             .bearer_auth(&new_token)
             .json(&agg_body)
             .send().await.map_err(|e| e.to_string())?;
+        let _ = token; // refreshed — no further use needed
     }
 
     if !resp.status().is_success() {

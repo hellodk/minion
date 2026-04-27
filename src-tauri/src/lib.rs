@@ -73,7 +73,7 @@ pub fn run() {
 
                     // Only sync between 06:00 and 23:00 local time (no 3am API waste)
                     let hour = chrono::Local::now().hour();
-                    if hour < 6 || hour >= 23 {
+                    if !(6..23).contains(&hour) {
                         continue;
                     }
 
