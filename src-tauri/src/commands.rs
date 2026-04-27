@@ -4876,6 +4876,17 @@ pub async fn gfit_open_auth(
     ).ok().map(|enc| read_token(&dev_key, &enc));
     drop(st);
 
+    // Google Desktop OAuth clients always require client_secret in token exchange.
+    // Fail early with a clear message rather than letting Google return a 400.
+    if client_secret.as_deref().map(|s| s.is_empty()).unwrap_or(true) {
+        return Err(
+            "Google Fit Client Secret is not configured. \
+             Go to Settings → Google Fit, enter your Client Secret (GOCSPX-…) \
+             from Google Cloud Console, click Save Credentials, then try Connect again."
+                .to_string(),
+        );
+    }
+
     let redirect_uri = GFIT_LOOPBACK_REDIRECT;
 
     // PKCE: generate code_verifier and code_challenge
@@ -5074,7 +5085,7 @@ async fn gfit_refresh_token(
 ) -> Result<String, String> {
     // Phase 1: read credentials synchronously
     let dev_key_ref = get_or_create_device_key(data_dir);
-    let (refresh, client_id) = {
+    let (refresh, client_id, client_secret_opt) = {
         let conn = db.get().map_err(|e| e.to_string())?;
         let refresh: Option<String> = conn.query_row(
             "SELECT value FROM config WHERE key = 'gfit_refresh_token'",
@@ -5084,7 +5095,10 @@ async fn gfit_refresh_token(
         let client_id: Option<String> = conn.query_row(
             "SELECT value FROM config WHERE key = 'gfit_client_id'", [], |r| r.get(0),
         ).ok().flatten();
-        (refresh, client_id)
+        let client_secret_opt: Option<String> = conn.query_row(
+            "SELECT value FROM config WHERE key = 'gfit_client_secret'", [], |r| r.get::<_, String>(0),
+        ).ok().map(|s| read_token(&dev_key_ref, &s));
+        (refresh, client_id, client_secret_opt)
     }; // conn dropped here
 
     let refresh = refresh.ok_or("No refresh token — please reconnect Google Fit.")?;
@@ -5092,12 +5106,20 @@ async fn gfit_refresh_token(
 
     // Phase 2: HTTP (no conn held)
     let http = reqwest::Client::new();
+    let mut form_params = vec![
+        ("client_id", client_id.as_str()),
+        ("refresh_token", refresh.as_str()),
+        ("grant_type", "refresh_token"),
+    ];
+    let secret_str;
+    if let Some(ref s) = client_secret_opt {
+        if !s.is_empty() {
+            secret_str = s.clone();
+            form_params.push(("client_secret", secret_str.as_str()));
+        }
+    }
     let resp = http.post("https://oauth2.googleapis.com/token")
-        .form(&[
-            ("client_id", client_id.as_str()),
-            ("refresh_token", refresh.as_str()),
-            ("grant_type", "refresh_token"),
-        ])
+        .form(&form_params)
         .send().await.map_err(|e| e.to_string())?;
 
     if !resp.status().is_success() {

@@ -278,11 +278,15 @@ cmd_clean() {
             "debug builds only" \
             "node_modules only" \
             "cargo registry src only" \
+            "release deps (keep bundles, free 1-2GB)" \
             "docker (unused images + build cache)"
         sub="$PROMPT_RESULT"
     fi
 
     header "Cleanup"
+    # NOTE: ui/dist is intentionally NOT cleaned here.
+    # tauri::generate_context!() requires it at Rust compile time.
+    # It is rebuilt automatically by 'mnk build release' or 'mnk dev'.
     local before; before=$(df / | awk 'NR==2{print $3}')
 
     case "$sub" in
@@ -290,6 +294,13 @@ cmd_clean() {
             rm -rf target/debug
             rm -rf ui/node_modules
             rm -rf ~/.cargo/registry/src
+            ;;
+        release*)
+            # Frees ~2GB of incremental compile cache while keeping .deb/.rpm bundles
+            rm -rf target/release/deps
+            rm -rf target/release/build
+            rm -rf target/release/incremental
+            rm -rf target/release/bundle/appimage
             ;;
         debug*)
             rm -rf target/debug
