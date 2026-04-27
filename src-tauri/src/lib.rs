@@ -15,6 +15,7 @@ mod health_commands;
 mod health_entities;
 mod health_analysis;
 mod health_drive_sync;
+mod health_extract;
 mod health_ingestion;
 mod health_timeline;
 mod llm_commands;
@@ -321,6 +322,8 @@ pub fn run() {
             health_commands::health_list_symptoms,
             health_commands::health_resolve_symptom,
             health_commands::health_delete_symptom,
+            // Health Phase B — structured extraction
+            health_extract::health_extract_document,
             // Health Vault ingestion (week 2)
             health_ingestion::health_discover_folder,
             health_ingestion::health_start_ingestion,
