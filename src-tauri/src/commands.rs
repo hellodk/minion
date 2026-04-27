@@ -4801,18 +4801,26 @@ struct GfitTokenJson {
 
 async fn gfit_exchange_code_for_tokens(
     client_id: &str,
+    client_secret: Option<&str>,
     code: &str,
     redirect_uri: &str,
     code_verifier: &str,
 ) -> Result<GfitTokenJson, String> {
     let client = reqwest::Client::new();
-    let params = [
+    let mut params = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
         ("client_id", client_id),
         ("redirect_uri", redirect_uri),
         ("code_verifier", code_verifier),
     ];
+    // Include client_secret when available (improves security alongside PKCE)
+    if let Some(secret) = client_secret {
+        if !secret.is_empty() {
+            params.push(("client_secret", secret));
+        }
+    }
+    let params = params;
     let resp = client
         .post("https://oauth2.googleapis.com/token")
         .form(&params)
@@ -4846,6 +4854,8 @@ pub async fn gfit_open_auth(
     use tokio::net::TcpListener;
     use tokio::time::Duration;
 
+    let data_dir = { state.read().await.data_dir.clone() };
+    let dev_key = get_or_create_device_key(&data_dir);
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
     let client_id: String = conn
@@ -4860,6 +4870,10 @@ pub async fn gfit_open_auth(
              console.cloud.google.com and add redirect URI http://127.0.0.1:8745/"
                 .to_string()
         })?;
+    let client_secret: Option<String> = conn.query_row(
+        "SELECT value FROM config WHERE key = 'gfit_client_secret'",
+        [], |r| r.get::<_, String>(0),
+    ).ok().map(|enc| read_token(&dev_key, &enc));
     drop(st);
 
     let redirect_uri = GFIT_LOOPBACK_REDIRECT;
@@ -4984,28 +4998,45 @@ pub async fn gfit_open_auth(
 
     close_gfit_auth_window(&app);
     let auth_parsed = url::Url::parse(&auth_url).map_err(|e| e.to_string())?;
-    WebviewWindowBuilder::new(&app, "google-fit-auth", WebviewUrl::External(auth_parsed))
+    let auth_window = WebviewWindowBuilder::new(&app, "google-fit-auth", WebviewUrl::External(auth_parsed))
         .title("MINION - Google Fit Sign In")
         .inner_size(500.0, 700.0)
         .center()
         .build()
         .map_err(|e| e.to_string())?;
 
-    let code = tokio::time::timeout(Duration::from_secs(300), rx)
-        .await
-        .map_err(|_| {
+    // Detect when the user manually closes the auth window so we can
+    // immediately cancel rather than waiting out the 5-minute timeout.
+    let (win_close_tx, win_close_rx) = tokio::sync::oneshot::channel::<()>();
+    let win_close_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(win_close_tx)));
+    let win_close_tx2 = win_close_tx.clone();
+    auth_window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed | tauri::WindowEvent::CloseRequested { .. }) {
+            if let Ok(mut guard) = win_close_tx2.lock() {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+    });
+
+    let code = tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(300), rx) => {
             callback_task.abort();
-            "OAuth login timed out.".to_string()
-        })?
-        .map_err(|_| {
+            result
+                .map_err(|_| "OAuth login timed out.".to_string())?
+                .map_err(|_| "OAuth was cancelled.".to_string())??
+        }
+        _ = win_close_rx => {
             callback_task.abort();
-            "OAuth was cancelled.".to_string()
-        })??;
+            return Err("Google Fit connection was cancelled.".to_string());
+        }
+    };
 
     callback_task.abort();
 
     let tokens =
-        gfit_exchange_code_for_tokens(&client_id, &code, redirect_uri, &code_verifier).await?;
+        gfit_exchange_code_for_tokens(&client_id, client_secret.as_deref(), &code, redirect_uri, &code_verifier).await?;
 
     let data_dir = { state.read().await.data_dir.clone() };
     let dev_key = get_or_create_device_key(&data_dir);
@@ -5340,6 +5371,37 @@ pub async fn gfit_save_client_id(
 }
 
 #[tauri::command]
+pub async fn gfit_save_client_secret(
+    state: State<'_, AppStateHandle>,
+    client_secret: String,
+) -> Result<(), String> {
+    let data_dir = { state.read().await.data_dir.clone() };
+    let dev_key = get_or_create_device_key(&data_dir);
+    let enc = encrypt_secret(&dev_key, &client_secret);
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_client_secret', ?1)",
+        rusqlite::params![enc],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn gfit_get_client_secret_hint(
+    state: State<'_, AppStateHandle>,
+) -> Result<bool, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM config WHERE key = 'gfit_client_secret')",
+        [], |r| r.get(0),
+    ).unwrap_or(false);
+    Ok(exists)
+}
+
+#[tauri::command]
 pub async fn gfit_check_connected(state: State<'_, AppStateHandle>) -> Result<bool, String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
@@ -5370,6 +5432,8 @@ pub async fn gfit_exchange_auth_code(
     state: State<'_, AppStateHandle>,
     code: String,
 ) -> Result<(), String> {
+    let data_dir_ea = { state.read().await.data_dir.clone() };
+    let dev_key_ea = get_or_create_device_key(&data_dir_ea);
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
     let client_id: String = conn
@@ -5381,10 +5445,14 @@ pub async fn gfit_exchange_auth_code(
         .map_err(|_| {
             "Google Fit client ID not configured. Save your OAuth Client ID first.".to_string()
         })?;
+    let client_secret_ea: Option<String> = conn.query_row(
+        "SELECT value FROM config WHERE key = 'gfit_client_secret'",
+        [], |r| r.get::<_, String>(0),
+    ).ok().map(|enc| read_token(&dev_key_ea, &enc));
     drop(st);
 
     let tokens =
-        gfit_exchange_code_for_tokens(&client_id, code.trim(), GFIT_LOOPBACK_REDIRECT, "")
+        gfit_exchange_code_for_tokens(&client_id, client_secret_ea.as_deref(), code.trim(), GFIT_LOOPBACK_REDIRECT, "")
             .await?;
 
     let data_dir = { state.read().await.data_dir.clone() };

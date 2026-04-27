@@ -15,6 +15,7 @@ const Settings: Component = () => {
   // Google Fit state
   const [gfitConnected, setGfitConnected] = createSignal(false);
   const [gfitClientId, setGfitClientId] = createSignal('');
+  const [gfitClientSecret, setGfitClientSecret] = createSignal('');
   const [gfitAuthCode, setGfitAuthCode] = createSignal('');
   const [gfitStatus, setGfitStatus] = createSignal<'idle' | 'saving' | 'syncing' | 'success' | 'error'>('idle');
   const [gfitMessage, setGfitMessage] = createSignal('');
@@ -548,10 +549,19 @@ const Settings: Component = () => {
                   value={gfitClientId()}
                   onInput={(e) => setGfitClientId(e.currentTarget.value)}
                 />
+              </div>
+              <div>
+                <label class="block text-sm font-medium mb-1">OAuth Client Secret</label>
+                <input
+                  type="password"
+                  class="input w-full text-sm"
+                  placeholder="GOCSPX-…"
+                  value={gfitClientSecret()}
+                  onInput={(e) => setGfitClientSecret(e.currentTarget.value)}
+                />
                 <p class="text-xs text-gray-400 mt-1">
-                  Google Cloud Console → APIs &amp; Services → Credentials → Create OAuth client ID (Desktop app).
-                  Enable the Fitness API. Under Authorized redirect URIs add exactly{' '}
-                  <code class="text-minion-600 dark:text-minion-400">http://127.0.0.1:8745/</code>
+                  Google Cloud Console → APIs &amp; Services → Credentials → Desktop app client.
+                  Enable Fitness API. Authorized redirect URI: <code class="text-minion-600 dark:text-minion-400">http://127.0.0.1:8745/</code>
                 </p>
               </div>
               <div class="flex gap-2">
@@ -561,7 +571,9 @@ const Settings: Component = () => {
                   onClick={async () => {
                     try {
                       await invoke('gfit_save_client_id', { clientId: gfitClientId().trim() });
-                      setGfitMessage('Client ID saved.');
+                      if (gfitClientSecret().trim())
+                        await invoke('gfit_save_client_secret', { clientSecret: gfitClientSecret().trim() });
+                      setGfitMessage('Credentials saved.');
                       setGfitStatus('success');
                     } catch (e: any) {
                       setGfitMessage('Failed: ' + String(e));
@@ -569,7 +581,7 @@ const Settings: Component = () => {
                     }
                   }}
                 >
-                  Save Client ID
+                  Save Credentials
                 </button>
                 <button
                   class="btn btn-primary flex-1"
@@ -577,6 +589,8 @@ const Settings: Component = () => {
                   onClick={async () => {
                     try {
                       await invoke('gfit_save_client_id', { clientId: gfitClientId().trim() });
+                      if (gfitClientSecret().trim())
+                        await invoke('gfit_save_client_secret', { clientSecret: gfitClientSecret().trim() });
                       await invoke('gfit_open_auth');
                       setGfitConnected(true);
                       setGfitAuthCode('');

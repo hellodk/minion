@@ -196,6 +196,8 @@ pub fn run() {
             commands::gfit_sync,
             commands::gfit_save_token,
             commands::gfit_save_client_id,
+            commands::gfit_save_client_secret,
+            commands::gfit_get_client_secret_hint,
             commands::gfit_check_connected,
             commands::gfit_disconnect,
             commands::gfit_exchange_auth_code,
