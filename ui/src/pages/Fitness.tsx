@@ -40,7 +40,7 @@ interface FitnessMetricResponse {
   synced_at: string | null;
 }
 
-interface GfitSyncStatus {
+export interface GfitSyncStatus {
   last_synced: string | null;  // ISO datetime string or null
   days_count: number;
   running: boolean;
