@@ -21,17 +21,31 @@ interface FitnessDashboard {
 
 interface FitnessMetricResponse {
   id: string;
-  date: string;
+  date: string;                    // "YYYY-MM-DD"
   weight_kg: number | null;
   body_fat_pct: number | null;
   steps: number | null;
   heart_rate_avg: number | null;
+  heart_rate_min: number | null;
+  heart_rate_max: number | null;
   sleep_hours: number | null;
-  sleep_quality: number | null;
+  sleep_quality: number | null;    // 0–100 score
   water_ml: number | null;
   calories_in: number | null;
-  notes: string | null;
-  created_at: string;
+  calories_out: number | null;
+  distance_m: number | null;
+  active_minutes: number | null;
+  spo2_avg: number | null;
+  source: string | null;
+  synced_at: string | null;
+}
+
+interface GfitSyncStatus {
+  last_synced: string | null;  // ISO datetime string or null
+  days_count: number;
+  running: boolean;
+  pct: number;
+  message: string;
 }
 
 interface FitnessHabitResponse {
