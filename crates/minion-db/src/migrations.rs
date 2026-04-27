@@ -35,6 +35,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("015_sysmon", migrate_015_sysmon),
         ("016_blog_draft_content", migrate_016_blog_draft_content),
         ("017_fitness_gfit_columns", migrate_017_fitness_gfit_columns),
+        ("018_blog_llm", migrate_018_blog_llm),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -1179,6 +1180,25 @@ fn migrate_017_fitness_gfit_columns(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_018_blog_llm(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        ALTER TABLE blog_posts ADD COLUMN social_snippets_json TEXT;
+
+        CREATE TABLE IF NOT EXISTS blog_post_variants (
+            id           TEXT PRIMARY KEY,
+            post_id      TEXT NOT NULL REFERENCES blog_posts(id) ON DELETE CASCADE,
+            variant_type TEXT NOT NULL,
+            label        TEXT NOT NULL,
+            content      TEXT NOT NULL,
+            created_at   TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_blog_variants_post ON blog_post_variants(post_id);
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1297,7 +1317,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 17);
+        assert_eq!(count, 18);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn
@@ -1411,6 +1431,26 @@ mod tests {
              VALUES ('t1','2026-01-01T00:00:00Z',42.0,4096,8192,0,'[]','[]','[]')",
             [],
         ).expect("insert into sysmon_snapshots failed");
+    }
+
+    #[test]
+    fn test_migration_018_blog_llm_schema() {
+        let conn = setup_test_db();
+        run(&conn).expect("migrations failed");
+        conn.execute(
+            "UPDATE blog_posts SET social_snippets_json = '{\"twitter\":\"test\"}' WHERE 1=0",
+            [],
+        ).expect("social_snippets_json column missing");
+        // Insert a parent blog_posts row so the FK on blog_post_variants is satisfied.
+        conn.execute(
+            "INSERT INTO blog_posts (id, title, slug) VALUES ('p1', 'Test', 'test')",
+            [],
+        ).expect("blog_posts insert failed");
+        conn.execute(
+            "INSERT INTO blog_post_variants (id, post_id, variant_type, label, content)
+             VALUES ('v1','p1','test','Test','content')",
+            [],
+        ).expect("blog_post_variants insert failed");
     }
 
     #[test]
