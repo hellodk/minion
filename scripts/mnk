@@ -209,19 +209,19 @@ cmd_build() {
         case "$target" in
             deb)
                 info "Bundling .deb…"
-                cargo tauri bundle --bundle deb 2>&1 | grep -E "Bundling|Finished|error" | head -5
+                cargo tauri bundle -b deb 2>&1 | grep -E "Bundling|Finished|error" | head -5
                 local f; f=$(latest_deb)
                 [[ -n "$f" ]] && built+=("$(ls -lh "$f" | awk '{print ".deb  → " $NF " (" $5 ")"}')")
                 ;;
             rpm)
                 info "Bundling .rpm…"
-                cargo tauri bundle --bundle rpm 2>&1 | grep -E "Bundling|Finished|error" | head -5
+                cargo tauri bundle -b rpm 2>&1 | grep -E "Bundling|Finished|error" | head -5
                 local f; f=$(find target/release/bundle/rpm -name "*.rpm" 2>/dev/null | sort -V | tail -1)
                 [[ -n "$f" ]] && built+=("$(ls -lh "$f" | awk '{print ".rpm  → " $NF " (" $5 ")"}')")
                 ;;
             appimage)
                 info "Bundling .AppImage…"
-                cargo tauri bundle --bundle appimage 2>&1 | grep -E "Bundling|Finished|error" | head -5
+                cargo tauri bundle -b appimage 2>&1 | grep -E "Bundling|Finished|error" | head -5
                 local f; f=$(find target/release/bundle/appimage -name "*.AppImage" 2>/dev/null | sort -V | tail -1)
                 [[ -n "$f" ]] && built+=("$(ls -lh "$f" | awk '{print ".AppImage → " $NF " (" $5 ")"}')")
                 ;;
