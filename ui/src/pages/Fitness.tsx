@@ -300,7 +300,7 @@ const CircularProgress: Component<{
   );
 };
 
-const EmptyState: Component<{ icon: string; message: string }> = (props) => (
+export const EmptyState: Component<{ icon: string; message: string }> = (props) => (
   <div class="flex flex-col items-center justify-center py-16 gap-4 text-center">
     <div class="p-4 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-400">
       <Icon name={props.icon} class="w-10 h-10" />
@@ -311,7 +311,7 @@ const EmptyState: Component<{ icon: string; message: string }> = (props) => (
   </div>
 );
 
-const SyncStatusBar: Component<{ onSync: () => Promise<void> }> = (props) => {
+export const SyncStatusBar: Component<{ onSync: () => Promise<void> }> = (props) => {
   const [status, setStatus] = createSignal<GfitSyncStatus | null>(null);
   const [syncing, setSyncing] = createSignal(false);
 
