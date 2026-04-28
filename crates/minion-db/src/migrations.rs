@@ -38,6 +38,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("018_blog_llm", migrate_018_blog_llm),
         ("019_health_extract", migrate_019_health_extract),
         ("020_health_intelligence", migrate_020_health_intelligence),
+        ("021_reader_file_path_index", migrate_021_reader_file_path_index),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -1304,6 +1305,14 @@ fn migrate_020_health_intelligence(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_021_reader_file_path_index(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_reader_books_file_path
+         ON reader_books(file_path);",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1422,7 +1431,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 20);
+        assert_eq!(count, 21);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn
@@ -1659,5 +1668,20 @@ mod tests {
             [], |r| r.get(0),
         ).unwrap();
         assert_eq!(count, 0, "timeline events should cascade on patient delete");
+    }
+
+    #[test]
+    fn test_migration_021_reader_file_path_index() {
+        let conn = setup_test_db();
+        run(&conn).expect("migrations failed");
+
+        let index_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_reader_books_file_path')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("Failed to check index");
+        assert!(index_exists, "idx_reader_books_file_path index missing after migration 021");
     }
 }
