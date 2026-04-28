@@ -183,6 +183,7 @@ pub fn run() {
             commands::reader_import_book,
             commands::reader_get_library,
             commands::reader_update_progress,
+            commands::reader_save_cover,
             commands::reader_add_annotation,
             commands::reader_get_annotations,
             // O'Reilly commands

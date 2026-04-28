@@ -3787,6 +3787,37 @@ pub async fn reader_update_progress(
     Ok(())
 }
 
+/// Save a cover image (JPEG bytes) for a book. Called by the frontend after
+/// rendering a PDF page 1 via pdf.js to a canvas.
+#[tauri::command]
+pub async fn reader_save_cover(
+    state: State<'_, AppStateHandle>,
+    book_id: String,
+    jpeg_bytes: Vec<u8>,
+) -> Result<String, String> {
+    if jpeg_bytes.is_empty() {
+        return Err("Empty cover bytes".to_string());
+    }
+
+    let st = state.read().await;
+    let covers_dir = st.data_dir.join("covers");
+    std::fs::create_dir_all(&covers_dir).map_err(|e| e.to_string())?;
+
+    let cover_file = covers_dir.join(format!("{}.jpg", book_id));
+    std::fs::write(&cover_file, &jpeg_bytes).map_err(|e| e.to_string())?;
+
+    let cover_path = cover_file.to_string_lossy().to_string();
+
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE reader_books SET cover_path = ?1 WHERE id = ?2",
+        rusqlite::params![cover_path, book_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(cover_path)
+}
+
 #[tauri::command]
 pub async fn reader_add_annotation(
     state: State<'_, AppStateHandle>,
