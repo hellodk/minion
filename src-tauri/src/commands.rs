@@ -1841,6 +1841,8 @@ fn replace_epub_images_with_temp_files(
                 .entry(fname.to_string_lossy().to_string())
                 .or_insert_with(|| id.clone());
         }
+        // Some EPUBs use manifest IDs directly as src values
+        name_to_id.entry(id.clone()).or_insert_with(|| id.clone());
     }
 
     let mut result = html.to_string();
