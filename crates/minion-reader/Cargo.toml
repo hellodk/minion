@@ -21,6 +21,7 @@ minion-ai = { path = "../minion-ai" }
 epub = "2.1"
 pdf-extract = "0.10.0"
 html-escape = "0.2.13"
+ammonia = "4"
 
 [dev-dependencies]
 tempfile.workspace = true

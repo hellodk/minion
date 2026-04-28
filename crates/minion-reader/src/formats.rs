@@ -343,8 +343,5 @@ pub fn parse_epub(path: &Path) -> Result<BookContent> {
 
 /// Sanitize HTML content for display
 pub fn sanitize_html(html: &str) -> String {
-    // Basic sanitization - remove scripts, keep safe elements
-    // In production, use a proper HTML sanitizer
-    html.replace("<script", "<!--script")
-        .replace("</script>", "</script-->")
+    ammonia::clean(html)
 }
