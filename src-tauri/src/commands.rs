@@ -4068,6 +4068,21 @@ pub struct FolderFileCandidate {
     pub already_imported: bool,
 }
 
+fn collect_book_files(dir: &Path, supported_exts: &[&str], out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_book_files(&path, supported_exts, out);
+            } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if supported_exts.contains(&ext.to_lowercase().as_str()) {
+                    out.push(path);
+                }
+            }
+        }
+    }
+}
+
 /// List all book files in a directory (without importing them).
 /// Used by the Reader UI to show a checkbox list for selective import.
 #[tauri::command]
@@ -4081,37 +4096,23 @@ pub async fn reader_list_folder_files(
     }
 
     let book_extensions = ["epub", "pdf", "txt", "md", "markdown", "html", "htm"];
-    let mut candidates: Vec<FolderFileCandidate> = Vec::new();
-
-    fn collect_files(dir: &PathBuf, exts: &[&str], out: &mut Vec<FolderFileCandidate>) {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    collect_files(&path, exts, out);
-                } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    let ext_lower = ext.to_lowercase();
-                    if exts.contains(&ext_lower.as_str()) {
-                        let name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                        out.push(FolderFileCandidate {
-                            path: path.to_string_lossy().to_string(),
-                            name,
-                            extension: ext_lower,
-                            size,
-                            already_imported: false,
-                        });
-                    }
-                }
+    let mut paths: Vec<PathBuf> = Vec::new();
+    collect_book_files(&dir, &book_extensions, &mut paths);
+    let mut candidates: Vec<FolderFileCandidate> = paths
+        .into_iter()
+        .map(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            let extension = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            FolderFileCandidate {
+                path: p.to_string_lossy().to_string(),
+                name,
+                extension,
+                size,
+                already_imported: false,
             }
-        }
-    }
-
-    collect_files(&dir, &book_extensions, &mut candidates);
+        })
+        .collect();
 
     // Mark files that are already in the library
     let st = state.read().await;
@@ -4313,23 +4314,7 @@ pub async fn reader_scan_directory(
     let book_extensions = ["epub", "pdf", "txt", "md", "markdown", "html", "htm"];
     let mut book_paths = Vec::new();
 
-    // Collect book files from the directory (non-recursive for now, then recurse)
-    fn collect_books(dir: &PathBuf, exts: &[&str], out: &mut Vec<PathBuf>) {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    collect_books(&path, exts, out);
-                } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if exts.contains(&ext.to_lowercase().as_str()) {
-                        out.push(path);
-                    }
-                }
-            }
-        }
-    }
-
-    collect_books(&dir, &book_extensions, &mut book_paths);
+    collect_book_files(&dir, &book_extensions, &mut book_paths);
 
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
