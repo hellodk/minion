@@ -90,6 +90,7 @@ function coverUrl(path: string | undefined): string | undefined {
 }
 
 async function generatePdfThumbnail(filePath: string, bookId: string): Promise<void> {
+  let pdf: any = null;
   try {
     const pdfjsLib = await import('pdfjs-dist');
     pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -99,7 +100,7 @@ async function generatePdfThumbnail(filePath: string, bookId: string): Promise<v
 
     const bytes = await invoke<number[]>('reader_get_pdf_bytes', { path: filePath });
     const data = new Uint8Array(bytes);
-    const pdf = await pdfjsLib.getDocument({ data }).promise;
+    pdf = await pdfjsLib.getDocument({ data }).promise;
     const page = await pdf.getPage(1);
 
     const scale = 0.5;
@@ -119,9 +120,10 @@ async function generatePdfThumbnail(filePath: string, bookId: string): Promise<v
     const jpegBytes = Array.from(new Uint8Array(arrayBuffer));
 
     await invoke('reader_save_cover', { bookId, jpegBytes });
-    await pdf.destroy();
   } catch (e) {
     console.warn('PDF thumbnail generation failed:', e);
+  } finally {
+    if (pdf) pdf.destroy().catch(() => {});
   }
 }
 
