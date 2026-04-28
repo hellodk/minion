@@ -2,7 +2,10 @@ import { Component, createSignal, createEffect, on, onMount, onCleanup, For, Sho
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
-import { PageFlip } from 'page-flip';
+import { EpubStPageFlip } from './reader/EpubStPageFlip';
+import { CollectionPanel } from './reader/CollectionPanel';
+import { FolderImportModal } from './reader/FolderImportModal';
+import type { FolderImportModalApi } from './reader/FolderImportModal';
 
 // ============================================================================
 // Types
@@ -71,14 +74,6 @@ type ReadingMode = 'light' | 'dark' | 'sepia';
 type LibraryTab = 'all' | 'collections' | 'oreilly';
 type PdfFitMode = 'fitWidth' | 'fitPage' | 'actual';
 
-/** StPageFlip `flippingTime` (ms) — must match completion timer in EpubStPageFlip. */
-const EPUB_PAGE_FLIP_MS = 960;
-
-const PRESET_COLORS = [
-  '#0ea5e9', '#8b5cf6', '#ec4899', '#f97316', '#22c55e',
-  '#ef4444', '#14b8a6', '#f59e0b', '#6366f1', '#64748b',
-];
-
 // ============================================================================
 // EPUB: StPageFlip — soft page curl (Apple Books–style mesh + shadows)
 // ============================================================================
@@ -127,123 +122,6 @@ async function generatePdfThumbnail(filePath: string, bookId: string): Promise<v
   }
 }
 
-function escapeHtmlTitle(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-interface EpubStPageFlipProps {
-  dir: 'forward' | 'back';
-  outgoingTitle: string;
-  incomingTitle: string;
-  outgoingHtml: string;
-  incomingHtml: string;
-  proseClass: string;
-  chapterTitleColor: string;
-  onComplete: () => void;
-}
-
-const EpubStPageFlip: Component<EpubStPageFlipProps> = (props) => {
-  let host: HTMLDivElement | undefined;
-  let pf: PageFlip | undefined;
-  let doneTimer: ReturnType<typeof setTimeout> | undefined;
-  let completed = false;
-
-  const finish = () => {
-    if (completed) return;
-    completed = true;
-    if (doneTimer !== undefined) clearTimeout(doneTimer);
-    props.onComplete();
-  };
-
-  onMount(() => {
-    if (!host) {
-      finish();
-      return;
-    }
-
-    const p0 = document.createElement('div');
-    p0.dataset.density = 'soft';
-    const p1 = document.createElement('div');
-    p1.dataset.density = 'soft';
-
-    const hStyle = `color: ${props.chapterTitleColor}; letter-spacing: -0.02em;`;
-    const wrap = (title: string, html: string) =>
-      `<h1 class="text-2xl font-bold mb-8" style="${hStyle}">${escapeHtmlTitle(title)}</h1><div class="prose max-w-none ${props.proseClass}">${html}</div>`;
-
-    if (props.dir === 'forward') {
-      p0.innerHTML = wrap(props.outgoingTitle, props.outgoingHtml);
-      p1.innerHTML = wrap(props.incomingTitle, props.incomingHtml);
-    } else {
-      p0.innerHTML = wrap(props.incomingTitle, props.incomingHtml);
-      p1.innerHTML = wrap(props.outgoingTitle, props.outgoingHtml);
-    }
-
-    try {
-      pf = new PageFlip(host, {
-        width: 520,
-        height: 720,
-        size: 'stretch',
-        minWidth: 280,
-        maxWidth: 960,
-        minHeight: 420,
-        maxHeight: 2400,
-        flippingTime: EPUB_PAGE_FLIP_MS,
-        usePortrait: true,
-        maxShadowOpacity: 0.48,
-        drawShadow: true,
-        showPageCorners: false,
-        useMouseEvents: false,
-        disableFlipByClick: true,
-        mobileScrollSupport: false,
-        autoSize: true,
-        showCover: false,
-        startPage: props.dir === 'forward' ? 0 : 1,
-        startZIndex: 0,
-      });
-
-      pf.loadFromHTML([p0, p1]);
-
-      requestAnimationFrame(() => {
-        if (!pf) return;
-        if (props.dir === 'forward') {
-          pf.flipNext('top');
-        } else {
-          pf.flipPrev('top');
-        }
-      });
-
-      doneTimer = setTimeout(finish, EPUB_PAGE_FLIP_MS + 120);
-    } catch (e) {
-      console.error('StPageFlip failed:', e);
-      finish();
-    }
-  });
-
-  onCleanup(() => {
-    if (doneTimer !== undefined) clearTimeout(doneTimer);
-    if (pf) {
-      try {
-        pf.destroy();
-      } catch {
-        /* host may already be detached */
-      }
-      pf = undefined;
-    }
-  });
-
-  return (
-    <div
-      ref={(el) => {
-        host = el;
-      }}
-      class="epub-st-page-flip-host w-full min-h-[65vh] min-w-0"
-    />
-  );
-};
 
 // ============================================================================
 // Component
@@ -312,40 +190,13 @@ const Reader: Component = () => {
   const [bookClosing, setBookClosing] = createSignal(false);
   const [openingCardIndex, setOpeningCardIndex] = createSignal<number | null>(null);
 
-  // Collection creation form
-  const [showNewCollection, setShowNewCollection] = createSignal(false);
-  const [newCollectionName, setNewCollectionName] = createSignal('');
-  const [newCollectionColor, setNewCollectionColor] = createSignal('#0ea5e9');
-  const [creatingCollection, setCreatingCollection] = createSignal(false);
-
-  // Collection detail view
-  const [expandedCollection, setExpandedCollection] = createSignal<string | null>(null);
-  const [collectionBooks, setCollectionBooks] = createSignal<LibraryBook[]>([]);
-  const [loadingCollectionBooks, setLoadingCollectionBooks] = createSignal(false);
-
-  // "Add to Collection" dropdown
+  // "Add to Collection" dropdown (used in renderBookCard)
   const [addToCollectionBookId, setAddToCollectionBookId] = createSignal<string | null>(null);
 
-  // "Add existing books to collection" picker
-  const [addBooksCollectionId, setAddBooksCollectionId] = createSignal<string | null>(null);
-  const [addBooksSelected, setAddBooksSelected] = createSignal<Set<string>>(new Set<string>());
-  const [addBooksFilter, setAddBooksFilter] = createSignal('');
+  // Folder import modal — imperative API ref (populated when the component mounts)
+  let importModalApi: FolderImportModalApi | undefined;
 
-  // Folder import modal (checkbox-based selection)
-  interface FolderFileCandidate {
-    path: string;
-    name: string;
-    extension: string;
-    size: number;
-    already_imported: boolean;
-  }
-  const [showImportModal, setShowImportModal] = createSignal(false);
-  const [importModalPath, setImportModalPath] = createSignal('');
-  const [importCandidates, setImportCandidates] = createSignal<FolderFileCandidate[]>([]);
-  const [importSelected, setImportSelected] = createSignal<Set<string>>(new Set<string>());
-  const [importLoading, setImportLoading] = createSignal(false);
-  const [importFilter, setImportFilter] = createSignal('');
-  const [importTargetCollection, setImportTargetCollection] = createSignal<string>('');
+  // Track whether any import is in progress (for header buttons)
   const [importing, setImporting] = createSignal(false);
 
   // O'Reilly state
@@ -944,35 +795,12 @@ const Reader: Component = () => {
     }
   };
 
-  // Open folder picker, then show a modal with checkbox list of files to import
-  const browseForFolderWithSelection = async () => {
+  // Open folder picker, then show the import modal with a checkbox list of files
+  const browseForFolderWithSelection = async (presetCollectionId?: string) => {
     try {
       const selected = await open({ directory: true, multiple: false });
       if (selected && typeof selected === 'string') {
-        setImportModalPath(selected);
-        setShowImportModal(true);
-        setImportLoading(true);
-        setImportCandidates([]);
-        setImportSelected(new Set<string>());
-        setImportFilter('');
-        setImportTargetCollection('');
-        try {
-          const files = await invoke<FolderFileCandidate[]>('reader_list_folder_files', {
-            path: selected,
-          });
-          setImportCandidates(files);
-          // Pre-select all files that aren't already imported
-          const preSelected = new Set(
-            files.filter((f) => !f.already_imported).map((f) => f.path)
-          );
-          setImportSelected(preSelected);
-        } catch (e) {
-          console.error('Failed to list folder files:', e);
-          alert(`Failed to scan folder: ${e}`);
-          setShowImportModal(false);
-        } finally {
-          setImportLoading(false);
-        }
+        await importModalApi?.open(selected, presetCollectionId);
       }
     } catch (e) {
       console.error('Failed to open folder dialog:', e);
@@ -1020,80 +848,6 @@ const Reader: Component = () => {
     } catch (e) {
       console.error('Failed to open file dialog:', e);
     }
-  };
-
-  const toggleImportSelection = (path: string) => {
-    const current = importSelected();
-    const next = new Set<string>(current);
-    if (next.has(path)) {
-      next.delete(path);
-    } else {
-      next.add(path);
-    }
-    setImportSelected(next);
-  };
-
-  const selectAllImport = () => {
-    const newSet = new Set<string>(
-      importCandidates().filter((c) => !c.already_imported).map((c) => c.path)
-    );
-    setImportSelected(newSet);
-  };
-
-  const deselectAllImport = () => {
-    setImportSelected(new Set<string>());
-  };
-
-  const filteredImportCandidates = () => {
-    const q = importFilter().trim().toLowerCase();
-    if (!q) return importCandidates();
-    return importCandidates().filter(
-      (c) => c.name.toLowerCase().includes(q) || c.extension.toLowerCase().includes(q)
-    );
-  };
-
-  const confirmImportSelection = async () => {
-    const paths = Array.from(importSelected());
-    if (paths.length === 0) {
-      alert('No files selected');
-      return;
-    }
-    setImporting(true);
-    try {
-      const result = await invoke<{ imported: number; skipped: number; failed: number }>(
-        'reader_import_paths',
-        {
-          paths,
-          collectionId: importTargetCollection() || null,
-        }
-      );
-      await loadLibrary();
-      await loadCollections();
-      // Generate thumbnails for any newly imported PDFs that lack covers
-      const pdfsNeedingThumbs = libraryBooks().filter(
-        (b) => b.format === 'pdf' && !b.cover_path
-      );
-      for (const b of pdfsNeedingThumbs) {
-        void generatePdfThumbnail(b.file_path, b.id);
-      }
-      setShowImportModal(false);
-      alert(
-        `Imported: ${result.imported}\nSkipped (already exists): ${result.skipped}\nFailed: ${result.failed}`
-      );
-    } catch (e) {
-      alert(`Import failed: ${e}`);
-    } finally {
-      setImporting(false);
-    }
-  };
-
-  const formatBytes = (bytes: number): string => {
-    if (bytes < 1024) return `${bytes} B`;
-    const kb = bytes / 1024;
-    if (kb < 1024) return `${kb.toFixed(1)} KB`;
-    const mb = kb / 1024;
-    if (mb < 1024) return `${mb.toFixed(1)} MB`;
-    return `${(mb / 1024).toFixed(2)} GB`;
   };
 
   const openBookByPath = async (path: string, cardIndex?: number) => {
@@ -1321,73 +1075,14 @@ const Reader: Component = () => {
   };
 
   // ============================================================================
-  // Collections
+  // Collection helpers used by renderBookCard
   // ============================================================================
-
-  const createCollection = async () => {
-    const name = newCollectionName().trim();
-    if (!name) return;
-    setCreatingCollection(true);
-    try {
-      await invoke<Collection>('reader_create_collection', {
-        name,
-        color: newCollectionColor(),
-        description: null,
-      });
-      setNewCollectionName('');
-      setNewCollectionColor('#0ea5e9');
-      setShowNewCollection(false);
-      await loadCollections();
-    } catch (e) {
-      console.error('Failed to create collection:', e);
-      alert(`Error: ${e}`);
-    } finally {
-      setCreatingCollection(false);
-    }
-  };
-
-  const deleteCollection = async (collectionId: string) => {
-    if (!confirm('Delete this collection? Books will not be removed from your library.')) return;
-    try {
-      await invoke('reader_delete_collection', { collectionId });
-      if (expandedCollection() === collectionId) {
-        setExpandedCollection(null);
-        setCollectionBooks([]);
-      }
-      await loadCollections();
-    } catch (e) {
-      console.error('Failed to delete collection:', e);
-    }
-  };
-
-  const expandCollection = async (collectionId: string) => {
-    if (expandedCollection() === collectionId) {
-      setExpandedCollection(null);
-      setCollectionBooks([]);
-      return;
-    }
-    setExpandedCollection(collectionId);
-    setLoadingCollectionBooks(true);
-    try {
-      const books = await invoke<LibraryBook[]>('reader_get_collection_books', { collectionId });
-      setCollectionBooks(books);
-    } catch (e) {
-      console.error('Failed to load collection books:', e);
-      setCollectionBooks([]);
-    } finally {
-      setLoadingCollectionBooks(false);
-    }
-  };
 
   const addBookToCollection = async (collectionId: string, bookId: string) => {
     try {
       await invoke('reader_add_to_collection', { collectionId, bookId });
       setAddToCollectionBookId(null);
       await loadCollections();
-      if (expandedCollection() === collectionId) {
-        const books = await invoke<LibraryBook[]>('reader_get_collection_books', { collectionId });
-        setCollectionBooks(books);
-      }
     } catch (e) {
       console.error('Failed to add book to collection:', e);
     }
@@ -1397,72 +1092,8 @@ const Reader: Component = () => {
     try {
       await invoke('reader_remove_from_collection', { collectionId, bookId });
       await loadCollections();
-      if (expandedCollection() === collectionId) {
-        const books = await invoke<LibraryBook[]>('reader_get_collection_books', { collectionId });
-        setCollectionBooks(books);
-      }
     } catch (e) {
       console.error('Failed to remove book from collection:', e);
-    }
-  };
-
-  // Open the "add existing books" picker for a collection
-  const openAddBooksPicker = (collectionId: string) => {
-    setAddBooksCollectionId(collectionId);
-    setAddBooksSelected(new Set<string>());
-    setAddBooksFilter('');
-  };
-
-  const closeAddBooksPicker = () => {
-    setAddBooksCollectionId(null);
-    setAddBooksSelected(new Set<string>());
-    setAddBooksFilter('');
-  };
-
-  const toggleAddBookSelection = (bookId: string) => {
-    const next = new Set<string>(addBooksSelected());
-    if (next.has(bookId)) next.delete(bookId);
-    else next.add(bookId);
-    setAddBooksSelected(next);
-  };
-
-  const booksNotInCollection = () => {
-    const inCollection = new Set(collectionBooks().map((b) => b.id));
-    const q = addBooksFilter().trim().toLowerCase();
-    return libraryBooks().filter((b) => {
-      if (inCollection.has(b.id)) return false;
-      if (!q) return true;
-      return (
-        (b.title || '').toLowerCase().includes(q) ||
-        (b.authors || '').toLowerCase().includes(q) ||
-        (b.file_path || '').toLowerCase().includes(q)
-      );
-    });
-  };
-
-  const confirmAddBooksToCollection = async () => {
-    const collectionId = addBooksCollectionId();
-    if (!collectionId) return;
-    const ids = Array.from(addBooksSelected());
-    if (ids.length === 0) {
-      closeAddBooksPicker();
-      return;
-    }
-    try {
-      for (const bookId of ids) {
-        await invoke('reader_add_to_collection', { collectionId, bookId });
-      }
-      await loadCollections();
-      if (expandedCollection() === collectionId) {
-        const books = await invoke<LibraryBook[]>('reader_get_collection_books', {
-          collectionId,
-        });
-        setCollectionBooks(books);
-      }
-      closeAddBooksPicker();
-    } catch (e) {
-      console.error('Failed to add books to collection:', e);
-      alert(`Failed to add books: ${e}`);
     }
   };
 
@@ -2373,7 +2004,7 @@ const Reader: Component = () => {
                 </button>
                 <button
                   class="btn btn-secondary text-sm"
-                  onClick={browseForFolderWithSelection}
+                  onClick={() => browseForFolderWithSelection()}
                   disabled={loading() || importing()}
                   title="Pick a folder and choose which files to import"
                 >
@@ -2536,291 +2167,16 @@ const Reader: Component = () => {
             {/* TAB: Collections                                             */}
             {/* ============================================================ */}
             <Show when={libraryTab() === 'collections'}>
-              {/* New Collection button / form */}
-              <div class="mb-5">
-                <Show
-                  when={showNewCollection()}
-                  fallback={
-                    <button
-                      class="btn btn-secondary text-sm"
-                      onClick={() => setShowNewCollection(true)}
-                    >
-                      <svg
-                        class="w-4 h-4 mr-1.5 inline-block"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          stroke-linecap="round"
-                          stroke-linejoin="round"
-                          stroke-width="2"
-                          d="M12 4v16m8-8H4"
-                        />
-                      </svg>
-                      New Collection
-                    </button>
-                  }
-                >
-                  <div class="card p-4">
-                    <h4 class="font-medium mb-3">Create Collection</h4>
-                    <div class="flex gap-3 items-end">
-                      <div class="flex-1">
-                        <label class="block text-xs text-gray-500 mb-1">Name</label>
-                        <input
-                          type="text"
-                          class="input w-full text-sm"
-                          placeholder="e.g., Computer Science, Fiction..."
-                          value={newCollectionName()}
-                          onInput={(e) => setNewCollectionName(e.currentTarget.value)}
-                          onKeyPress={(e) => e.key === 'Enter' && createCollection()}
-                        />
-                      </div>
-                      <div>
-                        <label class="block text-xs text-gray-500 mb-1">Color</label>
-                        <div class="flex gap-1.5">
-                          <For each={PRESET_COLORS}>
-                            {(color) => (
-                              <button
-                                class="w-6 h-6 rounded-full border-2 transition-transform hover:scale-110"
-                                style={{
-                                  background: color,
-                                  'border-color':
-                                    newCollectionColor() === color
-                                      ? '#1f2937'
-                                      : 'transparent',
-                                }}
-                                onClick={() => setNewCollectionColor(color)}
-                              />
-                            )}
-                          </For>
-                        </div>
-                      </div>
-                      <button
-                        class="btn btn-primary text-sm"
-                        onClick={createCollection}
-                        disabled={!newCollectionName().trim() || creatingCollection()}
-                      >
-                        {creatingCollection() ? 'Creating...' : 'Create'}
-                      </button>
-                      <button
-                        class="btn btn-secondary text-sm"
-                        onClick={() => {
-                          setShowNewCollection(false);
-                          setNewCollectionName('');
-                        }}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                </Show>
-              </div>
-
-              {/* Collection cards */}
-              <Show
-                when={collections().length > 0}
-                fallback={
-                  <div class="card p-12 text-center">
-                    <svg
-                      class="w-12 h-12 mx-auto mb-3 text-gray-300 dark:text-gray-600"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="1.5"
-                        d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"
-                      />
-                    </svg>
-                    <h3 class="text-lg font-medium mb-1">No Collections Yet</h3>
-                    <p class="text-gray-500 dark:text-gray-400">
-                      Create a collection to organize your books.
-                    </p>
-                  </div>
-                }
-              >
-                <div class="space-y-3">
-                  <For each={collections()}>
-                    {(col) => (
-                      <div class="card overflow-hidden">
-                        {/* Collection header */}
-                        <div
-                          class="flex items-center gap-3 p-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
-                          onClick={() => expandCollection(col.id)}
-                        >
-                          <div
-                            class="w-1.5 self-stretch rounded-full flex-shrink-0"
-                            style={{ background: col.color }}
-                          />
-                          <div class="flex-1 min-w-0">
-                            <h3 class="font-medium">{col.name}</h3>
-                            <p class="text-sm text-gray-500 dark:text-gray-400">
-                              {col.book_count} {col.book_count === 1 ? 'book' : 'books'}
-                            </p>
-                          </div>
-                          <button
-                            class="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                            title="Delete collection"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              deleteCollection(col.id);
-                            }}
-                          >
-                            <svg
-                              class="w-4 h-4"
-                              fill="none"
-                              stroke="currentColor"
-                              viewBox="0 0 24 24"
-                            >
-                              <path
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                                stroke-width="2"
-                                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                              />
-                            </svg>
-                          </button>
-                          <svg
-                            class="w-5 h-5 text-gray-400 transition-transform"
-                            classList={{
-                              'rotate-180': expandedCollection() === col.id,
-                            }}
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                          >
-                            <path
-                              stroke-linecap="round"
-                              stroke-linejoin="round"
-                              stroke-width="2"
-                              d="M19 9l-7 7-7-7"
-                            />
-                          </svg>
-                        </div>
-
-                        {/* Expanded collection books */}
-                        <Show when={expandedCollection() === col.id}>
-                          <div
-                            class="border-t border-gray-100 dark:border-gray-700 p-4"
-                            style={{ 'border-top-color': col.color + '30' }}
-                          >
-                            {/* Action bar inside collection */}
-                            <div class="flex gap-2 mb-4">
-                              <button
-                                class="btn btn-primary text-xs"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openAddBooksPicker(col.id);
-                                }}
-                                title="Add books already in your library to this collection"
-                              >
-                                <svg class="w-4 h-4 mr-1.5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-                                </svg>
-                                Add Books
-                              </button>
-                              <button
-                                class="btn btn-secondary text-xs"
-                                onClick={async (e) => {
-                                  e.stopPropagation();
-                                  // Pre-set target collection then open the import-folder modal
-                                  setImportTargetCollection(col.id);
-                                  await browseForFolderWithSelection();
-                                }}
-                                title="Import new books from a folder into this collection"
-                              >
-                                <svg class="w-4 h-4 mr-1.5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                                </svg>
-                                Import Folder
-                              </button>
-                              <button
-                                class="btn btn-secondary text-xs"
-                                onClick={async (e) => {
-                                  e.stopPropagation();
-                                  // File picker then import to this collection
-                                  try {
-                                    const selected = await open({
-                                      multiple: true,
-                                      filters: [
-                                        {
-                                          name: 'Books',
-                                          extensions: ['epub', 'pdf', 'mobi', 'azw3', 'fb2', 'txt', 'md', 'markdown', 'html', 'htm'],
-                                        },
-                                      ],
-                                    });
-                                    if (selected && Array.isArray(selected) && selected.length > 0) {
-                                      const paths = selected as string[];
-                                      setImporting(true);
-                                      try {
-                                        await invoke<{ imported: number; skipped: number; failed: number }>(
-                                          'reader_import_paths',
-                                          { paths, collectionId: col.id }
-                                        );
-                                        await loadLibrary();
-                                        await loadCollections();
-                                        const books = await invoke<LibraryBook[]>('reader_get_collection_books', { collectionId: col.id });
-                                        setCollectionBooks(books);
-                                      } finally {
-                                        setImporting(false);
-                                      }
-                                    }
-                                  } catch (err) {
-                                    console.error(err);
-                                  }
-                                }}
-                                title="Pick individual book files and add them to this collection"
-                              >
-                                <svg class="w-4 h-4 mr-1.5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
-                                </svg>
-                                Add Files
-                              </button>
-                            </div>
-
-                            <Show
-                              when={!loadingCollectionBooks()}
-                              fallback={
-                                <p class="text-sm text-gray-500 py-4 text-center">
-                                  Loading books...
-                                </p>
-                              }
-                            >
-                              <Show
-                                when={collectionBooks().length > 0}
-                                fallback={
-                                  <div class="text-center py-8">
-                                    <svg class="w-12 h-12 mx-auto mb-2 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                                    </svg>
-                                    <p class="text-sm text-gray-500">This collection is empty.</p>
-                                    <p class="text-xs text-gray-400 mt-1">
-                                      Use the buttons above to add books.
-                                    </p>
-                                  </div>
-                                }
-                              >
-                                <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                                  <For each={collectionBooks()}>
-                                    {(book, index) =>
-                                      renderBookCard(book, index(), {
-                                        showRemoveFromCollection: col.id,
-                                      })
-                                    }
-                                  </For>
-                                </div>
-                              </Show>
-                            </Show>
-                          </div>
-                        </Show>
-                      </div>
-                    )}
-                  </For>
-                </div>
-              </Show>
+              <CollectionPanel
+                collections={collections}
+                libraryBooks={libraryBooks}
+                onCollectionsChange={loadCollections}
+                onLibraryChange={loadLibrary}
+                onImportFolderForCollection={async (collectionId) => {
+                  await browseForFolderWithSelection(collectionId);
+                }}
+                renderBookCard={renderBookCard}
+              />
             </Show>
 
             {/* ============================================================ */}
@@ -3091,250 +2447,24 @@ const Reader: Component = () => {
         </Show>
 
         {/* ================================================================ */}
-        {/* ADD EXISTING BOOKS TO COLLECTION MODAL                          */}
-        {/* ================================================================ */}
-        <Show when={addBooksCollectionId()}>
-          <div
-            class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-            onClick={(e) => {
-              if (e.target === e.currentTarget) closeAddBooksPicker();
-            }}
-          >
-            <div class="card w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl">
-              <div class="p-5 border-b border-gray-200 dark:border-gray-700">
-                <div class="flex items-start justify-between mb-3">
-                  <div>
-                    <h2 class="text-xl font-bold">Add Books to Collection</h2>
-                    <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                      Select existing books from your library to add to{' '}
-                      <span class="font-medium">
-                        {collections().find((c) => c.id === addBooksCollectionId())?.name}
-                      </span>
-                    </p>
-                  </div>
-                  <button
-                    class="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
-                    onClick={closeAddBooksPicker}
-                  >
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-                <input
-                  type="text"
-                  class="input text-sm w-full"
-                  placeholder="Search by title, author, or path..."
-                  value={addBooksFilter()}
-                  onInput={(e) => setAddBooksFilter(e.currentTarget.value)}
-                />
-              </div>
-
-              <div class="flex-1 overflow-auto p-2">
-                <Show
-                  when={booksNotInCollection().length > 0}
-                  fallback={
-                    <div class="text-center py-12 text-gray-500">
-                      <Show when={libraryBooks().length === 0} fallback={
-                        <p>All books are already in this collection, or no matches for your search.</p>
-                      }>
-                        <p>Your library is empty.</p>
-                        <p class="text-xs mt-1">Add books via "Add Files" or "Add Folder" first.</p>
-                      </Show>
-                    </div>
-                  }
-                >
-                  <div class="space-y-0.5">
-                    <For each={booksNotInCollection()}>
-                      {(book) => (
-                        <label class="flex items-center gap-3 px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            class="w-4 h-4 rounded"
-                            checked={addBooksSelected().has(book.id)}
-                            onChange={() => toggleAddBookSelection(book.id)}
-                          />
-                          <span class="text-xs font-mono uppercase bg-gray-200 dark:bg-gray-700 rounded px-1.5 py-0.5 min-w-[40px] text-center">
-                            {book.format || '?'}
-                          </span>
-                          <div class="flex-1 min-w-0">
-                            <p class="text-sm truncate font-medium">
-                              {book.title || book.file_path.split('/').pop() || 'Untitled'}
-                            </p>
-                            <Show when={book.authors}>
-                              <p class="text-xs text-gray-500 truncate">{book.authors}</p>
-                            </Show>
-                          </div>
-                        </label>
-                      )}
-                    </For>
-                  </div>
-                </Show>
-              </div>
-
-              <div class="p-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/30 flex justify-between items-center">
-                <span class="text-xs text-gray-500">
-                  {addBooksSelected().size} selected
-                </span>
-                <div class="flex gap-2">
-                  <button class="btn btn-secondary text-sm" onClick={closeAddBooksPicker}>
-                    Cancel
-                  </button>
-                  <button
-                    class="btn btn-primary text-sm"
-                    onClick={confirmAddBooksToCollection}
-                    disabled={addBooksSelected().size === 0}
-                  >
-                    Add {addBooksSelected().size > 0 ? `${addBooksSelected().size} ` : ''}
-                    book{addBooksSelected().size === 1 ? '' : 's'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </Show>
-
-        {/* ================================================================ */}
         {/* IMPORT MODAL (checkbox file selection)                           */}
         {/* ================================================================ */}
-        <Show when={showImportModal()}>
-          <div
-            class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-            onClick={(e) => {
-              if (e.target === e.currentTarget) setShowImportModal(false);
-            }}
-          >
-            <div class="card w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl">
-              {/* Modal header */}
-              <div class="p-5 border-b border-gray-200 dark:border-gray-700">
-                <div class="flex items-start justify-between mb-2">
-                  <div>
-                    <h2 class="text-xl font-bold">Import Books from Folder</h2>
-                    <p class="text-sm text-gray-500 dark:text-gray-400 mt-1 truncate max-w-xl" title={importModalPath()}>
-                      {importModalPath()}
-                    </p>
-                  </div>
-                  <button
-                    class="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
-                    onClick={() => setShowImportModal(false)}
-                  >
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-
-                <Show when={!importLoading() && importCandidates().length > 0}>
-                  <div class="flex items-center gap-2 flex-wrap">
-                    <input
-                      type="text"
-                      class="input text-sm flex-1 min-w-[180px]"
-                      placeholder="Filter by filename or extension..."
-                      value={importFilter()}
-                      onInput={(e) => setImportFilter(e.currentTarget.value)}
-                    />
-                    <button class="btn btn-secondary text-xs" onClick={selectAllImport}>
-                      Select All
-                    </button>
-                    <button class="btn btn-secondary text-xs" onClick={deselectAllImport}>
-                      Clear
-                    </button>
-                    <span class="text-xs text-gray-500 ml-1">
-                      {importSelected().size} / {importCandidates().filter((c) => !c.already_imported).length} selected
-                    </span>
-                  </div>
-                </Show>
-              </div>
-
-              {/* Modal body: file list */}
-              <div class="flex-1 overflow-auto p-2">
-                <Show when={importLoading()}>
-                  <div class="text-center py-12 text-gray-500">
-                    <div class="w-8 h-8 mx-auto mb-3 rounded-full border-2 border-gray-200 dark:border-gray-700 border-t-minion-500" style={{ animation: 'spin 1s linear infinite' }} />
-                    Scanning folder...
-                  </div>
-                </Show>
-
-                <Show when={!importLoading() && importCandidates().length === 0}>
-                  <div class="text-center py-12 text-gray-500">
-                    <p>No supported book files found in this folder.</p>
-                    <p class="text-xs mt-1">Supported: EPUB, PDF, MOBI, TXT, MD, HTML</p>
-                  </div>
-                </Show>
-
-                <Show when={!importLoading() && importCandidates().length > 0}>
-                  <div class="space-y-0.5">
-                    <For each={filteredImportCandidates()}>
-                      {(file) => (
-                        <label
-                          class="flex items-center gap-3 px-3 py-2 rounded hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer"
-                          classList={{
-                            'opacity-50': file.already_imported,
-                          }}
-                        >
-                          <input
-                            type="checkbox"
-                            class="w-4 h-4 rounded"
-                            checked={importSelected().has(file.path)}
-                            disabled={file.already_imported}
-                            onChange={() => toggleImportSelection(file.path)}
-                          />
-                          <span class="text-xs font-mono uppercase bg-gray-200 dark:bg-gray-700 rounded px-1.5 py-0.5 min-w-[44px] text-center">
-                            {file.extension}
-                          </span>
-                          <div class="flex-1 min-w-0">
-                            <p class="text-sm truncate" title={file.path}>
-                              {file.name}
-                            </p>
-                            <Show when={file.already_imported}>
-                              <p class="text-xs text-amber-600 dark:text-amber-400">Already in library</p>
-                            </Show>
-                          </div>
-                          <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
-                            {formatBytes(file.size)}
-                          </span>
-                        </label>
-                      )}
-                    </For>
-                  </div>
-                </Show>
-              </div>
-
-              {/* Modal footer */}
-              <div class="p-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/30">
-                <div class="flex items-center gap-3 mb-3">
-                  <label class="text-sm text-gray-600 dark:text-gray-300 whitespace-nowrap">Add to collection:</label>
-                  <select
-                    class="input text-sm flex-1"
-                    value={importTargetCollection()}
-                    onChange={(e) => setImportTargetCollection(e.currentTarget.value)}
-                  >
-                    <option value="">— None —</option>
-                    <For each={collections()}>
-                      {(col) => <option value={col.id}>{col.name}</option>}
-                    </For>
-                  </select>
-                </div>
-                <div class="flex justify-end gap-2">
-                  <button
-                    class="btn btn-secondary text-sm"
-                    onClick={() => setShowImportModal(false)}
-                    disabled={importing()}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    class="btn btn-primary text-sm"
-                    onClick={confirmImportSelection}
-                    disabled={importing() || importSelected().size === 0}
-                  >
-                    {importing() ? 'Importing...' : `Import ${importSelected().size} file${importSelected().size === 1 ? '' : 's'}`}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </Show>
+        <FolderImportModal
+          collections={collections}
+          onImportComplete={async () => {
+            await loadLibrary();
+            await loadCollections();
+          }}
+          onGeneratePdfThumbnails={() => {
+            const pdfsNeedingThumbs = libraryBooks().filter(
+              (b) => b.format === 'pdf' && !b.cover_path
+            );
+            for (const b of pdfsNeedingThumbs) {
+              void generatePdfThumbnail(b.file_path, b.id);
+            }
+          }}
+          apiRef={(api) => { importModalApi = api; }}
+        />
 
         {/* ================================================================ */}
         {/* READER VIEW                                                      */}
