@@ -343,5 +343,9 @@ pub fn parse_epub(path: &Path) -> Result<BookContent> {
 
 /// Sanitize HTML content for display
 pub fn sanitize_html(html: &str) -> String {
-    ammonia::clean(html)
+    ammonia::Builder::default()
+        .add_generic_attributes(&["style", "class", "id"])
+        .add_url_schemes(&["file"])
+        .clean(html)
+        .to_string()
 }
