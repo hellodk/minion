@@ -3799,8 +3799,14 @@ pub async fn reader_save_cover(
         return Err("Empty cover bytes".to_string());
     }
 
-    let st = state.read().await;
-    let covers_dir = st.data_dir.join("covers");
+    let (covers_dir, conn) = {
+        let st = state.read().await;
+        let covers_dir = st.data_dir.join("covers");
+        let conn = st.db.get().map_err(|e| e.to_string())?;
+        (covers_dir, conn)
+        // Lock dropped here
+    };
+
     std::fs::create_dir_all(&covers_dir).map_err(|e| e.to_string())?;
 
     let cover_file = covers_dir.join(format!("{}.jpg", book_id));
@@ -3808,7 +3814,6 @@ pub async fn reader_save_cover(
 
     let cover_path = cover_file.to_string_lossy().to_string();
 
-    let conn = st.db.get().map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE reader_books SET cover_path = ?1 WHERE id = ?2",
         rusqlite::params![cover_path, book_id],
