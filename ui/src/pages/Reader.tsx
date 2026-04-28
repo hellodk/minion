@@ -1532,12 +1532,14 @@ const Reader: Component = () => {
                 />
               </svg>
             }>
-              <img
-                src={coverUrl(book.cover_path)!}
-                alt={displayTitle}
-                class="w-full h-full object-cover rounded-lg"
-                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-              />
+              {(path) => (
+                <img
+                  src={coverUrl(path())}
+                  alt={displayTitle}
+                  class="w-full h-full object-cover rounded-lg"
+                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                />
+              )}
             </Show>
             {/* Progress indicator overlay */}
             <Show when={book.progress > 0}>
