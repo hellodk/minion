@@ -3826,7 +3826,7 @@ pub async fn reader_cleanup_book_images(book_path: String) -> Result<(), String>
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
-    book_path.hash(&mut hasher);
+    std::path::Path::new(&book_path).to_string_lossy().hash(&mut hasher);
     let book_hash = format!("{:x}", hasher.finish());
 
     let img_dir = std::env::temp_dir()
