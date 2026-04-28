@@ -1306,6 +1306,7 @@ fn migrate_020_health_intelligence(conn: &Connection) -> Result<()> {
 }
 
 fn migrate_021_reader_file_path_index(conn: &Connection) -> Result<()> {
+    // Fails if duplicate file_path rows already exist; application-layer checks prevent this.
     conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_reader_books_file_path
          ON reader_books(file_path);",
@@ -1683,5 +1684,17 @@ mod tests {
             )
             .expect("Failed to check index");
         assert!(index_exists, "idx_reader_books_file_path index missing after migration 021");
+
+        // Verify the UNIQUE constraint is enforced
+        conn.execute(
+            "INSERT INTO reader_books (id, file_path) VALUES ('dup-test-1', '/tmp/test.epub')",
+            [],
+        ).expect("first insert should succeed");
+
+        let dup_result = conn.execute(
+            "INSERT INTO reader_books (id, file_path) VALUES ('dup-test-2', '/tmp/test.epub')",
+            [],
+        );
+        assert!(dup_result.is_err(), "duplicate file_path should be rejected by UNIQUE constraint");
     }
 }
