@@ -251,9 +251,27 @@ pub fn normalize_name(s: &str) -> String {
     }
     // Collapse whitespace + drop common title/suffix tokens.
     let title_tokens = [
-        "dr", "doctor", "prof", "professor", "mr", "mrs", "ms",
-        "md", "mbbs", "mds", "do", "dnb", "phd", "rn", "np", "pa",
-        "frcs", "frcp", "mrcp", "facp", "facs",
+        "dr",
+        "doctor",
+        "prof",
+        "professor",
+        "mr",
+        "mrs",
+        "ms",
+        "md",
+        "mbbs",
+        "mds",
+        "do",
+        "dnb",
+        "phd",
+        "rn",
+        "np",
+        "pa",
+        "frcs",
+        "frcp",
+        "mrcp",
+        "facp",
+        "facs",
     ];
     let tokens: Vec<&str> = cleaned
         .split_whitespace()
@@ -561,8 +579,7 @@ pub async fn health_merge_entities(
             }
         }
     }
-    let aliases_encoded =
-        serde_json::to_string(&merged_aliases).unwrap_or_else(|_| "[]".into());
+    let aliases_encoded = serde_json::to_string(&merged_aliases).unwrap_or_else(|_| "[]".into());
 
     // Repoint foreign keys in every table that references health_entities.
     let fk_updates: &[(&str, &str)] = &[

@@ -10,20 +10,20 @@ mod blog_preview;
 mod blog_publish;
 mod calendar_integration;
 mod commands;
+mod health_analysis;
 mod health_classify;
 mod health_commands;
-mod health_entities;
-mod health_analysis;
 mod health_drive_sync;
+mod health_entities;
 mod health_extract;
 mod health_ingestion;
 mod health_intelligence;
 mod health_timeline;
 mod llm_commands;
-mod sysmon_collect;
-mod sysmon_analysis;
-mod sysmon_commands;
 mod state;
+mod sysmon_analysis;
+mod sysmon_collect;
+mod sysmon_commands;
 
 #[cfg(test)]
 mod tests;
@@ -68,9 +68,7 @@ pub fn run() {
             let gfit_state = state_arc.clone();
             tauri::async_runtime::spawn(async move {
                 use chrono::Timelike;
-                let mut interval = tokio::time::interval(
-                    std::time::Duration::from_secs(15 * 60)
-                );
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
                 interval.tick().await; // skip immediate first tick
                 loop {
                     interval.tick().await;
@@ -82,20 +80,26 @@ pub fn run() {
                     }
 
                     let st = gfit_state.read().await;
-                    let connected = st.db.get()
-                        .ok()
-                        .and_then(|conn| conn.query_row(
+                    let connected =
+                        st.db
+                            .get()
+                            .ok()
+                            .and_then(|conn| {
+                                conn.query_row(
                             "SELECT EXISTS(SELECT 1 FROM config WHERE key='gfit_access_token')",
                             [], |r| r.get::<_, bool>(0),
-                        ).ok())
-                        .unwrap_or(false);
-                    let already_running = st.gfit_sync_running.load(std::sync::atomic::Ordering::Relaxed);
+                        ).ok()
+                            })
+                            .unwrap_or(false);
+                    let already_running = st
+                        .gfit_sync_running
+                        .load(std::sync::atomic::Ordering::Relaxed);
                     drop(st);
 
                     if connected && !already_running {
                         match commands::gfit_sync_inner(gfit_state.clone(), 1).await {
                             Ok(msg) => tracing::debug!("GFit auto-sync: {}", msg),
-                            Err(e)  => tracing::warn!("GFit auto-sync failed: {}", e),
+                            Err(e) => tracing::warn!("GFit auto-sync failed: {}", e),
                         }
                     }
                 }

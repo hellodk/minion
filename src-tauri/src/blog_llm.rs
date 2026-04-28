@@ -31,7 +31,13 @@ fn get_endpoint(conn: &Conn) -> Option<(String, Option<String>, String)> {
         "SELECT base_url, api_key_encrypted, COALESCE(default_model,'llama3')
          FROM llm_endpoints LIMIT 1",
         [],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?)),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
     )
     .ok()
 }
@@ -157,7 +163,11 @@ pub async fn blog_llm_titles(
         })
         .collect();
 
-    Ok(if suggestions.is_empty() { None } else { Some(suggestions) })
+    Ok(if suggestions.is_empty() {
+        None
+    } else {
+        Some(suggestions)
+    })
 }
 
 #[tauri::command]
@@ -206,7 +216,11 @@ pub async fn blog_llm_hook(
         .filter(|s| !s.is_empty())
         .collect();
 
-    Ok(if variants.is_empty() { None } else { Some(variants) })
+    Ok(if variants.is_empty() {
+        None
+    } else {
+        Some(variants)
+    })
 }
 
 #[tauri::command]
@@ -277,7 +291,11 @@ pub async fn blog_llm_grammar(
         .filter(|l| !l.is_empty() && l.contains('\u{2192}'))
         .collect();
 
-    Ok(if issues.is_empty() { None } else { Some(issues) })
+    Ok(if issues.is_empty() {
+        None
+    } else {
+        Some(issues)
+    })
 }
 
 #[tauri::command]
@@ -301,7 +319,8 @@ pub async fn blog_llm_meta_description(
     };
 
     let excerpt = &content[..content.len().min(3000)];
-    let system = "You are an SEO expert. Write exactly one meta description of 150-160 characters. \
+    let system =
+        "You are an SEO expert. Write exactly one meta description of 150-160 characters. \
                   Include the primary keyword naturally. Write in active voice. \
                   Return only the description text — no quotes, no preamble.";
     let user = format!("Post title: {}\n\nContent:\n{}", title, excerpt);
@@ -401,7 +420,8 @@ pub async fn blog_llm_snippets(
     };
 
     let excerpt = &content[..content.len().min(3000)];
-    let system = "You are a social media expert. Generate 4 promotional snippets for a blog post.\n\
+    let system =
+        "You are a social media expert. Generate 4 promotional snippets for a blog post.\n\
                   Return EXACTLY in this format (each on its own line):\n\
                   TWITTER: <270 chars max, hook + emoji>\n\
                   LINKEDIN: <800 chars max, hook + 3 bullet takeaways + hashtags>\n\

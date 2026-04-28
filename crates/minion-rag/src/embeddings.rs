@@ -88,7 +88,10 @@ impl EmbeddingProvider for OllamaEmbedder {
         if !resp.status().is_success() {
             let s = resp.status();
             let b = resp.text().await.unwrap_or_default();
-            return Err(RagError::Embedding(format!("ollama {} returned {}: {}", self.model, s, b)));
+            return Err(RagError::Embedding(format!(
+                "ollama {} returned {}: {}",
+                self.model, s, b
+            )));
         }
         let v: EmbedResp = resp.json().await?;
         if v.embedding.len() != self.dimension {

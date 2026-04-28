@@ -30,15 +30,24 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("010_health_analysis", migrate_010_health_analysis),
         ("011_health_fk_repair", migrate_011_health_fk_repair),
         ("012_blog_v2", migrate_012_blog_v2),
-        ("013_health_entity_fk_set_null", migrate_013_health_entity_fk_set_null),
-        ("014_blog_scheduling_snippets", migrate_014_blog_scheduling_snippets),
+        (
+            "013_health_entity_fk_set_null",
+            migrate_013_health_entity_fk_set_null,
+        ),
+        (
+            "014_blog_scheduling_snippets",
+            migrate_014_blog_scheduling_snippets,
+        ),
         ("015_sysmon", migrate_015_sysmon),
         ("016_blog_draft_content", migrate_016_blog_draft_content),
         ("017_fitness_gfit_columns", migrate_017_fitness_gfit_columns),
         ("018_blog_llm", migrate_018_blog_llm),
         ("019_health_extract", migrate_019_health_extract),
         ("020_health_intelligence", migrate_020_health_intelligence),
-        ("021_reader_file_path_index", migrate_021_reader_file_path_index),
+        (
+            "021_reader_file_path_index",
+            migrate_021_reader_file_path_index,
+        ),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -1148,9 +1157,7 @@ fn migrate_015_sysmon(conn: &Connection) -> Result<()> {
 }
 
 fn migrate_016_blog_draft_content(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "ALTER TABLE blog_posts ADD COLUMN draft_content TEXT;",
-    )?;
+    conn.execute_batch("ALTER TABLE blog_posts ADD COLUMN draft_content TEXT;")?;
     Ok(())
 }
 
@@ -1494,7 +1501,8 @@ mod tests {
         .unwrap();
 
         // Delete the patient; everything pointing at them should disappear.
-        conn.execute("DELETE FROM patients WHERE id = 'p1'", []).unwrap();
+        conn.execute("DELETE FROM patients WHERE id = 'p1'", [])
+            .unwrap();
 
         let labs: i64 = conn
             .query_row("SELECT COUNT(*) FROM lab_tests", [], |r| r.get(0))
@@ -1530,12 +1538,19 @@ mod tests {
         let conn = setup_test_db();
         run(&conn).expect("migrations failed");
 
-        for table in &["sysmon_snapshots", "sysmon_processes", "sysmon_alerts", "sysmon_analyses"] {
-            let exists: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
-                [table],
-                |r| r.get(0),
-            ).unwrap();
+        for table in &[
+            "sysmon_snapshots",
+            "sysmon_processes",
+            "sysmon_alerts",
+            "sysmon_analyses",
+        ] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert!(exists, "table {} missing", table);
         }
 
@@ -1545,7 +1560,8 @@ mod tests {
               disks_json, gpus_json, net_json)
              VALUES ('t1','2026-01-01T00:00:00Z',42.0,4096,8192,0,'[]','[]','[]')",
             [],
-        ).expect("insert into sysmon_snapshots failed");
+        )
+        .expect("insert into sysmon_snapshots failed");
     }
 
     #[test]
@@ -1555,17 +1571,20 @@ mod tests {
         conn.execute(
             "UPDATE blog_posts SET social_snippets_json = '{\"twitter\":\"test\"}' WHERE 1=0",
             [],
-        ).expect("social_snippets_json column missing");
+        )
+        .expect("social_snippets_json column missing");
         // Insert a parent blog_posts row so the FK on blog_post_variants is satisfied.
         conn.execute(
             "INSERT INTO blog_posts (id, title, slug) VALUES ('p1', 'Test', 'test')",
             [],
-        ).expect("blog_posts insert failed");
+        )
+        .expect("blog_posts insert failed");
         conn.execute(
             "INSERT INTO blog_post_variants (id, post_id, variant_type, label, content)
              VALUES ('v1','p1','test','Test','content')",
             [],
-        ).expect("blog_post_variants insert failed");
+        )
+        .expect("blog_post_variants insert failed");
     }
 
     #[test]
@@ -1610,9 +1629,14 @@ mod tests {
 
         // Enable FK enforcement for the cascade test and verify patient delete cascades.
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        conn.execute("DELETE FROM patients WHERE id = 'p1'", []).expect("delete patient failed");
+        conn.execute("DELETE FROM patients WHERE id = 'p1'", [])
+            .expect("delete patient failed");
         let rx_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM prescriptions WHERE id = 'rx1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM prescriptions WHERE id = 'rx1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(rx_count, 0, "prescription should cascade on patient delete");
     }
@@ -1628,46 +1652,64 @@ mod tests {
             [],
         ).expect("insert with draft_content failed");
 
-        let draft: Option<String> = conn.query_row(
-            "SELECT draft_content FROM blog_posts WHERE id = 'p1'",
-            [],
-            |r| r.get(0),
-        ).unwrap();
+        let draft: Option<String> = conn
+            .query_row(
+                "SELECT draft_content FROM blog_posts WHERE id = 'p1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(draft.as_deref(), Some("draft body"));
 
         conn.execute(
             "INSERT INTO blog_posts (id, title, slug, content, status, created_at, updated_at)
              VALUES ('p2', 'Test2', 'test2', 'body2', 'draft', '2026-01-01', '2026-01-01')",
             [],
-        ).expect("insert without draft_content failed");
+        )
+        .expect("insert without draft_content failed");
     }
 
     #[test]
     fn test_migration_020_health_intelligence_schema() {
         let conn = setup_test_db();
         run(&conn).expect("migrations failed");
-        for table in &["location_visits", "health_timeline_events", "health_intelligence_reports"] {
-            let exists: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
-                [table], |r| r.get(0),
-            ).unwrap_or(false);
+        for table in &[
+            "location_visits",
+            "health_timeline_events",
+            "health_intelligence_reports",
+        ] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
             assert!(exists, "table {} missing after migration 020", table);
         }
         // Verify timeline event cascade
         conn.execute(
             "INSERT INTO patients (id, phone_number, full_name, relationship, is_primary)
-             VALUES ('p_c', '+10000000002', 'Test', 'self', 0)", [],
-        ).unwrap();
+             VALUES ('p_c', '+10000000002', 'Test', 'self', 0)",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO health_timeline_events
              (id, patient_id, event_date, category, title, source_type)
-             VALUES ('te1', 'p_c', '2026-01-01', 'lab', 'Test Event', 'test')", [],
-        ).unwrap();
-        conn.execute("DELETE FROM patients WHERE id = 'p_c'", []).unwrap();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM health_timeline_events WHERE patient_id = 'p_c'",
-            [], |r| r.get(0),
-        ).unwrap();
+             VALUES ('te1', 'p_c', '2026-01-01', 'lab', 'Test Event', 'test')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM patients WHERE id = 'p_c'", [])
+            .unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM health_timeline_events WHERE patient_id = 'p_c'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0, "timeline events should cascade on patient delete");
     }
 
@@ -1683,18 +1725,25 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("Failed to check index");
-        assert!(index_exists, "idx_reader_books_file_path index missing after migration 021");
+        assert!(
+            index_exists,
+            "idx_reader_books_file_path index missing after migration 021"
+        );
 
         // Verify the UNIQUE constraint is enforced
         conn.execute(
             "INSERT INTO reader_books (id, file_path) VALUES ('dup-test-1', '/tmp/test.epub')",
             [],
-        ).expect("first insert should succeed");
+        )
+        .expect("first insert should succeed");
 
         let dup_result = conn.execute(
             "INSERT INTO reader_books (id, file_path) VALUES ('dup-test-2', '/tmp/test.epub')",
             [],
         );
-        assert!(dup_result.is_err(), "duplicate file_path should be rejected by UNIQUE constraint");
+        assert!(
+            dup_result.is_err(),
+            "duplicate file_path should be rejected by UNIQUE constraint"
+        );
     }
 }

@@ -154,7 +154,11 @@ pub async fn extract_text_from_file(path: &Path) -> Result<String, String> {
             "heic" => {
                 let jpg_path = p.with_extension("jpg");
                 let output = std::process::Command::new("magick")
-                    .args(["convert", p.to_str().unwrap_or(""), jpg_path.to_str().unwrap_or("")])
+                    .args([
+                        "convert",
+                        p.to_str().unwrap_or(""),
+                        jpg_path.to_str().unwrap_or(""),
+                    ])
                     .output()
                     .map_err(|_| {
                         "HEIC files require ImageMagick: sudo apt install imagemagick".to_string()
@@ -370,14 +374,11 @@ pub async fn health_start_ingestion(
         // Check once up-front if an extraction endpoint is configured + healthy.
         // If it is, we auto-classify each file inline (Option A). Otherwise we
         // just persist raw_text and the user can trigger classification later.
-        let auto_classify =
-            crate::health_classify::is_extract_endpoint_healthy(&state_bg).await;
+        let auto_classify = crate::health_classify::is_extract_endpoint_healthy(&state_bg).await;
         if auto_classify {
             tracing::info!("health ingestion: auto-classification enabled");
         } else {
-            tracing::info!(
-                "health ingestion: no healthy LLM endpoint — skipping auto-classify"
-            );
+            tracing::info!("health ingestion: no healthy LLM endpoint — skipping auto-classify");
         }
 
         for path_str in &selected_paths {
@@ -632,11 +633,7 @@ pub async fn health_start_ingestion(
                 let _ = conn.execute(
                     "UPDATE ingestion_jobs SET status = 'failed',
                      completed_at = ?1, error = ?2 WHERE id = ?3 AND status = 'running'",
-                    rusqlite::params![
-                        chrono::Utc::now().to_rfc3339(),
-                        msg,
-                        job_id_supervised
-                    ],
+                    rusqlite::params![chrono::Utc::now().to_rfc3339(), msg, job_id_supervised],
                 );
             }
         }

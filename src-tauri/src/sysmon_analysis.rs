@@ -37,13 +37,28 @@ fn build_prompt(
         if i % 6 == 0 || i == snapshots.len().saturating_sub(1) {
             let ram_pct = if s.ram_total_mb > 0 {
                 (s.ram_used_mb as f64 / s.ram_total_mb as f64 * 100.0) as u64
-            } else { 0 };
-            let disk_pct = s.disks.iter().map(|d| {
-                if d.total_gb > 0.0 { (d.used_gb / d.total_gb * 100.0) as u64 } else { 0 }
-            }).max().unwrap_or(0);
-            lines.push(format!("| t-{}s | {:.0} | {} | {} |",
+            } else {
+                0
+            };
+            let disk_pct = s
+                .disks
+                .iter()
+                .map(|d| {
+                    if d.total_gb > 0.0 {
+                        (d.used_gb / d.total_gb * 100.0) as u64
+                    } else {
+                        0
+                    }
+                })
+                .max()
+                .unwrap_or(0);
+            lines.push(format!(
+                "| t-{}s | {:.0} | {} | {} |",
                 (snapshots.len().saturating_sub(1 + i)) * 5,
-                s.cpu_pct, ram_pct, disk_pct));
+                s.cpu_pct,
+                ram_pct,
+                disk_pct
+            ));
         }
     }
     if !alerts.is_empty() {
@@ -103,14 +118,20 @@ async fn call_llm(
         }
     }
 
-    let resp = req.send().await.map_err(|e| warn!("LLM call failed: {e}")).ok()?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| warn!("LLM call failed: {e}"))
+        .ok()?;
     if !resp.status().is_success() {
         warn!("LLM returned {}", resp.status());
         return None;
     }
 
     let json: serde_json::Value = resp.json().await.ok()?;
-    json["choices"][0]["message"]["content"].as_str().map(|s| s.to_string())
+    json["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 pub async fn run_analysis(
@@ -135,7 +156,8 @@ pub async fn run_analysis(
     let context_json = serde_json::to_string(&snapshots).unwrap_or_default();
 
     // conn is dropped — this await is now Send-safe.
-    let Some(response) = call_llm(&base_url, api_key.as_deref(), &model, &user_content).await else {
+    let Some(response) = call_llm(&base_url, api_key.as_deref(), &model, &user_content).await
+    else {
         return Ok(None);
     };
 
@@ -160,6 +182,8 @@ pub fn auto_analysis_eligible(conn: &Conn) -> bool {
     ).ok();
 
     let Some(last_str) = last else { return true };
-    let Ok(last_dt) = chrono::DateTime::parse_from_rfc3339(&last_str) else { return true };
+    let Ok(last_dt) = chrono::DateTime::parse_from_rfc3339(&last_str) else {
+        return true;
+    };
     Utc::now().signed_duration_since(last_dt).num_seconds() > 120
 }

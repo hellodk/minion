@@ -43,14 +43,20 @@ mod tests {
     async fn fenced_code_block_has_language_class() {
         let md = "```rust\nfn main() {}\n```";
         let html = blog_render_preview(md.to_string()).await.unwrap();
-        assert!(html.contains("language-rust"), "expected language-rust class");
+        assert!(
+            html.contains("language-rust"),
+            "expected language-rust class"
+        );
     }
 
     #[tokio::test]
     async fn mermaid_fence_preserves_class() {
         let md = "```mermaid\ngraph LR\n  A --> B\n```";
         let html = blog_render_preview(md.to_string()).await.unwrap();
-        assert!(html.contains("language-mermaid"), "expected language-mermaid class");
+        assert!(
+            html.contains("language-mermaid"),
+            "expected language-mermaid class"
+        );
     }
 
     #[tokio::test]

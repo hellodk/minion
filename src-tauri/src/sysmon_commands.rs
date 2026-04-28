@@ -1,8 +1,8 @@
 //! Tauri commands and background poller for system monitoring.
 
+use crate::state::AppState;
 use crate::sysmon_analysis;
 use crate::sysmon_collect::{Collector, ProcessInfo, SystemSnapshot};
-use crate::state::AppState;
 use chrono::Utc;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -77,45 +77,50 @@ pub async fn sysmon_get_current(
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
 
-    let snapshot: Option<SystemSnapshot> = conn.query_row(
-        "SELECT cpu_pct, ram_used_mb, ram_total_mb, swap_used_mb, load_avg_1,
+    let snapshot: Option<SystemSnapshot> = conn
+        .query_row(
+            "SELECT cpu_pct, ram_used_mb, ram_total_mb, swap_used_mb, load_avg_1,
                 disks_json, gpus_json, net_json
          FROM sysmon_snapshots ORDER BY sampled_at DESC LIMIT 1",
-        [],
-        |r| {
-            Ok(SystemSnapshot {
-                cpu_pct: r.get::<_, f64>(0)? as f32,
-                ram_used_mb: r.get(1)?,
-                ram_total_mb: r.get(2)?,
-                swap_used_mb: r.get(3)?,
-                load_avg_1: r.get(4)?,
-                disks: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
-                gpus: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
-                net: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
-            })
-        },
-    ).ok();
+            [],
+            |r| {
+                Ok(SystemSnapshot {
+                    cpu_pct: r.get::<_, f64>(0)? as f32,
+                    ram_used_mb: r.get(1)?,
+                    ram_total_mb: r.get(2)?,
+                    swap_used_mb: r.get(3)?,
+                    load_avg_1: r.get(4)?,
+                    disks: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+                    gpus: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
+                    net: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
+                })
+            },
+        )
+        .ok();
 
     let processes: Vec<ProcessInfo> = {
-        let mut stmt = conn.prepare(
-            "SELECT pid, name, cpu_pct, ram_mb, status, user_name
+        let mut stmt = conn
+            .prepare(
+                "SELECT pid, name, cpu_pct, ram_mb, status, user_name
              FROM sysmon_processes
              WHERE sampled_at = (SELECT MAX(sampled_at) FROM sysmon_processes)
              ORDER BY cpu_pct DESC",
-        ).map_err(|e| e.to_string())?;
-        let result: Vec<ProcessInfo> = stmt.query_map([], |r| {
-            Ok(ProcessInfo {
-                pid: r.get::<_, i64>(0)? as u32,
-                name: r.get(1)?,
-                cpu_pct: r.get::<_, f64>(2)? as f32,
-                ram_mb: r.get::<_, i64>(3)? as u64,
-                status: r.get(4)?,
-                user_name: r.get(5)?,
+            )
+            .map_err(|e| e.to_string())?;
+        let result: Vec<ProcessInfo> = stmt
+            .query_map([], |r| {
+                Ok(ProcessInfo {
+                    pid: r.get::<_, i64>(0)? as u32,
+                    name: r.get(1)?,
+                    cpu_pct: r.get::<_, f64>(2)? as f32,
+                    ram_mb: r.get::<_, i64>(3)? as u64,
+                    status: r.get(4)?,
+                    user_name: r.get(5)?,
+                })
             })
-        })
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
         result
     };
 
@@ -170,10 +175,12 @@ pub async fn sysmon_list_alerts(
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, fired_at, metric, value, threshold, severity, detail, resolved_at
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, fired_at, metric, value, threshold, severity, detail, resolved_at
          FROM sysmon_alerts ORDER BY fired_at DESC LIMIT ?1",
-    ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
 
     let rows: Vec<SysmonAlert> = stmt
         .query_map(params![limit], |r| {
@@ -218,12 +225,14 @@ pub async fn sysmon_list_processes(
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
 
-    let mut stmt = conn.prepare(
-        "SELECT pid, name, cpu_pct, ram_mb, status, user_name
+    let mut stmt = conn
+        .prepare(
+            "SELECT pid, name, cpu_pct, ram_mb, status, user_name
          FROM sysmon_processes
          WHERE sampled_at = (SELECT MAX(sampled_at) FROM sysmon_processes)
          ORDER BY cpu_pct DESC",
-    ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
 
     let rows: Vec<ProcessInfo> = stmt
         .query_map([], |r| {
@@ -254,7 +263,9 @@ pub async fn sysmon_kill_process(pid: u32) -> Result<(), String> {
                 .output()
                 .map_err(|e| e.to_string())?;
             Ok(())
-        }).await.map_err(|e| e.to_string())?;
+        })
+        .await
+        .map_err(|e| e.to_string())?;
     }
     #[cfg(windows)]
     {
@@ -265,16 +276,16 @@ pub async fn sysmon_kill_process(pid: u32) -> Result<(), String> {
                 .output()
                 .map_err(|e| e.to_string())?;
             Ok(())
-        }).await.map_err(|e| e.to_string())?;
+        })
+        .await
+        .map_err(|e| e.to_string())?;
     }
     #[allow(unreachable_code)]
     Err("kill not supported on this platform".into())
 }
 
 #[tauri::command]
-pub async fn sysmon_get_disk_breakdown(
-    path: String,
-) -> Result<Vec<serde_json::Value>, String> {
+pub async fn sysmon_get_disk_breakdown(path: String) -> Result<Vec<serde_json::Value>, String> {
     #[cfg(unix)]
     {
         return tokio::task::spawn_blocking(move || {
@@ -299,7 +310,9 @@ pub async fn sysmon_get_disk_breakdown(
                 .iter()
                 .map(|(s, d)| serde_json::json!({"path": d, "size_mb": s}))
                 .collect())
-        }).await.map_err(|e| e.to_string())?;
+        })
+        .await
+        .map_err(|e| e.to_string())?;
     }
 
     #[allow(unreachable_code)]
@@ -314,14 +327,15 @@ pub async fn sysmon_delete_path(path: String) -> Result<(), String> {
     let p = Path::new(&path);
 
     // Normalise to catch `/../` tricks
-    let canonical = p.canonicalize().map_err(|e| format!("Cannot resolve path: {e}"))?;
+    let canonical = p
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve path: {e}"))?;
     let s = canonical.to_string_lossy();
 
     // Block system directories — never touch these regardless of ownership
     const BLOCKED: &[&str] = &[
-        "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32",
-        "/etc", "/boot", "/sys", "/proc", "/dev", "/run",
-        "/snap", "/opt", "/srv",
+        "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/boot", "/sys", "/proc",
+        "/dev", "/run", "/snap", "/opt", "/srv",
     ];
     if s == "/" || s == "/home" || s == "/root" {
         return Err("Refusing to delete root or /home".into());
@@ -339,7 +353,9 @@ pub async fn sysmon_delete_path(path: String) -> Result<(), String> {
         let meta = std::fs::metadata(&canonical).map_err(|e| e.to_string())?;
         let current_uid = unsafe { libc::getuid() };
         if meta.uid() != current_uid {
-            return Err(format!("Permission denied: {s} is not owned by current user"));
+            return Err(format!(
+                "Permission denied: {s} is not owned by current user"
+            ));
         }
     }
 
@@ -368,8 +384,8 @@ pub async fn sysmon_find_redundant(root: String) -> Result<Vec<RedundantEntry>, 
         .map_err(|e| format!("Cannot resolve path: {e}"))?;
     let root_str = root_canonical.to_string_lossy();
     const BLOCKED: &[&str] = &[
-        "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc",
-        "/boot", "/sys", "/proc", "/dev", "/run", "/snap",
+        "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/boot", "/sys", "/proc", "/dev",
+        "/run", "/snap",
     ];
     if root_str == "/" {
         return Err("Refusing to scan root filesystem".into());
@@ -386,19 +402,84 @@ pub async fn sysmon_find_redundant(root: String) -> Result<Vec<RedundantEntry>, 
 
         // (pattern_name, dir_name_or_suffix, description, is_dir_match)
         const PATTERNS: &[(&str, &str, &str, bool)] = &[
-            ("node_modules",  "node_modules",   "Node.js dependencies — safe to delete, restore with npm/pnpm install", true),
-            ("rust_target",   "target",         "Rust build artifacts — safe to delete, restore with cargo build",      true),
-            ("python_cache",  "__pycache__",    "Python bytecode cache — safe to delete, auto-regenerated",             true),
-            ("gradle_cache",  ".gradle",        "Gradle build cache — safe to delete, restores on next build",          true),
-            ("maven_cache",   ".m2",            "Maven local repository — safe to delete, restores on next build",      true),
-            ("next_cache",    ".next",          "Next.js build cache — safe to delete, restore with next build",        true),
-            ("nuxt_cache",    ".nuxt",          "Nuxt.js build cache — safe to delete, restore with nuxt build",        true),
-            ("dist_build",    "dist",           "Distribution build output — safe to delete if source is tracked",      true),
-            ("jest_cache",    ".jest-cache",    "Jest test cache — safe to delete, auto-regenerated",                   true),
-            ("cargo_debug",   "debug",          "Cargo debug build output — safe to delete (inside target/)",           true),
-            ("venv",          ".venv",          "Python virtual environment — delete and recreate with pip install",     true),
-            ("venv2",         "venv",           "Python virtual environment — delete and recreate with pip install",     true),
-            ("ds_store",      ".DS_Store",      "macOS metadata file — safe to delete",                                  false),
+            (
+                "node_modules",
+                "node_modules",
+                "Node.js dependencies — safe to delete, restore with npm/pnpm install",
+                true,
+            ),
+            (
+                "rust_target",
+                "target",
+                "Rust build artifacts — safe to delete, restore with cargo build",
+                true,
+            ),
+            (
+                "python_cache",
+                "__pycache__",
+                "Python bytecode cache — safe to delete, auto-regenerated",
+                true,
+            ),
+            (
+                "gradle_cache",
+                ".gradle",
+                "Gradle build cache — safe to delete, restores on next build",
+                true,
+            ),
+            (
+                "maven_cache",
+                ".m2",
+                "Maven local repository — safe to delete, restores on next build",
+                true,
+            ),
+            (
+                "next_cache",
+                ".next",
+                "Next.js build cache — safe to delete, restore with next build",
+                true,
+            ),
+            (
+                "nuxt_cache",
+                ".nuxt",
+                "Nuxt.js build cache — safe to delete, restore with nuxt build",
+                true,
+            ),
+            (
+                "dist_build",
+                "dist",
+                "Distribution build output — safe to delete if source is tracked",
+                true,
+            ),
+            (
+                "jest_cache",
+                ".jest-cache",
+                "Jest test cache — safe to delete, auto-regenerated",
+                true,
+            ),
+            (
+                "cargo_debug",
+                "debug",
+                "Cargo debug build output — safe to delete (inside target/)",
+                true,
+            ),
+            (
+                "venv",
+                ".venv",
+                "Python virtual environment — delete and recreate with pip install",
+                true,
+            ),
+            (
+                "venv2",
+                "venv",
+                "Python virtual environment — delete and recreate with pip install",
+                true,
+            ),
+            (
+                "ds_store",
+                ".DS_Store",
+                "macOS metadata file — safe to delete",
+                false,
+            ),
         ];
 
         let root_path = Path::new(&root);
@@ -425,29 +506,41 @@ pub async fn sysmon_find_redundant(root: String) -> Result<Vec<RedundantEntry>, 
             patterns: &[(&str, &str, &str, bool)],
             results: &mut Vec<RedundantEntry>,
         ) {
-            if depth > 6 { return; }
-            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            if depth > 6 {
+                return;
+            }
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
             for entry in entries.flatten() {
                 let path = entry.path();
-                let name = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 // Skip hidden top-level dirs (except ones we explicitly match)
                 for (category, pattern, description, is_dir) in patterns {
                     if name == *pattern {
                         let is_dir_actual = path.is_dir();
-                        if *is_dir && !is_dir_actual { continue; }
-                        if !*is_dir && is_dir_actual { continue; }
+                        if *is_dir && !is_dir_actual {
+                            continue;
+                        }
+                        if !*is_dir && is_dir_actual {
+                            continue;
+                        }
                         // Context guard for broad patterns
                         if *category == "dist_build" {
                             // Only flag if parent has package.json or src/
-                            let has_pkg = dir.join("package.json").exists() || dir.join("src").exists();
-                            if !has_pkg { continue; }
+                            let has_pkg =
+                                dir.join("package.json").exists() || dir.join("src").exists();
+                            if !has_pkg {
+                                continue;
+                            }
                         }
                         if *category == "cargo_debug" {
                             // Only flag if parent is named 'target'
-                            let parent_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                            if parent_name != "target" { continue; }
+                            let parent_name =
+                                dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            if parent_name != "target" {
+                                continue;
+                            }
                         }
                         // Don't recurse into matched dirs — measure and record them
                         let size_mb = if is_dir_actual {
@@ -471,7 +564,9 @@ pub async fn sysmon_find_redundant(root: String) -> Result<Vec<RedundantEntry>, 
                 }
                 // Recurse into unmatched dirs (not hidden unless explicit)
                 if path.is_dir() {
-                    let matched = patterns.iter().any(|(_, p, _, is_dir)| *is_dir && name == *p);
+                    let matched = patterns
+                        .iter()
+                        .any(|(_, p, _, is_dir)| *is_dir && name == *p);
                     if !matched && !name.starts_with('.') {
                         walk(&path, depth + 1, patterns, results);
                     }
@@ -484,7 +579,9 @@ pub async fn sysmon_find_redundant(root: String) -> Result<Vec<RedundantEntry>, 
         // Sort by size descending
         results.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
         Ok(results)
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -508,15 +605,9 @@ pub async fn sysmon_run_analysis(
     };
     let (snapshots, alerts, db) = db;
 
-    let id = sysmon_analysis::run_analysis(
-        &db,
-        "manual",
-        None,
-        snapshots,
-        alerts,
-        question.as_deref(),
-    )
-    .await?;
+    let id =
+        sysmon_analysis::run_analysis(&db, "manual", None, snapshots, alerts, question.as_deref())
+            .await?;
 
     let Some(analysis_id) = id else {
         return Ok(None);
@@ -552,10 +643,12 @@ pub async fn sysmon_list_analyses(
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, created_at, trigger, question, response
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, created_at, trigger, question, response
          FROM sysmon_analyses ORDER BY created_at DESC LIMIT ?1",
-    ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
 
     let rows: Vec<SysmonAnalysisSummary> = stmt
         .query_map(params![limit], |r| {
@@ -581,12 +674,13 @@ pub async fn sysmon_get_settings(
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
 
-    let json: Option<String> = conn.query_row(
-        "SELECT value FROM config WHERE key = 'sysmon_settings'",
-        [],
-        |r| r.get(0),
-    )
-    .ok();
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'sysmon_settings'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
 
     match json {
         Some(j) => serde_json::from_str(&j).map_err(|e| e.to_string()),
@@ -616,11 +710,13 @@ pub async fn sysmon_save_settings(
 type PooledConn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 
 fn load_snapshots_since(conn: &PooledConn, cutoff: &str) -> Result<Vec<SystemSnapshot>, String> {
-    let mut stmt = conn.prepare(
-        "SELECT cpu_pct, ram_used_mb, ram_total_mb, swap_used_mb, load_avg_1,
+    let mut stmt = conn
+        .prepare(
+            "SELECT cpu_pct, ram_used_mb, ram_total_mb, swap_used_mb, load_avg_1,
                 disks_json, gpus_json, net_json
          FROM sysmon_snapshots WHERE sampled_at > ?1 ORDER BY sampled_at ASC",
-    ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
     let rows: Vec<SystemSnapshot> = stmt
         .query_map(params![cutoff], |r| {
             Ok(SystemSnapshot {
@@ -640,13 +736,13 @@ fn load_snapshots_since(conn: &PooledConn, cutoff: &str) -> Result<Vec<SystemSna
     Ok(rows)
 }
 
-fn load_active_alerts(
-    conn: &PooledConn,
-) -> Result<Vec<ActiveAlertRow>, String> {
-    let mut stmt = conn.prepare(
-        "SELECT metric, COALESCE(detail,''), value, threshold, severity
+fn load_active_alerts(conn: &PooledConn) -> Result<Vec<ActiveAlertRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT metric, COALESCE(detail,''), value, threshold, severity
          FROM sysmon_alerts WHERE resolved_at IS NULL ORDER BY fired_at DESC LIMIT 20",
-    ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
             Ok((
@@ -771,8 +867,12 @@ pub fn spawn_sysmon_poller(app: tauri::AppHandle, db: minion_db::Database) {
                 for p in &procs {
                     if p.status == "zombie" {
                         check_threshold(
-                            &conn, &app, "zombie",
-                            1.0, 0.5, 2.0,
+                            &conn,
+                            &app,
+                            "zombie",
+                            1.0,
+                            0.5,
+                            2.0,
                             Some(&format!("pid {} ({})", p.pid, p.name)),
                         );
                     }
@@ -930,28 +1030,35 @@ fn check_threshold(
         .unwrap_or_else(chrono::Utc::now)
         .to_rfc3339();
 
-    let recent_exists: bool = conn.query_row(
-        "SELECT EXISTS(
+    let recent_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(
             SELECT 1 FROM sysmon_alerts
             WHERE metric = ?1
             AND COALESCE(detail,'') = COALESCE(?2,'')
             AND resolved_at IS NULL
             AND fired_at > ?3
         )",
-        params![metric, detail, five_min_ago],
-        |r| r.get(0),
-    ).unwrap_or(false);
+            params![metric, detail, five_min_ago],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
 
-    if recent_exists { return; }
+    if recent_exists {
+        return;
+    }
 
     if let Ok(alert_id) = insert_alert(conn, metric, value, threshold, severity, detail) {
-        let _ = app.emit("sysmon-alert", serde_json::json!({
-            "id": alert_id,
-            "metric": metric,
-            "value": value,
-            "threshold": threshold,
-            "severity": severity,
-            "detail": detail,
-        }));
+        let _ = app.emit(
+            "sysmon-alert",
+            serde_json::json!({
+                "id": alert_id,
+                "metric": metric,
+                "value": value,
+                "threshold": threshold,
+                "severity": severity,
+                "detail": detail,
+            }),
+        );
     }
 }

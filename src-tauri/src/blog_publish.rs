@@ -42,9 +42,8 @@ pub struct PlatformAccount {
 
 fn row_to_account(row: &rusqlite::Row) -> rusqlite::Result<PlatformAccount> {
     let default_tags_raw: Option<String> = row.get(5)?;
-    let default_tags: Option<Vec<String>> = default_tags_raw.and_then(|s| {
-        serde_json::from_str(&s).ok()
-    });
+    let default_tags: Option<Vec<String>> =
+        default_tags_raw.and_then(|s| serde_json::from_str(&s).ok());
     let api_key: Option<String> = row.get(7)?;
     Ok(PlatformAccount {
         id: row.get(0)?,
@@ -208,8 +207,7 @@ fn row_to_publication(row: &rusqlite::Row) -> rusqlite::Result<Publication> {
     })
 }
 
-const PUB_COLUMNS: &str =
-    "id, post_id, platform, account_id, status, remote_id, remote_url, \
+const PUB_COLUMNS: &str = "id, post_id, platform, account_id, status, remote_id, remote_url, \
      canonical_url, published_at, last_synced_at, error";
 
 #[tauri::command]
@@ -264,14 +262,17 @@ struct LoadedPost {
     tags: Vec<String>,
 }
 
-async fn load_post(
-    state: &AppStateHandle,
-    post_id: &str,
-) -> Result<LoadedPost, String> {
+async fn load_post(state: &AppStateHandle, post_id: &str) -> Result<LoadedPost, String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
-    let (id, title, slug, content, excerpt): (String, String, String, Option<String>, Option<String>) =
-        conn.query_row(
+    let (id, title, slug, content, excerpt): (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    ) = conn
+        .query_row(
             "SELECT id, title, slug, content, excerpt FROM blog_posts WHERE id = ?1",
             rusqlite::params![post_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
@@ -414,12 +415,7 @@ pub fn spawn_scheduled_publisher(state: AppStateHandle, db: minion_db::Database)
             };
             for (post_id, account_id) in due {
                 if let Err(e) = run_scheduled_publish(&state, &post_id, &account_id).await {
-                    tracing::warn!(
-                        "scheduled publish {}/{}: {}",
-                        post_id,
-                        account_id,
-                        e
-                    );
+                    tracing::warn!("scheduled publish {}/{}: {}", post_id, account_id, e);
                 }
             }
         }
@@ -737,7 +733,10 @@ async fn publish_wordpress(
     account: &PlatformAccount,
     api_key: Option<&str>,
 ) -> Result<(Option<String>, Option<String>, String), String> {
-    let base = account.base_url.as_deref().ok_or("WordPress base_url missing")?;
+    let base = account
+        .base_url
+        .as_deref()
+        .ok_or("WordPress base_url missing")?;
     let user = account
         .account_label
         .as_deref()
@@ -767,7 +766,10 @@ async fn publish_wordpress(
     }
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let remote_id = v.get("id").and_then(|n| n.as_i64()).map(|n| n.to_string());
-    let remote_url = v.get("link").and_then(|s| s.as_str()).map(|s| s.to_string());
+    let remote_url = v
+        .get("link")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
     Ok((remote_url, remote_id, "published".to_string()))
 }
 
@@ -890,15 +892,25 @@ async fn publish_hashnode(
         return Err(format!("Hashnode call failed ({}): {}", s, b));
     }
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    if let Some(errs) = v.get("errors").and_then(|e| e.as_array()).filter(|a| !a.is_empty()) {
+    if let Some(errs) = v
+        .get("errors")
+        .and_then(|e| e.as_array())
+        .filter(|a| !a.is_empty())
+    {
         return Err(format!("Hashnode returned GraphQL errors: {:?}", errs));
     }
     let post_obj = v
         .pointer("/data/publishPost/post")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let remote_id = post_obj.get("id").and_then(|x| x.as_str()).map(|s| s.to_string());
-    let remote_url = post_obj.get("url").and_then(|x| x.as_str()).map(|s| s.to_string());
+    let remote_id = post_obj
+        .get("id")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let remote_url = post_obj
+        .get("url")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
     Ok((remote_url, remote_id, "published".to_string()))
 }
 
@@ -958,8 +970,16 @@ fn ghost_jwt(id: &str, secret: &[u8]) -> Result<String, String> {
         "exp": now + 5 * 60,
         "aud": "/admin/",
     });
-    let enc_header = b64url(serde_json::to_string(&header).map_err(|e| e.to_string())?.as_bytes());
-    let enc_payload = b64url(serde_json::to_string(&payload).map_err(|e| e.to_string())?.as_bytes());
+    let enc_header = b64url(
+        serde_json::to_string(&header)
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    );
+    let enc_payload = b64url(
+        serde_json::to_string(&payload)
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    );
     let signing_input = format!("{}.{}", enc_header, enc_payload);
     let mut mac = HmacSha256::new_from_slice(secret).map_err(|e| e.to_string())?;
     mac.update(signing_input.as_bytes());
@@ -1017,8 +1037,14 @@ async fn publish_ghost(
         .pointer("/posts/0")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let remote_id = first.get("id").and_then(|x| x.as_str()).map(|s| s.to_string());
-    let remote_url = first.get("url").and_then(|x| x.as_str()).map(|s| s.to_string());
+    let remote_id = first
+        .get("id")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let remote_url = first
+        .get("url")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
     Ok((remote_url, remote_id, "published".to_string()))
 }
 

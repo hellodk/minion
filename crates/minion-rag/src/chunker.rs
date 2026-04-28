@@ -138,20 +138,18 @@ fn split_blocks(body: &str) -> Vec<Block> {
     let mut current_start: usize = 0;
     let mut running_char: usize = 0;
 
-    let push_current = |current: &mut String,
-                        blocks: &mut Vec<Block>,
-                        heading: &Option<String>,
-                        start: usize| {
-        let text = current.trim().to_string();
-        if !text.is_empty() {
-            blocks.push(Block {
-                text,
-                heading: heading.clone(),
-                start_char: start,
-            });
-        }
-        current.clear();
-    };
+    let push_current =
+        |current: &mut String, blocks: &mut Vec<Block>, heading: &Option<String>, start: usize| {
+            let text = current.trim().to_string();
+            if !text.is_empty() {
+                blocks.push(Block {
+                    text,
+                    heading: heading.clone(),
+                    start_char: start,
+                });
+            }
+            current.clear();
+        };
 
     for line in body.lines() {
         let stripped = line.trim_start();
@@ -159,9 +157,7 @@ fn split_blocks(body: &str) -> Vec<Block> {
         if !in_fence && stripped.starts_with("```") {
             in_fence = true;
             fence_marker = Some("```".to_string());
-        } else if in_fence
-            && stripped.starts_with("```")
-            && fence_marker.as_deref() == Some("```")
+        } else if in_fence && stripped.starts_with("```") && fence_marker.as_deref() == Some("```")
         {
             in_fence = false;
             fence_marker = None;
@@ -189,12 +185,7 @@ fn split_blocks(body: &str) -> Vec<Block> {
                 || stripped.starts_with("#### ")
             {
                 push_current(&mut current, &mut blocks, &heading, current_start);
-                heading = Some(
-                    stripped
-                        .trim_start_matches('#')
-                        .trim_start()
-                        .to_string(),
-                );
+                heading = Some(stripped.trim_start_matches('#').trim_start().to_string());
                 current_start = running_char;
                 current.push_str(line);
                 running_char += line.chars().count() + 1;
@@ -264,9 +255,16 @@ mod tests {
     fn large_doc_produces_multiple_chunks_with_overlap() {
         let para = "lorem ipsum dolor sit amet ".repeat(60); // ~1620 chars
         let md = format!("# A\n\n{}\n\n# B\n\n{}", para, para);
-        let opts = ChunkOptions { target_chars: 800, overlap_chars: 100 };
+        let opts = ChunkOptions {
+            target_chars: 800,
+            overlap_chars: 100,
+        };
         let chunks = chunk_markdown(&md, opts);
-        assert!(chunks.len() >= 3, "expected chunking, got {:?}", chunks.len());
+        assert!(
+            chunks.len() >= 3,
+            "expected chunking, got {:?}",
+            chunks.len()
+        );
         // Overlap means consecutive chunks should share some characters.
         let a = &chunks[0].text;
         let b = &chunks[1].text;
@@ -283,12 +281,15 @@ mod tests {
     fn code_fence_is_not_split() {
         let code: String = "println!(\"line\");\n".repeat(200);
         let md = format!("# Title\n\nIntro.\n\n```rust\n{}```\n\nAfter.", code);
-        let chunks = chunk_markdown(&md, ChunkOptions { target_chars: 500, overlap_chars: 0 });
+        let chunks = chunk_markdown(
+            &md,
+            ChunkOptions {
+                target_chars: 500,
+                overlap_chars: 0,
+            },
+        );
         // The code fence should live wholly inside one chunk.
-        let containing = chunks
-            .iter()
-            .filter(|c| c.text.contains("```rust"))
-            .count();
+        let containing = chunks.iter().filter(|c| c.text.contains("```rust")).count();
         assert_eq!(containing, 1, "code fence was split across chunks");
     }
 
@@ -296,7 +297,9 @@ mod tests {
     fn heading_carries_to_chunks() {
         let md = "# Parent\n\npar 1\n\n## Child\n\npar 2";
         let chunks = chunk_markdown(md, ChunkOptions::default());
-        assert!(chunks.iter().any(|c| c.heading.as_deref() == Some("Parent")));
+        assert!(chunks
+            .iter()
+            .any(|c| c.heading.as_deref() == Some("Parent")));
     }
 
     #[test]

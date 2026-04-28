@@ -14,14 +14,26 @@ pub struct LintIssue {
 
 impl LintIssue {
     fn new(
-        rule: &str, anchor: &str, description: &str, suggestion: &str, auto_fixable: bool,
+        rule: &str,
+        anchor: &str,
+        description: &str,
+        suggestion: &str,
+        auto_fixable: bool,
     ) -> Self {
         let mut h = Sha256::new();
-        h.update(rule); h.update(anchor); h.update(description);
-        let id = format!("{:016x}", u64::from_be_bytes(h.finalize()[..8].try_into().unwrap()));
+        h.update(rule);
+        h.update(anchor);
+        h.update(description);
+        let id = format!(
+            "{:016x}",
+            u64::from_be_bytes(h.finalize()[..8].try_into().unwrap())
+        );
         Self {
-            id, rule: rule.to_string(), anchor: anchor.to_string(),
-            description: description.to_string(), suggestion: suggestion.to_string(),
+            id,
+            rule: rule.to_string(),
+            anchor: anchor.to_string(),
+            description: description.to_string(),
+            suggestion: suggestion.to_string(),
             auto_fixable,
         }
     }
@@ -81,12 +93,19 @@ fn check_heading_hierarchy(content: &str) -> Vec<LintIssue> {
     let mut issues = Vec::new();
     let mut prev_level = 0u32;
     for (level, text) in &headings {
-        let threshold = if prev_level == 0 { 2u32 } else { prev_level + 1 };
+        let threshold = if prev_level == 0 {
+            2u32
+        } else {
+            prev_level + 1
+        };
         if *level > threshold {
             issues.push(LintIssue::new(
                 "heading_hierarchy",
                 text,
-                &format!("Heading '{}' jumps from H{} to H{} — skips a level", text, prev_level, level),
+                &format!(
+                    "Heading '{}' jumps from H{} to H{} — skips a level",
+                    text, prev_level, level
+                ),
                 "Add an intermediate heading or promote this heading one level",
                 false,
             ));
@@ -143,7 +162,9 @@ fn check_long_paragraphs(content: &str) -> Vec<LintIssue> {
     let mut in_fence = false;
     for line in content.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") { in_fence = !in_fence; }
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+        }
         if !in_fence {
             let word_count = line.split_whitespace().count();
             if word_count > 150 {
@@ -151,7 +172,10 @@ fn check_long_paragraphs(content: &str) -> Vec<LintIssue> {
                 issues.push(LintIssue::new(
                     "long_paragraph",
                     &anchor,
-                    &format!("Paragraph has {} words — very long paragraphs hurt readability", word_count),
+                    &format!(
+                        "Paragraph has {} words — very long paragraphs hurt readability",
+                        word_count
+                    ),
                     "Break into 2–3 shorter paragraphs under 100 words each",
                     false,
                 ));
@@ -209,7 +233,9 @@ fn check_malformed_links(content: &str) -> Vec<LintIssue> {
 fn check_thin_sections(content: &str) -> Vec<LintIssue> {
     let mut issues = Vec::new();
     let headings = parse_headings(content);
-    if headings.is_empty() { return issues; }
+    if headings.is_empty() {
+        return issues;
+    }
 
     let lines: Vec<&str> = content.lines().collect();
     let mut current_heading = String::new();
@@ -223,7 +249,10 @@ fn check_thin_sections(content: &str) -> Vec<LintIssue> {
                 issues.push(LintIssue::new(
                     "thin_section",
                     &current_heading,
-                    &format!("Section '{}' has only {} words — very thin", current_heading, section_words),
+                    &format!(
+                        "Section '{}' has only {} words — very thin",
+                        current_heading, section_words
+                    ),
                     "Expand this section or merge it with an adjacent section",
                     false,
                 ));
@@ -231,7 +260,9 @@ fn check_thin_sections(content: &str) -> Vec<LintIssue> {
             current_heading = trimmed.to_string();
             section_words = 0;
         } else {
-            if line.trim_start().starts_with("```") { in_fence = !in_fence; }
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+            }
             if !in_fence {
                 section_words += line.split_whitespace().count();
             }
@@ -241,7 +272,10 @@ fn check_thin_sections(content: &str) -> Vec<LintIssue> {
         issues.push(LintIssue::new(
             "thin_section",
             &current_heading,
-            &format!("Section '{}' has only {} words", current_heading, section_words),
+            &format!(
+                "Section '{}' has only {} words",
+                current_heading, section_words
+            ),
             "Expand this section or merge it with an adjacent section",
             false,
         ));
@@ -264,11 +298,13 @@ pub async fn blog_lint(
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
 
-    let content: String = conn.query_row(
-        "SELECT COALESCE(draft_content, content, '') FROM blog_posts WHERE id = ?1",
-        rusqlite::params![post_id],
-        |r| r.get(0),
-    ).map_err(|_| format!("Post {} not found", post_id))?;
+    let content: String = conn
+        .query_row(
+            "SELECT COALESCE(draft_content, content, '') FROM blog_posts WHERE id = ?1",
+            rusqlite::params![post_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| format!("Post {} not found", post_id))?;
 
     Ok(lint(&content))
 }
@@ -281,8 +317,10 @@ mod tests {
     fn heading_gap_detected() {
         let md = "# Title\n\n### Skipped H2\n\nContent";
         let issues = lint(md);
-        assert!(issues.iter().any(|i| i.rule == "heading_hierarchy"),
-            "expected heading_hierarchy issue");
+        assert!(
+            issues.iter().any(|i| i.rule == "heading_hierarchy"),
+            "expected heading_hierarchy issue"
+        );
     }
 
     #[test]
@@ -310,10 +348,12 @@ mod tests {
     fn clean_post_has_no_issues() {
         let md = "# Title\n\n## Section\n\nA short paragraph.\n\n## Another\n\nAnother paragraph.";
         let issues = lint(md);
-        let critical: Vec<_> = issues.iter()
-            .filter(|i| i.rule != "thin_section")
-            .collect();
-        assert!(critical.is_empty(), "expected no issues, got: {:?}", critical);
+        let critical: Vec<_> = issues.iter().filter(|i| i.rule != "thin_section").collect();
+        assert!(
+            critical.is_empty(),
+            "expected no issues, got: {:?}",
+            critical
+        );
     }
 
     #[test]
@@ -321,15 +361,24 @@ mod tests {
         let md = "## Introduction\n\nContent\n\n### Deep Section\n\nMore";
         let issues = lint(md);
         // H2 as first heading is ok; H2→H3 jump (1 level) is ok too
-        let hier: Vec<_> = issues.iter().filter(|i| i.rule == "heading_hierarchy").collect();
-        assert!(hier.is_empty(), "H2 first heading should not be flagged: {:?}", hier);
+        let hier: Vec<_> = issues
+            .iter()
+            .filter(|i| i.rule == "heading_hierarchy")
+            .collect();
+        assert!(
+            hier.is_empty(),
+            "H2 first heading should not be flagged: {:?}",
+            hier
+        );
     }
 
     #[test]
     fn h3_as_first_heading_is_flagged() {
         let md = "### Skipped H1 and H2\n\nContent";
         let issues = lint(md);
-        assert!(issues.iter().any(|i| i.rule == "heading_hierarchy"),
-            "H3 as first heading should be flagged");
+        assert!(
+            issues.iter().any(|i| i.rule == "heading_hierarchy"),
+            "H3 as first heading should be flagged"
+        );
     }
 }

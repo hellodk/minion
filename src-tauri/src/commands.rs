@@ -377,7 +377,8 @@ pub async fn set_config(
             conn.execute(
                 "INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)",
                 rusqlite::params![key, v],
-            ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
             return Ok(());
         }
         _ => return Err(format!("Unknown config key: {}", key)),
@@ -3831,7 +3832,9 @@ pub async fn reader_cleanup_book_images(book_path: String) -> Result<(), String>
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
-    std::path::Path::new(&book_path).to_string_lossy().hash(&mut hasher);
+    std::path::Path::new(&book_path)
+        .to_string_lossy()
+        .hash(&mut hasher);
     let book_hash = format!("{:x}", hasher.finish());
 
     let img_dir = std::env::temp_dir()
@@ -4160,8 +4163,16 @@ pub async fn reader_list_folder_files(
     let mut candidates: Vec<FolderFileCandidate> = paths
         .into_iter()
         .map(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-            let extension = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let extension = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
             FolderFileCandidate {
                 path: p.to_string_lossy().to_string(),
@@ -4694,8 +4705,9 @@ pub async fn ai_analyze_health(
     drop(conn);
     drop(st);
 
-    let (ollama_url, _api_key, model) = endpoint
-        .ok_or_else(|| "No LLM endpoint configured. Add one in Settings → LLM Endpoints.".to_string())?;
+    let (ollama_url, _api_key, model) = endpoint.ok_or_else(|| {
+        "No LLM endpoint configured. Add one in Settings → LLM Endpoints.".to_string()
+    })?;
 
     let prompt = format!(
         "You are a health and fitness AI assistant. Analyze the following health metrics \
@@ -4739,7 +4751,10 @@ pub async fn ai_analyze_health(
 
 // ── Device-key encryption for OAuth tokens ───────────────────────────────────
 
-use aes_gcm::{Aes256Gcm, KeyInit, aead::{Aead, generic_array::GenericArray}};
+use aes_gcm::{
+    aead::{generic_array::GenericArray, Aead},
+    Aes256Gcm, KeyInit,
+};
 
 fn get_or_create_device_key(data_dir: &std::path::Path) -> [u8; 32] {
     let key_path = data_dir.join("device.key");
@@ -4770,7 +4785,8 @@ fn encrypt_secret(key: &[u8; 32], plaintext: &str) -> String {
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = GenericArray::from_slice(&nonce_bytes);
-    let ciphertext = cipher.encrypt(nonce, plaintext.as_bytes())
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
         .unwrap_or_default();
     let mut combined = nonce_bytes.to_vec();
     combined.extend_from_slice(&ciphertext);
@@ -4779,7 +4795,8 @@ fn encrypt_secret(key: &[u8; 32], plaintext: &str) -> String {
 
 fn decrypt_secret(key: &[u8; 32], encoded: &str) -> Result<String, String> {
     use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
         .map_err(|_| "base64 decode failed".to_string())?;
     if bytes.len() < 12 {
         return Err("ciphertext too short".into());
@@ -4787,7 +4804,8 @@ fn decrypt_secret(key: &[u8; 32], encoded: &str) -> Result<String, String> {
     let (nonce_bytes, ciphertext) = bytes.split_at(12);
     let cipher = Aes256Gcm::new(GenericArray::from_slice(key));
     let nonce = GenericArray::from_slice(nonce_bytes);
-    let plaintext = cipher.decrypt(nonce, ciphertext)
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
         .map_err(|_| "decryption failed".to_string())?;
     String::from_utf8(plaintext).map_err(|e| e.to_string())
 }
@@ -4810,13 +4828,19 @@ const GFIT_SCOPE: &str = concat!(
     "https://www.googleapis.com/auth/fitness.blood_glucose.read ",
     "https://www.googleapis.com/auth/fitness.oxygen_saturation.read ",
     "https://www.googleapis.com/auth/fitness.nutrition.read ",
-    "https://www.googleapis.com/auth/fitness.location.read",  // required for distance.delta
+    "https://www.googleapis.com/auth/fitness.location.read", // required for distance.delta
 );
 
 fn parse_gfit_oauth_callback(buf: &[u8]) -> Result<(String, String), String> {
     let s = std::str::from_utf8(buf).map_err(|_| "Invalid HTTP request".to_string())?;
-    let first = s.lines().next().ok_or_else(|| "Empty request".to_string())?;
-    let path = first.split_whitespace().nth(1).ok_or_else(|| "Bad request line".to_string())?;
+    let first = s
+        .lines()
+        .next()
+        .ok_or_else(|| "Empty request".to_string())?;
+    let path = first
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| "Bad request line".to_string())?;
     let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
     let query = query.split_whitespace().next().unwrap_or(query);
     let mut code = None;
@@ -4826,14 +4850,24 @@ fn parse_gfit_oauth_callback(buf: &[u8]) -> Result<(String, String), String> {
         let k = it.next().unwrap_or("");
         let v = it.next().unwrap_or("");
         match k {
-            "error" => return Err(format!("Google OAuth error: {}",
-                urlencoding::decode(v).unwrap_or_else(|_| v.into()))),
-            "code" => code = Some(urlencoding::decode(v)
-                .map(|c| c.into_owned())
-                .map_err(|e| e.to_string())?),
-            "state" => state_val = urlencoding::decode(v)
-                .map(|c| c.into_owned())
-                .unwrap_or_else(|_| v.to_string()),
+            "error" => {
+                return Err(format!(
+                    "Google OAuth error: {}",
+                    urlencoding::decode(v).unwrap_or_else(|_| v.into())
+                ))
+            }
+            "code" => {
+                code = Some(
+                    urlencoding::decode(v)
+                        .map(|c| c.into_owned())
+                        .map_err(|e| e.to_string())?,
+                )
+            }
+            "state" => {
+                state_val = urlencoding::decode(v)
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| v.to_string())
+            }
             _ => {}
         }
     }
@@ -4922,21 +4956,27 @@ pub async fn gfit_open_auth(
              console.cloud.google.com and add redirect URI http://127.0.0.1:8745/"
                 .to_string()
         })?;
-    let client_secret: Option<String> = conn.query_row(
-        "SELECT value FROM config WHERE key = 'gfit_client_secret'",
-        [], |r| r.get::<_, String>(0),
-    ).ok().map(|enc| read_token(&dev_key, &enc));
+    let client_secret: Option<String> = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'gfit_client_secret'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .map(|enc| read_token(&dev_key, &enc));
     drop(st);
 
     // Google Desktop OAuth clients always require client_secret in token exchange.
     // Fail early with a clear message rather than letting Google return a 400.
-    if client_secret.as_deref().map(|s| s.is_empty()).unwrap_or(true) {
-        return Err(
-            "Google Fit Client Secret is not configured. \
+    if client_secret
+        .as_deref()
+        .map(|s| s.is_empty())
+        .unwrap_or(true)
+    {
+        return Err("Google Fit Client Secret is not configured. \
              Go to Settings → Google Fit, enter your Client Secret (GOCSPX-…) \
              from Google Cloud Console, click Save Credentials, then try Connect again."
-                .to_string(),
-        );
+            .to_string());
     }
 
     let redirect_uri = GFIT_LOOPBACK_REDIRECT;
@@ -4946,16 +4986,14 @@ pub async fn gfit_open_auth(
     use rand::RngCore;
     let mut verifier_bytes = [0u8; 64];
     rand::thread_rng().fill_bytes(&mut verifier_bytes);
-    let code_verifier =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);
+    let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);
     let challenge_hash = {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(code_verifier.as_bytes());
         h.finalize()
     };
-    let code_challenge =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge_hash);
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge_hash);
 
     // CSRF state
     let csrf_state = uuid::Uuid::new_v4().to_string();
@@ -4982,18 +5020,21 @@ pub async fn gfit_open_auth(
             match tokio::time::timeout(remaining, listener.accept()).await {
                 Ok(Ok((mut stream, _))) => {
                     let mut buf = vec![0u8; 16_384];
-                    let n = match stream.read(&mut buf).await { Ok(n) => n, Err(_) => continue };
+                    let n = match stream.read(&mut buf).await {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
                     buf.truncate(n);
                     match parse_gfit_oauth_callback(&buf) {
                         Ok((code, state_val)) => {
                             // Verify CSRF state
                             if state_val != expected_state {
-                                let _ = stream.write_all(
-                                    b"HTTP/1.1 400 Bad Request\r\n\r\nCSRF mismatch",
-                                ).await;
-                                let _ = tx.send(Err(
-                                    "OAuth CSRF state mismatch — possible CSRF attack.".to_string(),
-                                ));
+                                let _ = stream
+                                    .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\nCSRF mismatch")
+                                    .await;
+                                let _ = tx
+                                    .send(Err("OAuth CSRF state mismatch — possible CSRF attack."
+                                        .to_string()));
                                 return;
                             }
                             let body = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
@@ -5013,17 +5054,17 @@ pub async fn gfit_open_auth(
                         }
                         Err(e) if e.contains("No authorization code") => {
                             // Likely a favicon/preflight — send 404 and keep looping
-                            let _ = stream.write_all(
-                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\
+                            let _ = stream
+                                .write_all(
+                                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\
                                   Connection: close\r\n\r\n",
-                            ).await;
+                                )
+                                .await;
                             continue;
                         }
                         Err(e) => {
-                            let body = format!(
-                                "<!DOCTYPE html><html><body>Error: {}</body></html>",
-                                e
-                            );
+                            let body =
+                                format!("<!DOCTYPE html><html><body>Error: {}</body></html>", e);
                             let response = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
                                  Content-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -5061,12 +5102,13 @@ pub async fn gfit_open_auth(
 
     close_gfit_auth_window(&app);
     let auth_parsed = url::Url::parse(&auth_url).map_err(|e| e.to_string())?;
-    let auth_window = WebviewWindowBuilder::new(&app, "google-fit-auth", WebviewUrl::External(auth_parsed))
-        .title("MINION - Google Fit Sign In")
-        .inner_size(500.0, 700.0)
-        .center()
-        .build()
-        .map_err(|e| e.to_string())?;
+    let auth_window =
+        WebviewWindowBuilder::new(&app, "google-fit-auth", WebviewUrl::External(auth_parsed))
+            .title("MINION - Google Fit Sign In")
+            .inner_size(500.0, 700.0)
+            .center()
+            .build()
+            .map_err(|e| e.to_string())?;
 
     // Detect when the user manually clicks X on the auth window (CloseRequested only —
     // NOT Destroyed, which also fires on navigation away from the OAuth URL).
@@ -5098,8 +5140,14 @@ pub async fn gfit_open_auth(
 
     callback_task.abort();
 
-    let tokens =
-        gfit_exchange_code_for_tokens(&client_id, client_secret.as_deref(), &code, redirect_uri, &code_verifier).await?;
+    let tokens = gfit_exchange_code_for_tokens(
+        &client_id,
+        client_secret.as_deref(),
+        &code,
+        redirect_uri,
+        &code_verifier,
+    )
+    .await?;
 
     let data_dir = { state.read().await.data_dir.clone() };
     let dev_key = get_or_create_device_key(&data_dir);
@@ -5161,9 +5209,7 @@ pub async fn gfit_sync(state: State<'_, AppStateHandle>) -> Result<String, Strin
 
     if let Some(ref ts) = last_synced {
         if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
-            let age_min = chrono::Utc::now()
-                .signed_duration_since(dt)
-                .num_minutes();
+            let age_min = chrono::Utc::now().signed_duration_since(dt).num_minutes();
             if age_min < 30 {
                 let days_count: i64 = {
                     let conn = db.get().map_err(|e| e.to_string())?;
@@ -5315,8 +5361,11 @@ async fn gfit_sync_chunk(
         let conn = db.get().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT value FROM config WHERE key = 'gfit_access_token'",
-            [], |r| r.get::<_, String>(0),
-        ).ok().map(|s| read_token(&dev_key, &s))
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .map(|s| read_token(&dev_key, &s))
     };
     if token.is_none() {
         return Err("Not connected to Google Fit".into());
@@ -5342,7 +5391,9 @@ async fn gfit_sync_chunk(
         .post("https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate")
         .bearer_auth(token.as_deref().unwrap_or(""))
         .json(&agg_body)
-        .send().await.map_err(|e| e.to_string())?;
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         let data_dir = state.read().await.data_dir.clone();
@@ -5351,7 +5402,9 @@ async fn gfit_sync_chunk(
             .post("https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate")
             .bearer_auth(&new_token)
             .json(&agg_body)
-            .send().await.map_err(|e| e.to_string())?;
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
         let _ = token; // refreshed — no further use needed
     }
 
@@ -5368,18 +5421,22 @@ async fn gfit_sync_chunk(
 
     for bucket in &buckets {
         let start_ts = bucket["startTimeMillis"]
-            .as_str().and_then(|s| s.parse::<i64>().ok())
+            .as_str()
+            .and_then(|s| s.parse::<i64>().ok())
             .or_else(|| bucket["startTimeMillis"].as_i64())
             .unwrap_or(0);
-        if start_ts == 0 { continue; }
+        if start_ts == 0 {
+            continue;
+        }
 
-        let dt = chrono::DateTime::from_timestamp_millis(start_ts)
-            .unwrap_or_else(chrono::Utc::now);
+        let dt = chrono::DateTime::from_timestamp_millis(start_ts).unwrap_or_else(chrono::Utc::now);
         let date = dt.format("%Y-%m-%d").to_string();
 
         let mut steps: Option<i64> = None;
-        let mut hr_sum = 0f64; let mut hr_count = 0i64;
-        let mut hr_min: Option<i64> = None; let mut hr_max: Option<i64> = None;
+        let mut hr_sum = 0f64;
+        let mut hr_count = 0i64;
+        let mut hr_min: Option<i64> = None;
+        let mut hr_max: Option<i64> = None;
         let mut calories: Option<i64> = None;
         let mut active_min: Option<i64> = None;
         let mut weight: Option<f64> = None;
@@ -5390,42 +5447,66 @@ async fn gfit_sync_chunk(
             let type_name = ds["dataSourceId"].as_str().unwrap_or("");
             for pt in ds["point"].as_array().unwrap_or(&vec![]) {
                 let vals = pt["value"].as_array();
-                macro_rules! fp { ($arr:expr,$i:expr) => {
-                    $arr.and_then(|a| a.get($i)).and_then(|v| v["fpVal"].as_f64())
-                }}
-                macro_rules! ip { ($arr:expr,$i:expr) => {
-                    $arr.and_then(|a| a.get($i)).and_then(|v| v["intVal"].as_i64())
-                }}
+                macro_rules! fp {
+                    ($arr:expr,$i:expr) => {
+                        $arr.and_then(|a| a.get($i))
+                            .and_then(|v| v["fpVal"].as_f64())
+                    };
+                }
+                macro_rules! ip {
+                    ($arr:expr,$i:expr) => {
+                        $arr.and_then(|a| a.get($i))
+                            .and_then(|v| v["intVal"].as_i64())
+                    };
+                }
                 if type_name.contains("step_count") {
-                    steps = Some(steps.unwrap_or(0) + ip!(vals,0).unwrap_or(0));
+                    steps = Some(steps.unwrap_or(0) + ip!(vals, 0).unwrap_or(0));
                 } else if type_name.contains("heart_rate") {
-                    let v = fp!(vals,0).unwrap_or(0.0);
-                    if v > 0.0 { hr_sum += v; hr_count += 1;
+                    let v = fp!(vals, 0).unwrap_or(0.0);
+                    if v > 0.0 {
+                        hr_sum += v;
+                        hr_count += 1;
                         let iv = v as i64;
                         hr_min = Some(hr_min.map_or(iv, |m: i64| m.min(iv)));
                         hr_max = Some(hr_max.map_or(iv, |m: i64| m.max(iv)));
                     }
                 } else if type_name.contains("calories") {
-                    calories = Some(calories.unwrap_or(0) + fp!(vals,0).unwrap_or(0.0) as i64);
+                    calories = Some(calories.unwrap_or(0) + fp!(vals, 0).unwrap_or(0.0) as i64);
                 } else if type_name.contains("active_minutes") {
-                    active_min = Some(active_min.unwrap_or(0) + ip!(vals,0).unwrap_or(0));
+                    active_min = Some(active_min.unwrap_or(0) + ip!(vals, 0).unwrap_or(0));
                 } else if type_name.contains("weight") {
-                    weight = fp!(vals,0).or(weight);
+                    weight = fp!(vals, 0).or(weight);
                 } else if type_name.contains("sleep") {
-                    let end_ns = pt["endTimeNanos"].as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-                    let st_ns  = pt["startTimeNanos"].as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                    let end_ns = pt["endTimeNanos"]
+                        .as_str()
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0);
+                    let st_ns = pt["startTimeNanos"]
+                        .as_str()
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0);
                     sleep_s = Some(sleep_s.unwrap_or(0) + (end_ns - st_ns) / 1_000_000_000);
                 } else if type_name.contains("oxygen_saturation") {
-                    spo2 = fp!(vals,0).or(spo2);
+                    spo2 = fp!(vals, 0).or(spo2);
                 }
             }
         }
 
-        let hr_avg = if hr_count > 0 { Some((hr_sum / hr_count as f64) as i64) } else { None };
+        let hr_avg = if hr_count > 0 {
+            Some((hr_sum / hr_count as f64) as i64)
+        } else {
+            None
+        };
         let sleep_hours = sleep_s.map(|s| s as f64 / 3600.0);
 
-        if steps.is_none() && hr_avg.is_none() && calories.is_none()
-            && weight.is_none() && sleep_hours.is_none() { continue; }
+        if steps.is_none()
+            && hr_avg.is_none()
+            && calories.is_none()
+            && weight.is_none()
+            && sleep_hours.is_none()
+        {
+            continue;
+        }
 
         let id = uuid::Uuid::new_v4().to_string();
         let conn = db.get().map_err(|e| e.to_string())?;
@@ -5448,10 +5529,21 @@ async fn gfit_sync_chunk(
                source         = 'gfit',
                synced_at      = excluded.synced_at",
             rusqlite::params![
-                id, date, steps, hr_avg, hr_min, hr_max,
-                sleep_hours, weight, calories, active_min, spo2, now_rfc,
+                id,
+                date,
+                steps,
+                hr_avg,
+                hr_min,
+                hr_max,
+                sleep_hours,
+                weight,
+                calories,
+                active_min,
+                spo2,
+                now_rfc,
             ],
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
         days_synced += 1;
     }
     Ok(days_synced)
@@ -5466,17 +5558,30 @@ async fn gfit_refresh_token(
     let dev_key_ref = get_or_create_device_key(data_dir);
     let (refresh, client_id, client_secret_opt) = {
         let conn = db.get().map_err(|e| e.to_string())?;
-        let refresh: Option<String> = conn.query_row(
-            "SELECT value FROM config WHERE key = 'gfit_refresh_token'",
-            [],
-            |r| r.get::<_, String>(0),
-        ).ok().map(|s| read_token(&dev_key_ref, &s));
-        let client_id: Option<String> = conn.query_row(
-            "SELECT value FROM config WHERE key = 'gfit_client_id'", [], |r| r.get(0),
-        ).ok().flatten();
-        let client_secret_opt: Option<String> = conn.query_row(
-            "SELECT value FROM config WHERE key = 'gfit_client_secret'", [], |r| r.get::<_, String>(0),
-        ).ok().map(|s| read_token(&dev_key_ref, &s));
+        let refresh: Option<String> = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = 'gfit_refresh_token'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .map(|s| read_token(&dev_key_ref, &s));
+        let client_id: Option<String> = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = 'gfit_client_id'",
+                [],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        let client_secret_opt: Option<String> = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = 'gfit_client_secret'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .map(|s| read_token(&dev_key_ref, &s));
         (refresh, client_id, client_secret_opt)
     }; // conn dropped here
 
@@ -5497,16 +5602,24 @@ async fn gfit_refresh_token(
             form_params.push(("client_secret", secret_str.as_str()));
         }
     }
-    let resp = http.post("https://oauth2.googleapis.com/token")
+    let resp = http
+        .post("https://oauth2.googleapis.com/token")
         .form(&form_params)
-        .send().await.map_err(|e| e.to_string())?;
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     if !resp.status().is_success() {
-        return Err(format!("Token refresh failed: {}", resp.text().await.unwrap_or_default()));
+        return Err(format!(
+            "Token refresh failed: {}",
+            resp.text().await.unwrap_or_default()
+        ));
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    let new_token = json["access_token"].as_str()
-        .ok_or("No access_token in refresh response")?.to_string();
+    let new_token = json["access_token"]
+        .as_str()
+        .ok_or("No access_token in refresh response")?
+        .to_string();
 
     // Phase 3: save new token (encrypted)
     let dev_key = get_or_create_device_key(data_dir);
@@ -5515,16 +5628,14 @@ async fn gfit_refresh_token(
     conn.execute(
         "INSERT OR REPLACE INTO config (key, value) VALUES ('gfit_access_token', ?1)",
         rusqlite::params![enc_token],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok(new_token)
 }
 
 /// Core sync logic. `days_back` controls how far back to fetch (30 on full sync, 1 on incremental).
-pub async fn gfit_sync_inner(
-    state: AppStateHandle,
-    days_back: i64,
-) -> Result<String, String> {
+pub async fn gfit_sync_inner(state: AppStateHandle, days_back: i64) -> Result<String, String> {
     // Phase 1: read token from DB synchronously, drop conn before any await
     let db = { state.read().await.db.clone() };
 
@@ -5535,7 +5646,9 @@ pub async fn gfit_sync_inner(
             "SELECT value FROM config WHERE key = 'gfit_access_token'",
             [],
             |r| r.get::<_, String>(0),
-        ).ok().map(|stored| read_token(&dev_key, &stored))
+        )
+        .ok()
+        .map(|stored| read_token(&dev_key, &stored))
     }; // conn dropped
 
     if token.is_none() {
@@ -5602,17 +5715,21 @@ pub async fn gfit_sync_inner(
         // Derive the date string from the bucket start time.
         // Google Fit returns startTimeMillis as a string OR integer depending on the endpoint.
         let start_ns = bucket["startTimeMillis"]
-            .as_str().and_then(|s| s.parse::<i64>().ok())
+            .as_str()
+            .and_then(|s| s.parse::<i64>().ok())
             .or_else(|| bucket["startTimeMillis"].as_i64())
             .unwrap_or(0);
-        if start_ns == 0 { continue; }
-        let dt = chrono::DateTime::from_timestamp_millis(start_ns)
-            .unwrap_or_else(chrono::Utc::now);
+        if start_ns == 0 {
+            continue;
+        }
+        let dt = chrono::DateTime::from_timestamp_millis(start_ns).unwrap_or_else(chrono::Utc::now);
         let date = dt.format("%Y-%m-%d").to_string();
 
         let mut steps: Option<i64> = None;
-        let mut hr_sum = 0f64; let mut hr_count = 0i64;
-        let mut hr_min: Option<i64> = None; let mut hr_max: Option<i64> = None;
+        let mut hr_sum = 0f64;
+        let mut hr_count = 0i64;
+        let mut hr_min: Option<i64> = None;
+        let mut hr_max: Option<i64> = None;
         let mut calories: Option<i64> = None;
         let mut distance: Option<f64> = None;
         let mut active_min: Option<i64> = None;
@@ -5624,12 +5741,18 @@ pub async fn gfit_sync_inner(
             let type_name = ds["dataSourceId"].as_str().unwrap_or("");
             for pt in ds["point"].as_array().unwrap_or(&vec![]) {
                 let vals = pt["value"].as_array();
-                macro_rules! fp { ($arr:expr, $i:expr) => {
-                    $arr.and_then(|a| a.get($i)).and_then(|v| v["fpVal"].as_f64())
-                }}
-                macro_rules! ip { ($arr:expr, $i:expr) => {
-                    $arr.and_then(|a| a.get($i)).and_then(|v| v["intVal"].as_i64())
-                }}
+                macro_rules! fp {
+                    ($arr:expr, $i:expr) => {
+                        $arr.and_then(|a| a.get($i))
+                            .and_then(|v| v["fpVal"].as_f64())
+                    };
+                }
+                macro_rules! ip {
+                    ($arr:expr, $i:expr) => {
+                        $arr.and_then(|a| a.get($i))
+                            .and_then(|v| v["intVal"].as_i64())
+                    };
+                }
 
                 if type_name.contains("step_count") {
                     steps = Some(steps.unwrap_or(0) + ip!(vals, 0).unwrap_or(0));
@@ -5652,8 +5775,14 @@ pub async fn gfit_sync_inner(
                     weight = fp!(vals, 0).or(weight);
                 } else if type_name.contains("sleep") {
                     // sleep segment: each point has a duration
-                    let end_ns = pt["endTimeNanos"].as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-                    let st_ns = pt["startTimeNanos"].as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                    let end_ns = pt["endTimeNanos"]
+                        .as_str()
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0);
+                    let st_ns = pt["startTimeNanos"]
+                        .as_str()
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0);
                     sleep_s = Some(sleep_s.unwrap_or(0) + (end_ns - st_ns) / 1_000_000_000);
                 } else if type_name.contains("oxygen_saturation") {
                     spo2 = fp!(vals, 0).or(spo2);
@@ -5661,12 +5790,22 @@ pub async fn gfit_sync_inner(
             }
         }
 
-        let hr_avg = if hr_count > 0 { Some((hr_sum / hr_count as f64) as i64) } else { None };
+        let hr_avg = if hr_count > 0 {
+            Some((hr_sum / hr_count as f64) as i64)
+        } else {
+            None
+        };
         let sleep_hours = sleep_s.map(|s| s as f64 / 3600.0);
 
         // Skip entirely empty days
-        if steps.is_none() && hr_avg.is_none() && calories.is_none()
-            && weight.is_none() && sleep_hours.is_none() { continue; }
+        if steps.is_none()
+            && hr_avg.is_none()
+            && calories.is_none()
+            && weight.is_none()
+            && sleep_hours.is_none()
+        {
+            continue;
+        }
 
         let id = uuid::Uuid::new_v4().to_string();
         let conn = db.get().map_err(|e| e.to_string())?;
@@ -5690,11 +5829,22 @@ pub async fn gfit_sync_inner(
                source        = 'gfit',
                synced_at     = excluded.synced_at",
             rusqlite::params![
-                id, date, steps, hr_avg, hr_min, hr_max,
-                sleep_hours, weight, calories, distance, active_min,
-                spo2, now_rfc,
+                id,
+                date,
+                steps,
+                hr_avg,
+                hr_min,
+                hr_max,
+                sleep_hours,
+                weight,
+                calories,
+                distance,
+                active_min,
+                spo2,
+                now_rfc,
             ],
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
         days_synced += 1;
     }
 
@@ -5703,9 +5853,12 @@ pub async fn gfit_sync_inner(
         .get("https://www.googleapis.com/fitness/v1/users/me/sessions")
         .bearer_auth(token.as_deref().unwrap_or(""))
         .query(&[
-            ("startTime", chrono::DateTime::from_timestamp_millis(start_ms)
-                .unwrap_or_else(chrono::Utc::now)
-                .to_rfc3339()),
+            (
+                "startTime",
+                chrono::DateTime::from_timestamp_millis(start_ms)
+                    .unwrap_or_else(chrono::Utc::now)
+                    .to_rfc3339(),
+            ),
             ("endTime", chrono::Utc::now().to_rfc3339()),
         ])
         .send()
@@ -5716,43 +5869,57 @@ pub async fn gfit_sync_inner(
             if let Ok(sdata) = sr.json::<serde_json::Value>().await {
                 for session in sdata["session"].as_array().unwrap_or(&vec![]) {
                     let id = session["id"].as_str().unwrap_or("").to_string();
-                    if id.is_empty() { continue; }
+                    if id.is_empty() {
+                        continue;
+                    }
                     let name = session["name"].as_str().unwrap_or("Unknown").to_string();
-                    let start_ns: i64 = session["startTimeMillis"].as_str()
+                    let start_ns: i64 = session["startTimeMillis"]
+                        .as_str()
                         .and_then(|s| s.parse().ok())
-                        .or_else(|| session["startTimeMillis"].as_i64()).unwrap_or(0);
-                    let end_ns: i64 = session["endTimeMillis"].as_str()
+                        .or_else(|| session["startTimeMillis"].as_i64())
+                        .unwrap_or(0);
+                    let end_ns: i64 = session["endTimeMillis"]
+                        .as_str()
                         .and_then(|s| s.parse().ok())
-                        .or_else(|| session["endTimeMillis"].as_i64()).unwrap_or(0);
+                        .or_else(|| session["endTimeMillis"].as_i64())
+                        .unwrap_or(0);
                     let duration_s = ((end_ns - start_ns) / 1000).max(0);
                     let date = chrono::DateTime::from_timestamp_millis(start_ns)
                         .unwrap_or_else(chrono::Utc::now)
-                        .format("%Y-%m-%d").to_string();
+                        .format("%Y-%m-%d")
+                        .to_string();
 
                     if let Ok(wconn) = db.get() {
                         // Mirror into fitness_workouts_gfit (raw store)
-                        wconn.execute(
-                            "INSERT OR IGNORE INTO fitness_workouts_gfit
+                        wconn
+                            .execute(
+                                "INSERT OR IGNORE INTO fitness_workouts_gfit
                              (id, date, activity, duration_s, source, synced_at)
                              VALUES (?1,?2,?3,?4,'gfit',?5)",
-                            rusqlite::params![id, date, name, duration_s, now_rfc],
-                        ).ok();
+                                rusqlite::params![id, date, name, duration_s, now_rfc],
+                            )
+                            .ok();
                         // Also upsert into fitness_workouts so it appears in the Workouts UI
                         let duration_min = duration_s as f64 / 60.0;
                         let w_id = format!("gfit_{}", id);
-                        wconn.execute(
-                            "INSERT OR IGNORE INTO fitness_workouts
+                        wconn
+                            .execute(
+                                "INSERT OR IGNORE INTO fitness_workouts
                              (id, name, duration_minutes, date, notes, created_at)
                              VALUES (?1,?2,?3,?4,'Synced from Google Fit',?5)",
-                            rusqlite::params![w_id, name, duration_min, date, now_rfc],
-                        ).ok();
+                                rusqlite::params![w_id, name, duration_min, date, now_rfc],
+                            )
+                            .ok();
                     }
                 }
             }
         }
     }
 
-    Ok(format!("Synced {} days of Google Fit data (last {} days).", days_synced, days_back))
+    Ok(format!(
+        "Synced {} days of Google Fit data (last {} days).",
+        days_synced, days_back
+    ))
 }
 
 #[tauri::command]
@@ -5804,15 +5971,16 @@ pub async fn gfit_save_client_secret(
 }
 
 #[tauri::command]
-pub async fn gfit_get_client_secret_hint(
-    state: State<'_, AppStateHandle>,
-) -> Result<bool, String> {
+pub async fn gfit_get_client_secret_hint(state: State<'_, AppStateHandle>) -> Result<bool, String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM config WHERE key = 'gfit_client_secret')",
-        [], |r| r.get(0),
-    ).unwrap_or(false);
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM config WHERE key = 'gfit_client_secret')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
     Ok(exists)
 }
 
@@ -5860,15 +6028,24 @@ pub async fn gfit_exchange_auth_code(
         .map_err(|_| {
             "Google Fit client ID not configured. Save your OAuth Client ID first.".to_string()
         })?;
-    let client_secret_ea: Option<String> = conn.query_row(
-        "SELECT value FROM config WHERE key = 'gfit_client_secret'",
-        [], |r| r.get::<_, String>(0),
-    ).ok().map(|enc| read_token(&dev_key_ea, &enc));
+    let client_secret_ea: Option<String> = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'gfit_client_secret'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .map(|enc| read_token(&dev_key_ea, &enc));
     drop(st);
 
-    let tokens =
-        gfit_exchange_code_for_tokens(&client_id, client_secret_ea.as_deref(), code.trim(), GFIT_LOOPBACK_REDIRECT, "")
-            .await?;
+    let tokens = gfit_exchange_code_for_tokens(
+        &client_id,
+        client_secret_ea.as_deref(),
+        code.trim(),
+        GFIT_LOOPBACK_REDIRECT,
+        "",
+    )
+    .await?;
 
     let data_dir = { state.read().await.data_dir.clone() };
     let dev_key = get_or_create_device_key(&data_dir);

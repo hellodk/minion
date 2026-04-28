@@ -44,8 +44,7 @@ impl VectorStore {
         // Use open_bare so we don't pollute the RAG database with the
         // full minion health/blog/etc. schema. The only tables we want
         // are our own rag_* pair.
-        let db = minion_db::open_bare(path, 2)
-            .map_err(|e| RagError::Embedding(e.to_string()))?;
+        let db = minion_db::open_bare(path, 2).map_err(|e| RagError::Embedding(e.to_string()))?;
         Self::new(db)
     }
 
@@ -77,10 +76,7 @@ impl VectorStore {
     /// Wipe all chunks for `doc_id`. Called before re-indexing a document.
     pub fn clear_document(&self, doc_id: &str) -> RagResult<()> {
         let conn = self.conn()?;
-        conn.execute(
-            "DELETE FROM rag_chunks WHERE doc_id = ?1",
-            params![doc_id],
-        )?;
+        conn.execute("DELETE FROM rag_chunks WHERE doc_id = ?1", params![doc_id])?;
         Ok(())
     }
 
@@ -269,7 +265,9 @@ mod tests {
     fn insert_and_top_k_ranks_by_similarity() {
         let dir = tempdir().unwrap();
         let store = VectorStore::open(&dir.path().join("rag.db")).unwrap();
-        store.upsert_document("d1", Some("Test"), Some("/tmp/t.md")).unwrap();
+        store
+            .upsert_document("d1", Some("Test"), Some("/tmp/t.md"))
+            .unwrap();
 
         let base = fake_embedding(1.0);
         let close = fake_embedding(0.95);

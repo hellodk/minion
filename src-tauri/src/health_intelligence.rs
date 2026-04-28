@@ -66,7 +66,13 @@ fn get_endpoint(conn: &Conn) -> Option<(String, Option<String>, String)> {
         "SELECT base_url, api_key_encrypted, COALESCE(default_model, 'llama3')
          FROM llm_endpoints LIMIT 1",
         [],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?)),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
     )
     .ok()
 }
@@ -107,7 +113,9 @@ async fn call_llm(
         return None;
     }
     let json: serde_json::Value = resp.json().await.ok()?;
-    json["choices"][0]["message"]["content"].as_str().map(|s| s.to_string())
+    json["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 // ── Anomaly ID ────────────────────────────────────────────────────────────────
@@ -162,8 +170,13 @@ pub fn build_timeline_events(
             .filter_map(|r| r.ok())
             .collect();
         for (src_id, report_date, lab_name, city, crit, low_count) in rows {
-            let severity =
-                if crit > 0 { "alert" } else if low_count > 0 { "warning" } else { "info" };
+            let severity = if crit > 0 {
+                "alert"
+            } else if low_count > 0 {
+                "warning"
+            } else {
+                "info"
+            };
             let title = lab_name.unwrap_or_else(|| "Lab Report".to_string());
             let description = city.map(|c| format!("at {c}"));
             let id = Uuid::new_v4().to_string();
@@ -172,7 +185,16 @@ pub fn build_timeline_events(
                  (id, patient_id, event_date, category, title, description,
                   source_type, source_id, severity, created_at)
                  VALUES (?1,?2,?3,'lab',?4,?5,'structured_lab_result',?6,?7,?8)",
-                params![id, patient_id, report_date, title, description, src_id, severity, now],
+                params![
+                    id,
+                    patient_id,
+                    report_date,
+                    title,
+                    description,
+                    src_id,
+                    severity,
+                    now
+                ],
             )
             .map_err(|e| e.to_string())?;
             total += 1;
@@ -217,7 +239,15 @@ pub fn build_timeline_events(
                  (id, patient_id, event_date, category, title, description,
                   source_type, source_id, severity, created_at)
                  VALUES (?1,?2,?3,'prescription',?4,?5,'prescription',?6,'info',?7)",
-                params![id, patient_id, prescribed_date, title, description, src_id, now],
+                params![
+                    id,
+                    patient_id,
+                    prescribed_date,
+                    title,
+                    description,
+                    src_id,
+                    now
+                ],
             )
             .map_err(|e| e.to_string())?;
             total += 1;
@@ -250,7 +280,11 @@ pub fn build_timeline_events(
         for (week_start, avg_steps, avg_sleep, avg_hr, avg_weight) in rows {
             let low_steps = avg_steps.map(|s| s < 3000.0).unwrap_or(false);
             let low_sleep = avg_sleep.map(|s| s < 5.0).unwrap_or(false);
-            let severity = if low_steps || low_sleep { "warning" } else { "info" };
+            let severity = if low_steps || low_sleep {
+                "warning"
+            } else {
+                "info"
+            };
             let mut parts = Vec::new();
             if let Some(s) = avg_steps {
                 parts.push(format!("{:.0} steps/day", s));
@@ -264,7 +298,11 @@ pub fn build_timeline_events(
             if let Some(w) = avg_weight {
                 parts.push(format!("{:.1}kg", w));
             }
-            let description = if parts.is_empty() { None } else { Some(parts.join(", ")) };
+            let description = if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(", "))
+            };
             let id = Uuid::new_v4().to_string();
             conn.execute(
                 "INSERT INTO health_timeline_events
@@ -299,10 +337,12 @@ pub fn build_timeline_events(
             .filter_map(|r| r.ok())
             .collect();
         for (src_id, description, first_noticed, severity_int) in rows {
-            let date =
-                first_noticed.unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
-            let title: String =
-                description.unwrap_or_else(|| "Symptom".to_string()).chars().take(60).collect();
+            let date = first_noticed.unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
+            let title: String = description
+                .unwrap_or_else(|| "Symptom".to_string())
+                .chars()
+                .take(60)
+                .collect();
             // Map integer severity (1-10) to text label
             let severity = match severity_int {
                 Some(s) if s >= 8 => "alert",
@@ -350,7 +390,11 @@ pub fn build_timeline_events(
             let bp_alert = (mtype == "systolic_bp" && value > 140.0)
                 || (mtype == "diastolic_bp" && value > 90.0);
             let spo2_alert = mtype == "spo2" && value < 94.0;
-            let severity = if bp_alert || spo2_alert { "alert" } else { "info" };
+            let severity = if bp_alert || spo2_alert {
+                "alert"
+            } else {
+                "info"
+            };
             let unit_str = unit.as_deref().unwrap_or("");
             let description = Some(format!("{mtype}: {value:.1}{unit_str}"));
             let event_date = measured_at.get(..10).unwrap_or(&measured_at).to_string();
@@ -360,7 +404,15 @@ pub fn build_timeline_events(
                  (id, patient_id, event_date, category, title, description,
                   source_type, source_id, severity, created_at)
                  VALUES (?1,?2,?3,'vital','Vitals Reading',?4,'vital',?5,?6,?7)",
-                params![id, patient_id, event_date, description, src_id, severity, now],
+                params![
+                    id,
+                    patient_id,
+                    event_date,
+                    description,
+                    src_id,
+                    severity,
+                    now
+                ],
             )
             .map_err(|e| e.to_string())?;
             total += 1;
@@ -772,8 +824,11 @@ pub async fn health_delete_report(
 ) -> Result<(), String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM health_intelligence_reports WHERE id = ?1", params![id])
-        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM health_intelligence_reports WHERE id = ?1",
+        params![id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

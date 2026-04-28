@@ -1,7 +1,9 @@
 //! System metric collection via sysinfo + optional nvml.
 
 use serde::{Deserialize, Serialize};
-use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, Networks, ProcessStatus, RefreshKind, System};
+use sysinfo::{
+    CpuRefreshKind, Disks, MemoryRefreshKind, Networks, ProcessStatus, RefreshKind, System,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskInfo {
@@ -91,20 +93,32 @@ impl Collector {
 
         let load_avg_1 = {
             let la = System::load_average();
-            if la.one > 0.0 { Some(la.one) } else { None }
+            if la.one > 0.0 {
+                Some(la.one)
+            } else {
+                None
+            }
         };
 
-        let disks = self.disks.iter().map(|d| DiskInfo {
-            mount: d.mount_point().to_string_lossy().to_string(),
-            used_gb: (d.total_space().saturating_sub(d.available_space())) as f64 / 1e9,
-            total_gb: d.total_space() as f64 / 1e9,
-        }).collect();
+        let disks = self
+            .disks
+            .iter()
+            .map(|d| DiskInfo {
+                mount: d.mount_point().to_string_lossy().to_string(),
+                used_gb: (d.total_space().saturating_sub(d.available_space())) as f64 / 1e9,
+                total_gb: d.total_space() as f64 / 1e9,
+            })
+            .collect();
 
-        let net = self.networks.iter().map(|(iface, data)| NetInfo {
-            iface: iface.clone(),
-            rx_bps: data.received(),
-            tx_bps: data.transmitted(),
-        }).collect();
+        let net = self
+            .networks
+            .iter()
+            .map(|(iface, data)| NetInfo {
+                iface: iface.clone(),
+                rx_bps: data.received(),
+                tx_bps: data.transmitted(),
+            })
+            .collect();
 
         let gpus = collect_gpus();
 
@@ -123,23 +137,33 @@ impl Collector {
     /// Collect top-20 processes sorted by CPU descending.
     pub fn top_processes(&mut self) -> Vec<ProcessInfo> {
         self.sys.refresh_processes();
-        let mut procs: Vec<ProcessInfo> = self.sys.processes().values().map(|p| {
-            let status = match p.status() {
-                ProcessStatus::Zombie => "zombie",
-                ProcessStatus::Sleep => "sleeping",
-                ProcessStatus::Stop => "stopped",
-                _ => "running",
-            }.to_string();
-            ProcessInfo {
-                pid: p.pid().as_u32(),
-                name: p.name().to_string(),
-                cpu_pct: p.cpu_usage(),
-                ram_mb: p.memory() / 1024 / 1024,
-                status,
-                user_name: p.user_id().map(|u| u.to_string()),
-            }
-        }).collect();
-        procs.sort_by(|a, b| b.cpu_pct.partial_cmp(&a.cpu_pct).unwrap_or(std::cmp::Ordering::Equal));
+        let mut procs: Vec<ProcessInfo> = self
+            .sys
+            .processes()
+            .values()
+            .map(|p| {
+                let status = match p.status() {
+                    ProcessStatus::Zombie => "zombie",
+                    ProcessStatus::Sleep => "sleeping",
+                    ProcessStatus::Stop => "stopped",
+                    _ => "running",
+                }
+                .to_string();
+                ProcessInfo {
+                    pid: p.pid().as_u32(),
+                    name: p.name().to_string(),
+                    cpu_pct: p.cpu_usage(),
+                    ram_mb: p.memory() / 1024 / 1024,
+                    status,
+                    user_name: p.user_id().map(|u| u.to_string()),
+                }
+            })
+            .collect();
+        procs.sort_by(|a, b| {
+            b.cpu_pct
+                .partial_cmp(&a.cpu_pct)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         procs.truncate(20);
         procs
     }
@@ -156,8 +180,12 @@ fn collect_gpus() -> Vec<GpuInfo> {
                         let name = dev.name().unwrap_or_default();
                         let util = dev.utilization_rates().map(|u| u.gpu as f32).unwrap_or(0.0);
                         let mem = dev.memory_info().ok();
-                        let temp = dev.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
-                            .map(|t| t as f32).ok();
+                        let temp = dev
+                            .temperature(
+                                nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu,
+                            )
+                            .map(|t| t as f32)
+                            .ok();
                         gpus.push(GpuInfo {
                             name,
                             util_pct: util,

@@ -53,10 +53,7 @@ struct BackupPayload {
     episodes: Vec<serde_json::Value>,
 }
 
-fn dump_table(
-    conn: &rusqlite::Connection,
-    sql: &str,
-) -> Result<Vec<serde_json::Value>, String> {
+fn dump_table(conn: &rusqlite::Connection, sql: &str) -> Result<Vec<serde_json::Value>, String> {
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let col_names: Vec<String> = stmt
         .column_names()
@@ -71,18 +68,14 @@ fn dump_table(
                 let v = row.get_ref(i)?;
                 let json = match v {
                     rusqlite::types::ValueRef::Null => serde_json::Value::Null,
-                    rusqlite::types::ValueRef::Integer(n) => {
-                        serde_json::Value::Number(n.into())
-                    }
+                    rusqlite::types::ValueRef::Integer(n) => serde_json::Value::Number(n.into()),
                     rusqlite::types::ValueRef::Real(f) => serde_json::Number::from_f64(f)
                         .map(serde_json::Value::Number)
                         .unwrap_or(serde_json::Value::Null),
                     rusqlite::types::ValueRef::Text(t) => {
                         serde_json::Value::String(String::from_utf8_lossy(t).into_owned())
                     }
-                    rusqlite::types::ValueRef::Blob(b) => {
-                        serde_json::Value::String(B64.encode(b))
-                    }
+                    rusqlite::types::ValueRef::Blob(b) => serde_json::Value::String(B64.encode(b)),
                 };
                 obj.insert(name.clone(), json);
             }
@@ -198,8 +191,7 @@ fn restore_payload_inner(
         for row in rows {
             let obj = row.as_object().ok_or("non-object row")?;
             let cols: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
-            let placeholders: Vec<String> =
-                (1..=cols.len()).map(|i| format!("?{i}")).collect();
+            let placeholders: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
             let sql = format!(
                 "INSERT OR REPLACE INTO {} ({}) VALUES ({})",
                 table,
@@ -236,15 +228,45 @@ fn restore_payload_inner(
         Ok(())
     }
     upsert(conn, "patients", &payload.patients, &mut summary.patients)?;
-    upsert(conn, "health_entities", &payload.health_entities, &mut summary.entities)?;
+    upsert(
+        conn,
+        "health_entities",
+        &payload.health_entities,
+        &mut summary.entities,
+    )?;
     upsert(conn, "episodes", &payload.episodes, &mut summary.episodes)?;
-    upsert(conn, "medical_records", &payload.medical_records, &mut summary.records)?;
+    upsert(
+        conn,
+        "medical_records",
+        &payload.medical_records,
+        &mut summary.records,
+    )?;
     upsert(conn, "lab_tests", &payload.lab_tests, &mut summary.labs)?;
-    upsert(conn, "medications_v2", &payload.medications_v2, &mut summary.medications)?;
-    upsert(conn, "health_conditions", &payload.health_conditions, &mut summary.conditions)?;
+    upsert(
+        conn,
+        "medications_v2",
+        &payload.medications_v2,
+        &mut summary.medications,
+    )?;
+    upsert(
+        conn,
+        "health_conditions",
+        &payload.health_conditions,
+        &mut summary.conditions,
+    )?;
     upsert(conn, "vitals", &payload.vitals, &mut summary.vitals)?;
-    upsert(conn, "family_history", &payload.family_history, &mut summary.family_history)?;
-    upsert(conn, "life_events", &payload.life_events, &mut summary.life_events)?;
+    upsert(
+        conn,
+        "family_history",
+        &payload.family_history,
+        &mut summary.family_history,
+    )?;
+    upsert(
+        conn,
+        "life_events",
+        &payload.life_events,
+        &mut summary.life_events,
+    )?;
     upsert(conn, "symptoms", &payload.symptoms, &mut summary.symptoms)?;
     Ok(summary)
 }
@@ -327,7 +349,8 @@ pub async fn health_drive_status(
         )
         .ok();
 
-    let (enabled, _acct, file_id, last_synced, etag, err) = row.unwrap_or((false, None, None, None, None, None));
+    let (enabled, _acct, file_id, last_synced, etag, err) =
+        row.unwrap_or((false, None, None, None, None, None));
     Ok(DriveSyncStatus {
         enabled,
         connected: access_token.is_some(),
@@ -389,17 +412,16 @@ pub async fn health_drive_set_passphrase(
     Ok(())
 }
 
-fn load_encryption_key(
-    conn: &rusqlite::Connection,
-    passphrase: &str,
-) -> Result<[u8; 32], String> {
+fn load_encryption_key(conn: &rusqlite::Connection, passphrase: &str) -> Result<[u8; 32], String> {
     let salt: String = conn
         .query_row(
             "SELECT value FROM config WHERE key = 'health_drive_salt'",
             [],
             |r| r.get(0),
         )
-        .map_err(|_| "passphrase has not been set; call health_drive_set_passphrase first".to_string())?;
+        .map_err(|_| {
+            "passphrase has not been set; call health_drive_set_passphrase first".to_string()
+        })?;
     let key = MasterKey::derive_with_salt(passphrase, &salt).map_err(|e| e.to_string())?;
     Ok(*key.as_bytes())
 }
@@ -411,14 +433,19 @@ fn load_encryption_key(
 fn parse_oauth_callback(buf: &[u8]) -> Result<String, String> {
     let request = String::from_utf8_lossy(buf);
     let first_line = request.lines().next().ok_or("empty request")?;
-    let path = first_line.split_whitespace().nth(1).ok_or("bad request line")?;
+    let path = first_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or("bad request line")?;
     let qs = path.split('?').nth(1).ok_or("missing query string")?;
     for pair in qs.split('&') {
         let mut it = pair.splitn(2, '=');
         let k = it.next().unwrap_or("");
         let v = it.next().unwrap_or("");
         if k == "code" {
-            return Ok(urlencoding::decode(v).map_err(|e| e.to_string())?.into_owned());
+            return Ok(urlencoding::decode(v)
+                .map_err(|e| e.to_string())?
+                .into_owned());
         }
         if k == "error" {
             return Err(format!("OAuth error: {}", v));
@@ -488,7 +515,8 @@ pub async fn health_drive_connect(
             )
             .map_err(|_| {
                 "Drive client ID not configured. Save your OAuth client_id under \
-                 Health → Cloud Backup first.".to_string()
+                 Health → Cloud Backup first."
+                    .to_string()
             })?;
         let csec: Option<String> = conn
             .query_row(
@@ -556,16 +584,12 @@ pub async fn health_drive_connect(
     if let Some(w) = app.get_webview_window("health-drive-auth") {
         let _: Result<(), tauri::Error> = w.close();
     }
-    WebviewWindowBuilder::new(
-        &app,
-        "health-drive-auth",
-        WebviewUrl::External(parsed),
-    )
-    .title("MINION — Connect Google Drive")
-    .inner_size(500.0, 700.0)
-    .center()
-    .build()
-    .map_err(|e| e.to_string())?;
+    WebviewWindowBuilder::new(&app, "health-drive-auth", WebviewUrl::External(parsed))
+        .title("MINION — Connect Google Drive")
+        .inner_size(500.0, 700.0)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
 
     let code = tokio::time::timeout(Duration::from_secs(300), rx)
         .await
@@ -579,8 +603,13 @@ pub async fn health_drive_connect(
         })??;
     task.abort();
 
-    let tokens = exchange_code_for_token(&client_id, client_secret.as_deref(), &code, LOOPBACK_REDIRECT)
-        .await?;
+    let tokens = exchange_code_for_token(
+        &client_id,
+        client_secret.as_deref(),
+        &code,
+        LOOPBACK_REDIRECT,
+    )
+    .await?;
 
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
@@ -615,9 +644,7 @@ pub async fn health_drive_connect(
 }
 
 #[tauri::command]
-pub async fn health_drive_disconnect(
-    state: State<'_, AppStateHandle>,
-) -> Result<(), String> {
+pub async fn health_drive_disconnect(state: State<'_, AppStateHandle>) -> Result<(), String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
     for k in [
@@ -627,11 +654,8 @@ pub async fn health_drive_disconnect(
     ] {
         let _ = conn.execute("DELETE FROM config WHERE key = ?1", rusqlite::params![k]);
     }
-    conn.execute(
-        "UPDATE drive_sync_state SET enabled = 0 WHERE id = 1",
-        [],
-    )
-    .map_err(|e| e.to_string())?;
+    conn.execute("UPDATE drive_sync_state SET enabled = 0 WHERE id = 1", [])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -692,7 +716,9 @@ async fn get_access_token(state: &AppStateHandle) -> Result<String, String> {
         return Ok(token);
     }
     let Some(rt) = refresh_token else {
-        return Err("Drive session expired and no refresh token is stored — click Reconnect.".into());
+        return Err(
+            "Drive session expired and no refresh token is stored — click Reconnect.".into(),
+        );
     };
     let Some(cid) = client_id else {
         return Err("Drive client_id missing — re-run setup.".into());
@@ -765,18 +791,21 @@ async fn find_existing_backup(token: &str) -> Result<Option<String>, String> {
         return Err(format!("drive list failed ({}): {}", s, b));
     }
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    let files = v.get("files").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+    let files = v
+        .get("files")
+        .and_then(|f| f.as_array())
+        .cloned()
+        .unwrap_or_default();
     if let Some(first) = files.first() {
-        return Ok(first.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()));
+        return Ok(first
+            .get("id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()));
     }
     Ok(None)
 }
 
-async fn upload_backup(
-    token: &str,
-    file_id: Option<&str>,
-    bytes: &[u8],
-) -> Result<String, String> {
+async fn upload_backup(token: &str, file_id: Option<&str>, bytes: &[u8]) -> Result<String, String> {
     let client = reqwest::Client::new();
 
     // Multipart upload (metadata + content).
@@ -922,9 +951,8 @@ pub async fn health_drive_restore_now(
         .await?
         .ok_or_else(|| "no backup file in Drive appdata folder".to_string())?;
     let bytes = download_backup(&token, &file_id).await?;
-    let decrypted = decrypt(&key, &bytes).map_err(|e| {
-        format!("decryption failed — wrong passphrase? ({})", e)
-    })?;
+    let decrypted = decrypt(&key, &bytes)
+        .map_err(|e| format!("decryption failed — wrong passphrase? ({})", e))?;
     let payload: BackupPayload =
         serde_json::from_slice(&decrypted).map_err(|e| format!("backup parse failed: {e}"))?;
 
@@ -983,9 +1011,8 @@ pub async fn health_drive_import_local(
         load_encryption_key(&conn, &passphrase)?
     };
     let bytes = std::fs::read(&input_path).map_err(|e| e.to_string())?;
-    let decrypted = decrypt(&key, &bytes).map_err(|e| {
-        format!("decryption failed — wrong passphrase? ({})", e)
-    })?;
+    let decrypted = decrypt(&key, &bytes)
+        .map_err(|e| format!("decryption failed — wrong passphrase? ({})", e))?;
     let payload: BackupPayload =
         serde_json::from_slice(&decrypted).map_err(|e| format!("backup parse failed: {e}"))?;
     let st = state.read().await;
@@ -1016,12 +1043,14 @@ mod tests {
             "INSERT INTO patients (id, phone_number, full_name, relationship, is_primary)
              VALUES ('p1', '+1', 'Test', 'self', 1)",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO lab_tests (id, patient_id, test_name, value, collected_at)
              VALUES ('l1', 'p1', 'HbA1c', 6.5, '2025-01-01')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         let payload = export_payload(&conn).unwrap();
         assert_eq!(payload.patients.len(), 1);

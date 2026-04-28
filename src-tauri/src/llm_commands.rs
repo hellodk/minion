@@ -187,7 +187,8 @@ pub async fn llm_list_models(
             // Ollama: GET /api/tags → {"models":[{"name":"llama3"},...]}
             let resp = client
                 .get(format!("{base}/api/tags"))
-                .send().await
+                .send()
+                .await
                 .map_err(|e| format!("Cannot reach Ollama: {e}"))?;
             if !resp.status().is_success() {
                 return Err(format!("Ollama /api/tags returned {}", resp.status()));
@@ -209,7 +210,9 @@ pub async fn llm_list_models(
                     req = req.bearer_auth(key);
                 }
             }
-            let resp = req.send().await
+            let resp = req
+                .send()
+                .await
                 .map_err(|e| format!("Cannot reach endpoint: {e}"))?;
             if !resp.status().is_success() {
                 return Err(format!("Model list returned {}", resp.status()));
@@ -224,8 +227,10 @@ pub async fn llm_list_models(
             Ok(models)
         }
         "openai" => Ok(vec![
-            "gpt-4o".into(), "gpt-4o-mini".into(),
-            "gpt-4-turbo".into(), "gpt-4".into(),
+            "gpt-4o".into(),
+            "gpt-4o-mini".into(),
+            "gpt-4-turbo".into(),
+            "gpt-4".into(),
             "gpt-3.5-turbo".into(),
         ]),
         "anthropic" => Ok(vec![
@@ -239,6 +244,8 @@ pub async fn llm_list_models(
             "gemini-1.5-flash".into(),
             "gemini-1.5-pro".into(),
         ]),
-        _ => Err(format!("Model discovery not supported for provider: {provider_type}")),
+        _ => Err(format!(
+            "Model discovery not supported for provider: {provider_type}"
+        )),
     }
 }

@@ -98,7 +98,10 @@ mod tests {
     }
     impl FakeEmbedder {
         fn new(dim: usize) -> Self {
-            Self { dim, calls: AtomicUsize::new(0) }
+            Self {
+                dim,
+                calls: AtomicUsize::new(0),
+            }
         }
         fn hash_vec(&self, s: &str) -> Vec<f32> {
             let mut v = vec![0.0_f32; self.dim];
@@ -111,8 +114,12 @@ mod tests {
     }
     #[async_trait]
     impl EmbeddingProvider for FakeEmbedder {
-        fn name(&self) -> &str { "fake" }
-        fn dimension(&self) -> usize { self.dim }
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn dimension(&self) -> usize {
+            self.dim
+        }
         async fn embed(&self, text: &str) -> RagResult<Vec<f32>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.hash_vec(text))
@@ -128,10 +135,16 @@ mod tests {
 
         let body = "# Kubernetes\n\nK8s is a container orchestration platform.\n\n\
                     # Something Else\n\nUnrelated content here.";
-        let n = pipeline.index("doc1", Some("Intro"), None, body).await.unwrap();
+        let n = pipeline
+            .index("doc1", Some("Intro"), None, body)
+            .await
+            .unwrap();
         assert!(n >= 1);
 
-        let hits = pipeline.search("Kubernetes container orchestration", 2, None).await.unwrap();
+        let hits = pipeline
+            .search("Kubernetes container orchestration", 2, None)
+            .await
+            .unwrap();
         assert!(!hits.is_empty());
         // Top hit should reference Kubernetes, not the unrelated section.
         assert!(
@@ -167,9 +180,18 @@ mod tests {
         let store = VectorStore::open(&dir.path().join("r.db")).unwrap();
         let embedder = Arc::new(FakeEmbedder::new(16));
         let pipeline = RagPipeline::new(store, embedder);
-        pipeline.index("doc_a", None, None, "# A\n\nrelevant kubernetes content").await.unwrap();
-        pipeline.index("doc_b", None, None, "# B\n\nalso kubernetes content").await.unwrap();
-        let hits = pipeline.search("kubernetes", 10, Some("doc_a")).await.unwrap();
+        pipeline
+            .index("doc_a", None, None, "# A\n\nrelevant kubernetes content")
+            .await
+            .unwrap();
+        pipeline
+            .index("doc_b", None, None, "# B\n\nalso kubernetes content")
+            .await
+            .unwrap();
+        let hits = pipeline
+            .search("kubernetes", 10, Some("doc_a"))
+            .await
+            .unwrap();
         assert!(!hits.is_empty());
         assert!(hits.iter().all(|h| h.chunk.doc_id == "doc_a"));
     }

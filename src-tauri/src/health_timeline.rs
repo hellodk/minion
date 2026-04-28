@@ -71,9 +71,7 @@ pub async fn health_timeline_get(
     fn validate_iso_date(s: &str) -> Option<String> {
         if s.len() == 10 && chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok() {
             Some(s.to_string())
-        } else if s.len() >= 10
-            && chrono::NaiveDate::parse_from_str(&s[..10], "%Y-%m-%d").is_ok()
-        {
+        } else if s.len() >= 10 && chrono::NaiveDate::parse_from_str(&s[..10], "%Y-%m-%d").is_ok() {
             Some(s[..10].to_string())
         } else {
             None
@@ -328,9 +326,7 @@ pub async fn health_timeline_get(
                     id: row.get(0)?,
                     kind: "symptom".into(),
                     layer: "symptoms".into(),
-                    title: canonical.unwrap_or_else(|| {
-                        desc.chars().take(40).collect::<String>()
-                    }),
+                    title: canonical.unwrap_or_else(|| desc.chars().take(40).collect::<String>()),
                     description: Some(desc),
                     category: row.get(3)?,
                     date: row.get(5)?,
@@ -861,8 +857,7 @@ pub async fn health_correlate(
     window_days: Option<i64>,
 ) -> Result<CorrelateResult, String> {
     let window = window_days.unwrap_or(30).max(1);
-    let all =
-        health_timeline_get(state.clone(), patient_id.clone(), None, None).await?;
+    let all = health_timeline_get(state.clone(), patient_id.clone(), None, None).await?;
 
     let parse = |s: &str| -> Option<NaiveDate> {
         NaiveDate::parse_from_str(&s[..s.len().min(10)], "%Y-%m-%d").ok()
@@ -921,14 +916,7 @@ pub async fn health_correlate(
                       target_id, relation, confidence, delta_days)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     rusqlite::params![
-                        id,
-                        patient_id,
-                        src.kind,
-                        src.id,
-                        tgt.kind,
-                        tgt.id,
-                        relation,
-                        confidence,
+                        id, patient_id, src.kind, src.id, tgt.kind, tgt.id, relation, confidence,
                         delta,
                     ],
                 )
@@ -953,8 +941,7 @@ pub async fn health_list_correlations(
     min_confidence: Option<f64>,
 ) -> Result<Vec<Correlation>, String> {
     let min_conf = min_confidence.unwrap_or(0.1);
-    let timeline =
-        health_timeline_get(state.clone(), patient_id.clone(), None, None).await?;
+    let timeline = health_timeline_get(state.clone(), patient_id.clone(), None, None).await?;
 
     let lookup: HashMap<(String, String), &TimelineEvent> = timeline
         .iter()
@@ -969,10 +956,8 @@ pub async fn health_list_correlations(
          FROM health_correlations
          WHERE patient_id = ?1 AND confidence >= ?2",
     );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-        Box::new(patient_id.clone()),
-        Box::new(min_conf),
-    ];
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+        vec![Box::new(patient_id.clone()), Box::new(min_conf)];
     if let Some(sk) = &source_kind {
         sql.push_str(" AND source_kind = ?3");
         params.push(Box::new(sk.clone()));

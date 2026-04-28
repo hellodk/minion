@@ -73,8 +73,7 @@ pub fn build_brief(events: &[TimelineEvent]) -> String {
     let mut sections: Vec<(&'static str, String)> = Vec::new();
 
     // ---- conditions
-    let conditions: Vec<&TimelineEvent> =
-        events.iter().filter(|e| e.kind == "condition").collect();
+    let conditions: Vec<&TimelineEvent> = events.iter().filter(|e| e.kind == "condition").collect();
     if !conditions.is_empty() {
         let mut s = String::from("Conditions:\n");
         for c in &conditions {
@@ -110,10 +109,7 @@ pub fn build_brief(events: &[TimelineEvent]) -> String {
     let mut labs_by_name: std::collections::BTreeMap<String, Vec<&TimelineEvent>> =
         Default::default();
     for e in events.iter().filter(|e| e.kind == "lab_test") {
-        labs_by_name
-            .entry(e.title.clone())
-            .or_default()
-            .push(e);
+        labs_by_name.entry(e.title.clone()).or_default().push(e);
     }
     if !labs_by_name.is_empty() {
         let mut s = String::from("Lab series (most recent 5 per test):\n");
@@ -169,13 +165,19 @@ pub fn build_brief(events: &[TimelineEvent]) -> String {
     }
 
     // ---- symptoms (active first, then resolved)
-    let symptoms: Vec<&TimelineEvent> =
-        events.iter().filter(|e| e.kind == "symptom").collect();
+    let symptoms: Vec<&TimelineEvent> = events.iter().filter(|e| e.kind == "symptom").collect();
     if !symptoms.is_empty() {
         let mut s = String::from("Symptoms:\n");
         for sy in &symptoms {
-            let sev = sy.value.map(|v| format!(" sev={}", v as i64)).unwrap_or_default();
-            let body = sy.category.clone().map(|b| format!(" ({b})")).unwrap_or_default();
+            let sev = sy
+                .value
+                .map(|v| format!(" sev={}", v as i64))
+                .unwrap_or_default();
+            let body = sy
+                .category
+                .clone()
+                .map(|b| format!(" ({b})"))
+                .unwrap_or_default();
             let resolved = sy
                 .end_date
                 .as_ref()
@@ -194,8 +196,7 @@ pub fn build_brief(events: &[TimelineEvent]) -> String {
     }
 
     // ---- life events grouped by category
-    let life: Vec<&TimelineEvent> =
-        events.iter().filter(|e| e.kind == "life_event").collect();
+    let life: Vec<&TimelineEvent> = events.iter().filter(|e| e.kind == "life_event").collect();
     if !life.is_empty() {
         let mut s = String::from("Life events:\n");
         for le in &life {
@@ -339,9 +340,7 @@ fn is_cloud_provider(provider: ProviderType, base_url: &str) -> bool {
     match provider {
         ProviderType::Ollama => false,
         ProviderType::Airllm => false,
-        ProviderType::OpenaiCompatible => {
-            !is_local_url(base_url)
-        }
+        ProviderType::OpenaiCompatible => !is_local_url(base_url),
         ProviderType::Openai | ProviderType::Anthropic | ProviderType::GoogleGemini => true,
     }
 }
@@ -399,34 +398,31 @@ pub async fn health_run_analysis(
             if q.trim().is_empty() {
                 return Err("qa mode requires a question".to_string());
             }
-            format!(
-                "PATIENT TIMELINE:\n{}\n\nPATIENT QUESTION:\n{}",
-                brief, q
-            )
+            format!("PATIENT TIMELINE:\n{}\n\nPATIENT QUESTION:\n{}", brief, q)
         }
         _ => format!("PATIENT TIMELINE:\n{}", brief),
     };
-    let system = format!("{}\n\nMODE: {}\n{}", SYS_PREFIX, request.mode, instruction_for(&request.mode));
+    let system = format!(
+        "{}\n\nMODE: {}\n{}",
+        SYS_PREFIX,
+        request.mode,
+        instruction_for(&request.mode)
+    );
 
     let model = endpoint.default_model.clone();
     let provider = create_provider(endpoint.clone());
     let chat_req = ChatRequest {
-        messages: vec![
-            ChatMessage {
-                role: ChatRole::User,
-                content: user_block,
-            },
-        ],
+        messages: vec![ChatMessage {
+            role: ChatRole::User,
+            content: user_block,
+        }],
         model: None,
         temperature: Some(0.2_f32),
         json_mode: false,
         max_tokens: Some(1500_u32),
         system: Some(system),
     };
-    let resp = provider
-        .chat(chat_req)
-        .await
-        .map_err(|e| e.to_string())?;
+    let resp = provider.chat(chat_req).await.map_err(|e| e.to_string())?;
 
     // 4. Persist.
     let id = uuid::Uuid::new_v4().to_string();
@@ -599,7 +595,13 @@ pub async fn health_analysis_endpoint_status(
 mod tests {
     use super::*;
 
-    fn ev(kind: &str, title: &str, date: &str, value: Option<f64>, unit: Option<&str>) -> TimelineEvent {
+    fn ev(
+        kind: &str,
+        title: &str,
+        date: &str,
+        value: Option<f64>,
+        unit: Option<&str>,
+    ) -> TimelineEvent {
         TimelineEvent {
             id: uuid::Uuid::new_v4().to_string(),
             kind: kind.into(),
@@ -653,10 +655,25 @@ mod tests {
 
     #[test]
     fn cloud_detection() {
-        assert!(!is_cloud_provider(ProviderType::Ollama, "http://localhost:11434"));
-        assert!(!is_cloud_provider(ProviderType::OpenaiCompatible, "http://127.0.0.1:8080"));
-        assert!(is_cloud_provider(ProviderType::OpenaiCompatible, "https://api.openrouter.ai"));
-        assert!(is_cloud_provider(ProviderType::Anthropic, "https://api.anthropic.com"));
-        assert!(is_cloud_provider(ProviderType::Openai, "https://api.openai.com"));
+        assert!(!is_cloud_provider(
+            ProviderType::Ollama,
+            "http://localhost:11434"
+        ));
+        assert!(!is_cloud_provider(
+            ProviderType::OpenaiCompatible,
+            "http://127.0.0.1:8080"
+        ));
+        assert!(is_cloud_provider(
+            ProviderType::OpenaiCompatible,
+            "https://api.openrouter.ai"
+        ));
+        assert!(is_cloud_provider(
+            ProviderType::Anthropic,
+            "https://api.anthropic.com"
+        ));
+        assert!(is_cloud_provider(
+            ProviderType::Openai,
+            "https://api.openai.com"
+        ));
     }
 }

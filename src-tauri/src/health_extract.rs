@@ -130,8 +130,15 @@ fn get_endpoint(conn: &Conn) -> Option<(String, Option<String>, String)> {
         "SELECT base_url, api_key_encrypted, COALESCE(default_model, 'llama3')
          FROM llm_endpoints LIMIT 1",
         [],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?)),
-    ).ok()
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
+    )
+    .ok()
 }
 
 async fn call_llm(
@@ -160,7 +167,9 @@ async fn call_llm(
             req = req.bearer_auth(key);
         }
     }
-    let resp = req.send().await
+    let resp = req
+        .send()
+        .await
         .map_err(|e| tracing::warn!("LLM call failed: {e}"))
         .ok()?;
     if !resp.status().is_success() {
@@ -177,7 +186,10 @@ async fn call_llm(
 fn extract_json_block(raw: &str) -> &str {
     let trimmed = raw.trim();
     if trimmed.starts_with("```") {
-        let after = trimmed.trim_start_matches('`').trim_start_matches("json").trim_start();
+        let after = trimmed
+            .trim_start_matches('`')
+            .trim_start_matches("json")
+            .trim_start();
         if let Some(end) = after.rfind("```") {
             return after[..end].trim();
         }
@@ -217,7 +229,8 @@ pub async fn health_extract_document(
              FROM file_manifest WHERE id = ?1",
             params![file_id],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        ).map_err(|_| format!("File {} not found", file_id))?
+        )
+        .map_err(|_| format!("File {} not found", file_id))?
     };
 
     if raw_text.trim().is_empty() {
@@ -256,8 +269,7 @@ pub async fn health_extract_document(
                  \"instructions\":\"string or null\"}}]}}\n\nPrescription text:\n{}",
                 excerpt
             );
-            let Some(raw) =
-                call_llm(&base_url, api_key.as_deref(), &model, system, &user).await
+            let Some(raw) = call_llm(&base_url, api_key.as_deref(), &model, system, &user).await
             else {
                 return Ok(None);
             };
@@ -281,8 +293,7 @@ pub async fn health_extract_document(
                  \"reference_low\":N or null,\"reference_high\":N or null}}]}}\n\nLab report text:\n{}",
                 excerpt
             );
-            let Some(raw) =
-                call_llm(&base_url, api_key.as_deref(), &model, system, &user).await
+            let Some(raw) = call_llm(&base_url, api_key.as_deref(), &model, system, &user).await
             else {
                 return Ok(None);
             };
@@ -291,14 +302,19 @@ pub async fn health_extract_document(
                 .map_err(|e| format!("LLM returned invalid JSON: {e}\nRaw: {raw}"))?;
             // Compute flags deterministically
             for result in &mut parsed.results {
-                result.flag =
-                    compute_flag(result.value_numeric, result.reference_low, result.reference_high);
+                result.flag = compute_flag(
+                    result.value_numeric,
+                    result.reference_low,
+                    result.reference_high,
+                );
             }
             parsed.raw_text = raw_text.clone();
             Ok(Some(ExtractionPreview::Lab(parsed)))
         }
 
-        other => Ok(Some(ExtractionPreview::Unsupported { doc_type: other.to_string() })),
+        other => Ok(Some(ExtractionPreview::Unsupported {
+            doc_type: other.to_string(),
+        })),
     }
 }
 
@@ -323,13 +339,20 @@ pub async fn health_confirm_prescription(
           confirmed, created_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11)",
         params![
-            rx_id, patient_id, source_file_id,
+            rx_id,
+            patient_id,
+            source_file_id,
             data.prescribed_date.as_deref().unwrap_or("unknown"),
-            data.prescriber_name, data.prescriber_specialty,
-            data.facility_name, data.location_city,
-            data.diagnosis_text, data.raw_text, now
+            data.prescriber_name,
+            data.prescriber_specialty,
+            data.facility_name,
+            data.location_city,
+            data.diagnosis_text,
+            data.raw_text,
+            now
         ],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     for item in &data.medications {
         let item_id = Uuid::new_v4().to_string();
         conn.execute(
@@ -377,12 +400,19 @@ pub async fn health_confirm_lab_result(
               reference_low, reference_high, flag, created_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
-                val_id, result_id, val.test_name, val.value_text,
-                val.value_numeric, val.unit,
-                val.reference_low, val.reference_high,
-                flag, now
+                val_id,
+                result_id,
+                val.test_name,
+                val.value_text,
+                val.value_numeric,
+                val.unit,
+                val.reference_low,
+                val.reference_high,
+                flag,
+                now
             ],
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(result_id)
 }
@@ -396,51 +426,71 @@ pub async fn health_list_prescriptions(
 ) -> Result<Vec<PrescriptionWithItems>, String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare(
-        "SELECT id, patient_id, source_file_id, prescribed_date, prescriber_name,
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, patient_id, source_file_id, prescribed_date, prescriber_name,
                 prescriber_specialty, facility_name, location_city, diagnosis_text,
                 confirmed, created_at
-         FROM prescriptions WHERE patient_id = ?1 ORDER BY prescribed_date DESC"
-    ).map_err(|e| e.to_string())?;
-    let rows: Vec<PrescriptionWithItems> = stmt.query_map(params![patient_id], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, Option<String>>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, Option<String>>(4)?,
-            r.get::<_, Option<String>>(5)?,
-            r.get::<_, Option<String>>(6)?,
-            r.get::<_, Option<String>>(7)?,
-            r.get::<_, Option<String>>(8)?,
-            r.get::<_, i64>(9)?,
-            r.get::<_, String>(10)?,
-        ))
-    }).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok())
-    .map(|(id, pid, sfid, date, pname, pspec, fname, lcity, diag, conf, cat)| {
-        let items = {
-            let mut s = conn.prepare(
+         FROM prescriptions WHERE patient_id = ?1 ORDER BY prescribed_date DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<PrescriptionWithItems> = stmt
+        .query_map(params![patient_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, i64>(9)?,
+                r.get::<_, String>(10)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .map(
+            |(id, pid, sfid, date, pname, pspec, fname, lcity, diag, conf, cat)| {
+                let items =
+                    {
+                        let mut s = conn.prepare(
                 "SELECT id, drug_name, dosage, frequency, duration_days, instructions
                  FROM prescription_items WHERE prescription_id = ?1 ORDER BY rowid"
             ).unwrap();
-            s.query_map(params![id], |r| Ok(PrescriptionItemRow {
-                id: r.get(0)?,
-                drug_name: r.get(1)?,
-                dosage: r.get(2)?,
-                frequency: r.get(3)?,
-                duration_days: r.get(4)?,
-                instructions: r.get(5)?,
-            })).unwrap().filter_map(|r| r.ok()).collect()
-        };
-        PrescriptionWithItems {
-            id, patient_id: pid, source_file_id: sfid,
-            prescribed_date: date, prescriber_name: pname,
-            prescriber_specialty: pspec, facility_name: fname,
-            location_city: lcity, diagnosis_text: diag,
-            confirmed: conf != 0, created_at: cat, items,
-        }
-    }).collect();
+                        s.query_map(params![id], |r| {
+                            Ok(PrescriptionItemRow {
+                                id: r.get(0)?,
+                                drug_name: r.get(1)?,
+                                dosage: r.get(2)?,
+                                frequency: r.get(3)?,
+                                duration_days: r.get(4)?,
+                                instructions: r.get(5)?,
+                            })
+                        })
+                        .unwrap()
+                        .filter_map(|r| r.ok())
+                        .collect()
+                    };
+                PrescriptionWithItems {
+                    id,
+                    patient_id: pid,
+                    source_file_id: sfid,
+                    prescribed_date: date,
+                    prescriber_name: pname,
+                    prescriber_specialty: pspec,
+                    facility_name: fname,
+                    location_city: lcity,
+                    diagnosis_text: diag,
+                    confirmed: conf != 0,
+                    created_at: cat,
+                    items,
+                }
+            },
+        )
+        .collect();
     Ok(rows)
 }
 
@@ -451,53 +501,78 @@ pub async fn health_list_lab_results(
 ) -> Result<Vec<LabResultWithValues>, String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare(
-        "SELECT id, patient_id, source_file_id, lab_name, report_date,
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, patient_id, source_file_id, lab_name, report_date,
                 location_city, confirmed, created_at
-         FROM structured_lab_results WHERE patient_id = ?1 ORDER BY report_date DESC"
-    ).map_err(|e| e.to_string())?;
-    let rows: Vec<LabResultWithValues> = stmt.query_map(params![patient_id], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, Option<String>>(2)?,
-            r.get::<_, Option<String>>(3)?,
-            r.get::<_, String>(4)?,
-            r.get::<_, Option<String>>(5)?,
-            r.get::<_, i64>(6)?,
-            r.get::<_, String>(7)?,
-        ))
-    }).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok())
-    .map(|(id, pid, sfid, lname, date, lcity, conf, cat)| {
-        let (values, abnormal_count) = {
-            let mut s = conn.prepare(
-                "SELECT id, test_name, value_text, value_numeric, unit,
+         FROM structured_lab_results WHERE patient_id = ?1 ORDER BY report_date DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<LabResultWithValues> = stmt
+        .query_map(params![patient_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, String>(7)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .map(|(id, pid, sfid, lname, date, lcity, conf, cat)| {
+            let (values, abnormal_count) = {
+                let mut s = conn
+                    .prepare(
+                        "SELECT id, test_name, value_text, value_numeric, unit,
                         reference_low, reference_high, flag
-                 FROM structured_lab_values WHERE result_id = ?1 ORDER BY rowid"
-            ).unwrap();
-            let vals: Vec<LabValueRow> = s.query_map(params![id], |r| Ok(LabValueRow {
-                id: r.get(0)?,
-                test_name: r.get(1)?,
-                value_text: r.get(2)?,
-                value_numeric: r.get(3)?,
-                unit: r.get(4)?,
-                reference_low: r.get(5)?,
-                reference_high: r.get(6)?,
-                flag: r.get(7)?,
-            })).unwrap().filter_map(|r| r.ok()).collect();
-            let abn = vals.iter().filter(|v| {
-                matches!(v.flag.as_deref(), Some("HIGH") | Some("LOW") | Some("CRITICAL"))
-            }).count() as i64;
-            (vals, abn)
-        };
-        LabResultWithValues {
-            id, patient_id: pid, source_file_id: sfid,
-            lab_name: lname, report_date: date,
-            location_city: lcity, confirmed: conf != 0,
-            created_at: cat, values, abnormal_count,
-        }
-    }).collect();
+                 FROM structured_lab_values WHERE result_id = ?1 ORDER BY rowid",
+                    )
+                    .unwrap();
+                let vals: Vec<LabValueRow> = s
+                    .query_map(params![id], |r| {
+                        Ok(LabValueRow {
+                            id: r.get(0)?,
+                            test_name: r.get(1)?,
+                            value_text: r.get(2)?,
+                            value_numeric: r.get(3)?,
+                            unit: r.get(4)?,
+                            reference_low: r.get(5)?,
+                            reference_high: r.get(6)?,
+                            flag: r.get(7)?,
+                        })
+                    })
+                    .unwrap()
+                    .filter_map(|r| r.ok())
+                    .collect();
+                let abn = vals
+                    .iter()
+                    .filter(|v| {
+                        matches!(
+                            v.flag.as_deref(),
+                            Some("HIGH") | Some("LOW") | Some("CRITICAL")
+                        )
+                    })
+                    .count() as i64;
+                (vals, abn)
+            };
+            LabResultWithValues {
+                id,
+                patient_id: pid,
+                source_file_id: sfid,
+                lab_name: lname,
+                report_date: date,
+                location_city: lcity,
+                confirmed: conf != 0,
+                created_at: cat,
+                values,
+                abnormal_count,
+            }
+        })
+        .collect();
     Ok(rows)
 }
 
@@ -522,8 +597,11 @@ pub async fn health_delete_lab_result(
 ) -> Result<(), String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM structured_lab_results WHERE id = ?1", params![id])
-        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM structured_lab_results WHERE id = ?1",
+        params![id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -538,24 +616,28 @@ pub async fn health_get_lab_trends(
 ) -> Result<Vec<LabTrendPoint>, String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare(
-        "SELECT r.report_date, v.value_numeric, v.flag, r.lab_name
+    let mut stmt = conn
+        .prepare(
+            "SELECT r.report_date, v.value_numeric, v.flag, r.lab_name
          FROM structured_lab_values v
          JOIN structured_lab_results r ON r.id = v.result_id
          WHERE r.patient_id = ?1
            AND LOWER(v.test_name) LIKE LOWER(?2)
            AND v.value_numeric IS NOT NULL
-         ORDER BY r.report_date ASC"
-    ).map_err(|e| e.to_string())?;
-    let rows: Vec<LabTrendPoint> = stmt.query_map(
-        params![patient_id, format!("%{}%", test_name)],
-        |r| Ok(LabTrendPoint {
-            date: r.get(0)?,
-            value_numeric: r.get(1)?,
-            flag: r.get(2)?,
-            lab_name: r.get(3)?,
-        }),
-    ).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok()).collect();
+         ORDER BY r.report_date ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<LabTrendPoint> = stmt
+        .query_map(params![patient_id, format!("%{}%", test_name)], |r| {
+            Ok(LabTrendPoint {
+                date: r.get(0)?,
+                value_numeric: r.get(1)?,
+                flag: r.get(2)?,
+                lab_name: r.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
     Ok(rows)
 }

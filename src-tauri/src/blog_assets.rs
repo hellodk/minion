@@ -52,9 +52,7 @@ pub struct DeleteResult {
 // =====================================================================
 
 #[tauri::command]
-pub async fn blog_list_assets(
-    state: State<'_, AppStateHandle>,
-) -> Result<Vec<BlogAsset>, String> {
+pub async fn blog_list_assets(state: State<'_, AppStateHandle>) -> Result<Vec<BlogAsset>, String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
     let mut stmt = conn
@@ -219,7 +217,11 @@ pub async fn blog_delete_orphan_assets(
         .map_err(|e| e.to_string())?;
     let orphans: Vec<(String, String, i64)> = stmt
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
@@ -288,9 +290,7 @@ pub struct BlogTag {
 }
 
 #[tauri::command]
-pub async fn blog_list_tags(
-    state: State<'_, AppStateHandle>,
-) -> Result<Vec<BlogTag>, String> {
+pub async fn blog_list_tags(state: State<'_, AppStateHandle>) -> Result<Vec<BlogTag>, String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
     let mut stmt = conn

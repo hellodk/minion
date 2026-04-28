@@ -137,10 +137,7 @@ pub async fn blog_confirm_import(
     entries: Vec<ConfirmImportEntry>,
     author: Option<String>,
 ) -> Result<ImportResult, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?;
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let asset_root = asset_vault_dir(&app_data_dir);
     fs::create_dir_all(&asset_root).map_err(|e| e.to_string())?;
 
@@ -232,10 +229,7 @@ async fn build_preview(
         .and_then(|p| p.file_name())
         .and_then(|f| f.to_str())
     {
-        let norm = parent_name
-            .trim()
-            .to_lowercase()
-            .replace([' ', '_'], "-");
+        let norm = parent_name.trim().to_lowercase().replace([' ', '_'], "-");
         if !norm.is_empty() && norm != "posts" && norm != "content" {
             tags.insert(norm);
         }
@@ -314,13 +308,8 @@ async fn insert_one_post(
         .map(|p| p.to_path_buf());
 
     // Process images first so we can rewrite the body to point at the vault.
-    let (rewritten, asset_refs) = copy_and_rewrite_assets(
-        state,
-        asset_root,
-        source_dir.as_deref(),
-        &entry.content,
-    )
-    .await?;
+    let (rewritten, asset_refs) =
+        copy_and_rewrite_assets(state, asset_root, source_dir.as_deref(), &entry.content).await?;
 
     let wc = minion_blog::posts::word_count(&rewritten) as i64;
     let rt = minion_blog::posts::calculate_reading_time(&rewritten) as i64;
@@ -330,11 +319,7 @@ async fn insert_one_post(
         .clone()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| now.clone());
-    let author = entry
-        .author
-        .as_deref()
-        .or(fallback_author)
-        .unwrap_or("");
+    let author = entry.author.as_deref().or(fallback_author).unwrap_or("");
 
     let st = state.read().await;
     let mut conn = st.db.get().map_err(|e| e.to_string())?;
@@ -356,7 +341,11 @@ async fn insert_one_post(
             rt,
             created_at,
             now,
-            if entry.status == "published" { Some(&created_at) } else { None },
+            if entry.status == "published" {
+                Some(&created_at)
+            } else {
+                None
+            },
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -691,7 +680,10 @@ fn extract_image_refs(body: &str) -> Vec<String> {
 }
 
 fn memchr_single(bytes: &[u8], start: usize, target: u8) -> Option<usize> {
-    bytes[start..].iter().position(|b| *b == target).map(|p| start + p)
+    bytes[start..]
+        .iter()
+        .position(|b| *b == target)
+        .map(|p| start + p)
 }
 fn find_byte(bytes: &[u8], start: usize, target: u8) -> Option<usize> {
     memchr_single(bytes, start, target)

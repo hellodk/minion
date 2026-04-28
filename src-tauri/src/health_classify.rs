@@ -16,9 +16,7 @@
 
 use crate::health_entities::{canonicalize_drug, canonicalize_test, resolve_entity};
 use crate::state::AppState;
-use minion_llm::{
-    create_provider, EndpointConfig, JsonExtractRequest, LlmProvider, ProviderType,
-};
+use minion_llm::{create_provider, EndpointConfig, JsonExtractRequest, LlmProvider, ProviderType};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{Emitter, State};
@@ -224,7 +222,10 @@ pub async fn classify_document(
         model: None,
         temperature: Some(0.0),
     };
-    let resp = provider.extract_json(req).await.map_err(|e| e.to_string())?;
+    let resp = provider
+        .extract_json(req)
+        .await
+        .map_err(|e| e.to_string())?;
     let result: ClassificationResult = serde_json::from_value(resp.parsed)
         .map_err(|e| format!("classifier returned non-conforming JSON: {e}"))?;
     Ok(normalize_doc_type(result))
@@ -243,9 +244,7 @@ fn normalize_doc_type(mut r: ClassificationResult) -> ClassificationResult {
         "consultation_note" | "consultation" | "consult" | "visit_note" | "progress_note" => {
             "consultation_note"
         }
-        "vaccination_record" | "vaccination" | "immunization" | "vaccine" => {
-            "vaccination_record"
-        }
+        "vaccination_record" | "vaccination" | "immunization" | "vaccine" => "vaccination_record",
         "invoice" | "bill" | "receipt" => "invoice",
         _ => "other",
     };
@@ -400,7 +399,10 @@ async fn run_extract<T: for<'de> Deserialize<'de>>(
         model: None,
         temperature: Some(0.0),
     };
-    let resp = provider.extract_json(req).await.map_err(|e| e.to_string())?;
+    let resp = provider
+        .extract_json(req)
+        .await
+        .map_err(|e| e.to_string())?;
     serde_json::from_value::<T>(resp.parsed)
         .map_err(|e| format!("extractor returned non-conforming JSON: {e}"))
 }
@@ -466,10 +468,7 @@ struct StoredEndpoint {
 /// Resolve the endpoint to use for the `health_extract` feature:
 /// 1. Prefer the binding in `llm_feature_bindings`.
 /// 2. Otherwise, fall back to the first enabled row in `llm_endpoints`.
-fn get_extract_endpoint(
-    conn: &rusqlite::Connection,
-    feature: &str,
-) -> Option<StoredEndpoint> {
+fn get_extract_endpoint(conn: &rusqlite::Connection, feature: &str) -> Option<StoredEndpoint> {
     // Try feature binding first.
     let bound: Option<String> = conn
         .query_row(
@@ -932,8 +931,7 @@ pub async fn health_save_review(
     {
         let st = state.read().await;
         let conn = st.db.get().map_err(|e| e.to_string())?;
-        let encoded =
-            serde_json::to_string(&corrections).unwrap_or_else(|_| "null".into());
+        let encoded = serde_json::to_string(&corrections).unwrap_or_else(|_| "null".into());
         conn.execute(
             "UPDATE document_extractions
              SET user_reviewed = 1, user_corrections = ?1
@@ -949,7 +947,9 @@ pub async fn health_save_review(
     let doc_type = document_type.unwrap_or_default();
 
     match doc_type.as_str() {
-        "lab_report" => persist_lab_report(state.inner(), &patient_id, &file_id, &corrections).await?,
+        "lab_report" => {
+            persist_lab_report(state.inner(), &patient_id, &file_id, &corrections).await?
+        }
         "prescription" => {
             persist_prescription(state.inner(), &patient_id, &file_id, &corrections).await?
         }
@@ -1439,7 +1439,10 @@ mod tests {
             confidence: 0.9,
             reason: "".into(),
         };
-        assert_eq!(normalize_doc_type(mk("Lab-Report")).document_type, "lab_report");
+        assert_eq!(
+            normalize_doc_type(mk("Lab-Report")).document_type,
+            "lab_report"
+        );
         assert_eq!(normalize_doc_type(mk("rx")).document_type, "prescription");
         assert_eq!(
             normalize_doc_type(mk("Radiology Report")).document_type,

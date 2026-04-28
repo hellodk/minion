@@ -41,9 +41,8 @@ impl Database {
         // foreign_keys is per-connection in SQLite, so install it via the
         // pool's connection initializer or every fresh checkout reverts to
         // the default (off) and ON DELETE CASCADE silently no-ops.
-        let manager = SqliteConnectionManager::file(path).with_init(|c| {
-            c.execute_batch("PRAGMA foreign_keys = ON;")
-        });
+        let manager = SqliteConnectionManager::file(path)
+            .with_init(|c| c.execute_batch("PRAGMA foreign_keys = ON;"));
 
         let pool = Pool::builder()
             .max_size(pool_size)

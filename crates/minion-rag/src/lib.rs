@@ -20,7 +20,7 @@ pub mod error;
 pub mod pipeline;
 pub mod store;
 
-pub use chunker::{chunk_markdown, ChunkOptions, Chunk};
+pub use chunker::{chunk_markdown, Chunk, ChunkOptions};
 pub use embeddings::{EmbeddingProvider, OllamaEmbedder};
 pub use error::{RagError, RagResult};
 pub use pipeline::{RagPipeline, SearchHit};
