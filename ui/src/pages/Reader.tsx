@@ -310,11 +310,6 @@ const Reader: Component = () => {
   const [bookClosing, setBookClosing] = createSignal(false);
   const [openingCardIndex, setOpeningCardIndex] = createSignal<number | null>(null);
 
-  // Hover tilt state
-  const [hoveredCard, setHoveredCard] = createSignal<string | null>(null);
-  const [tiltX, setTiltX] = createSignal(0);
-  const [tiltY, setTiltY] = createSignal(0);
-
   // Collection creation form
   const [showNewCollection, setShowNewCollection] = createSignal(false);
   const [newCollectionName, setNewCollectionName] = createSignal('');
@@ -1306,26 +1301,23 @@ const Reader: Component = () => {
   // Card 3D tilt
   // ============================================================================
 
-  const handleCardMouseMove = (e: MouseEvent, bookId: string) => {
-    const card = e.currentTarget as HTMLElement;
-    const rect = card.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const centerX = rect.width / 2;
-    const centerY = rect.height / 2;
-
-    const rotateX = ((y - centerY) / centerY) * -12;
-    const rotateY = ((x - centerX) / centerX) * 12;
-
-    setHoveredCard(bookId);
-    setTiltX(rotateX);
-    setTiltY(rotateY);
+  const handleCardMouseMove = (e: MouseEvent) => {
+    const wrapper = e.currentTarget as HTMLElement;
+    const card = wrapper.querySelector('.book-card-inner') as HTMLElement | null;
+    if (!card) return;
+    const rect = wrapper.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width - 0.5;
+    const y = (e.clientY - rect.top) / rect.height - 0.5;
+    card.style.setProperty('--tilt-x', `${(-y * 12).toFixed(1)}deg`);
+    card.style.setProperty('--tilt-y', `${(x * 12).toFixed(1)}deg`);
   };
 
-  const handleCardMouseLeave = () => {
-    setHoveredCard(null);
-    setTiltX(0);
-    setTiltY(0);
+  const handleCardMouseLeave = (e: MouseEvent) => {
+    const wrapper = e.currentTarget as HTMLElement;
+    const card = wrapper.querySelector('.book-card-inner') as HTMLElement | null;
+    if (!card) return;
+    card.style.setProperty('--tilt-x', '0deg');
+    card.style.setProperty('--tilt-y', '0deg');
   };
 
   // ============================================================================
@@ -1567,17 +1559,12 @@ const Reader: Component = () => {
           'pointer-events-none opacity-60': loading(),
         }}
         onClick={() => !loading() && openLibraryBook(book, index)}
-        onMouseMove={(e) => handleCardMouseMove(e, book.id)}
+        onMouseMove={handleCardMouseMove}
         onMouseLeave={handleCardMouseLeave}
       >
         <div
           class="book-card-inner card p-3 relative overflow-hidden"
-          style={{
-            transform:
-              hoveredCard() === book.id
-                ? `rotateX(${tiltX()}deg) rotateY(${tiltY()}deg) translateZ(8px)`
-                : 'rotateX(0deg) rotateY(0deg) translateZ(0px)',
-          }}
+          style={{ transform: 'rotateX(var(--tilt-x)) rotateY(var(--tilt-y)) translateZ(0px)' }}
         >
           <div class="book-cover-shine" />
           <div class="aspect-[2/3] bg-gradient-to-br from-minion-100 to-minion-200 dark:from-minion-900 dark:to-minion-800 rounded-lg mb-2 flex items-center justify-center relative overflow-hidden">
@@ -1735,6 +1722,8 @@ const Reader: Component = () => {
         }
 
         .book-card-inner {
+          --tilt-x: 0deg;
+          --tilt-y: 0deg;
           transition: transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94), box-shadow 0.4s ease;
           transform-style: preserve-3d;
           will-change: transform;
