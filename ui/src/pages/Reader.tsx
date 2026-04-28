@@ -1,5 +1,5 @@
 import { Component, createSignal, createEffect, on, onMount, onCleanup, For, Show } from 'solid-js';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
 import { PageFlip } from 'page-flip';
@@ -82,6 +82,12 @@ const PRESET_COLORS = [
 // ============================================================================
 // EPUB: StPageFlip — soft page curl (Apple Books–style mesh + shadows)
 // ============================================================================
+
+function coverUrl(path: string | undefined): string | undefined {
+  if (!path) return undefined;
+  if (path.startsWith('data:') || path.startsWith('http')) return path;
+  return convertFileSrc(path);
+}
 
 function escapeHtmlTitle(s: string): string {
   return s
@@ -1527,7 +1533,7 @@ const Reader: Component = () => {
               </svg>
             }>
               <img
-                src={book.cover_path!}
+                src={coverUrl(book.cover_path)!}
                 alt={displayTitle}
                 class="w-full h-full object-cover rounded-lg"
                 onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
