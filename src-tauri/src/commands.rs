@@ -4067,10 +4067,7 @@ pub async fn reader_list_folder_files(
         return Err(format!("Not a directory: {}", path));
     }
 
-    let book_extensions = [
-        "epub", "pdf", "mobi", "azw3", "fb2", "djvu", "cbz", "cbr", "txt", "md", "markdown",
-        "html", "htm",
-    ];
+    let book_extensions = ["epub", "pdf", "txt", "md", "markdown", "html", "htm"];
     let mut candidates: Vec<FolderFileCandidate> = Vec::new();
 
     fn collect_files(dir: &PathBuf, exts: &[&str], out: &mut Vec<FolderFileCandidate>) {
@@ -4300,10 +4297,7 @@ pub async fn reader_scan_directory(
         return Err(format!("Not a directory: {}", path));
     }
 
-    let book_extensions = [
-        "epub", "pdf", "mobi", "azw3", "fb2", "djvu", "cbz", "cbr", "txt", "md", "markdown",
-        "html", "htm",
-    ];
+    let book_extensions = ["epub", "pdf", "txt", "md", "markdown", "html", "htm"];
     let mut book_paths = Vec::new();
 
     // Collect book files from the directory (non-recursive for now, then recurse)
