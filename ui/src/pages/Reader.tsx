@@ -357,7 +357,7 @@ const Reader: Component = () => {
   const [loadingBookMeta, setLoadingBookMeta] = createSignal<{ title: string; author: string } | null>(null);
 
   // ---- EPUB lazy chapter loading ----
-  const [chapterCache] = createSignal<Map<number, string>>(new Map());
+  let chapterCacheMap: Map<number, string> = new Map();
   const [chapterLoading, setChapterLoading] = createSignal(false);
   const [chapterHtml, setChapterHtml] = createSignal('');
 
@@ -557,7 +557,6 @@ const Reader: Component = () => {
   // ============================================================================
 
   const fetchChapterIntoCache = async (index: number): Promise<string> => {
-    const cache = chapterCache();
     const book = currentBook();
     if (!book?.file_path) return '<p>No content available.</p>';
 
@@ -565,7 +564,7 @@ const Reader: Component = () => {
       path: book.file_path,
       chapterIndex: index,
     });
-    cache.set(index, chapter.content);
+    chapterCacheMap.set(index, chapter.content);
     return chapter.content;
   };
 
@@ -575,7 +574,7 @@ const Reader: Component = () => {
     if (!book?.file_path || book.format !== 'epub') return;
 
     const missing = [...new Set(indices)].filter(
-      i => i >= 0 && i < book.chapters.length && !chapterCache().has(i)
+      i => i >= 0 && i < book.chapters.length && !chapterCacheMap.has(i)
     );
     if (missing.length === 0) return;
 
@@ -587,9 +586,8 @@ const Reader: Component = () => {
           path: book.file_path,
           indices: missing,
         });
-        const cache = chapterCache();
         for (const ch of chapters) {
-          cache.set(ch.index, ch.content);
+          chapterCacheMap.set(ch.index, ch.content);
         }
       } catch (e) {
         console.warn('Batch EPUB prefetch failed, loading sequentially:', e);
@@ -598,7 +596,7 @@ const Reader: Component = () => {
             await fetchChapterIntoCache(i);
           } catch (err) {
             console.error(`Chapter ${i}:`, err);
-            chapterCache().set(
+            chapterCacheMap.set(
               i,
               `<p style="color:red;">Failed to load chapter: ${err}</p>`
             );
@@ -656,7 +654,7 @@ const Reader: Component = () => {
           i => i >= 0 && i < book.chapters.length
         )
       );
-      let html = chapterCache().get(targetIndex);
+      let html = chapterCacheMap.get(targetIndex);
       if (!html) {
         try {
           html = await fetchChapterIntoCache(targetIndex);
@@ -683,7 +681,7 @@ const Reader: Component = () => {
       )
     );
 
-    let incoming = chapterCache().get(targetIndex);
+    let incoming = chapterCacheMap.get(targetIndex);
     if (!incoming) {
       try {
         incoming = await fetchChapterIntoCache(targetIndex);
@@ -714,7 +712,7 @@ const Reader: Component = () => {
         i => i >= 0 && i < max
       );
       await prefetchEpubChapters(indices);
-      setChapterHtml(chapterCache().get(chapIdx) || '');
+      setChapterHtml(chapterCacheMap.get(chapIdx) || '');
     },
     { defer: true }
   ));
@@ -1101,7 +1099,7 @@ const Reader: Component = () => {
     setLoading(true);
 
     // Clear previous state
-    chapterCache().clear();
+    chapterCacheMap = new Map();
     setChapterHtml('');
     setEpubTurnOutgoingHtml('');
     setEpubTurnIncomingHtml('');
@@ -1196,7 +1194,7 @@ const Reader: Component = () => {
       setEpubTurnOutgoingHtml('');
       setEpubTurnIncomingHtml('');
       setEpubTurnTargetIndex(null);
-      chapterCache().clear();
+      chapterCacheMap = new Map();
       setView('library');
       setBookClosing(false);
       setShowToc(false);
