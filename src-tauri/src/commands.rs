@@ -4172,15 +4172,31 @@ pub async fn reader_list_folder_files(
     // Mark files that are already in the library
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
-    for c in candidates.iter_mut() {
-        let exists: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM reader_books WHERE file_path = ?1)",
-                rusqlite::params![c.path],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        c.already_imported = exists;
+
+    // Batch-check all paths in a single query instead of N round-trips
+    let all_paths: Vec<&str> = candidates.iter().map(|c| c.path.as_str()).collect();
+    if !all_paths.is_empty() {
+        let placeholders = all_paths
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "SELECT file_path FROM reader_books WHERE file_path IN ({})",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let imported_paths: std::collections::HashSet<String> = stmt
+            .query_map(rusqlite::params_from_iter(all_paths.iter()), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        for c in candidates.iter_mut() {
+            c.already_imported = imported_paths.contains(&c.path);
+        }
     }
 
     // Sort by path for stable display
