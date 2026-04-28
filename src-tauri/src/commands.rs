@@ -1819,9 +1819,9 @@ fn replace_epub_images_with_temp_files(
     book_path: &Path,
 ) -> String {
     use std::collections::hash_map::DefaultHasher;
+    use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
 
-    // Create a stable hash of the book path for the temp directory name
     let mut hasher = DefaultHasher::new();
     book_path.to_string_lossy().hash(&mut hasher);
     let book_hash = format!("{:x}", hasher.finish());
@@ -1830,6 +1830,18 @@ fn replace_epub_images_with_temp_files(
         .join("minion_book_images")
         .join(&book_hash);
     let _ = std::fs::create_dir_all(&img_dir);
+
+    // Build name→id map once: O(m) instead of O(m) per image
+    let mut name_to_id: HashMap<String, String> = HashMap::new();
+    for (id, item) in doc.resources.iter() {
+        let path_str = item.path.to_string_lossy().to_string();
+        name_to_id.insert(path_str, id.clone());
+        if let Some(fname) = item.path.file_name() {
+            name_to_id
+                .entry(fname.to_string_lossy().to_string())
+                .or_insert_with(|| id.clone());
+        }
+    }
 
     let mut result = html.to_string();
     let mut search_start = 0;
@@ -1842,7 +1854,6 @@ fn replace_epub_images_with_temp_files(
         };
         let src_value = result[abs_pos..abs_pos + end_quote].to_string();
 
-        // Skip URLs that are already absolute or data URIs
         if src_value.starts_with("data:")
             || src_value.starts_with("http")
             || src_value.starts_with("file:")
@@ -1857,35 +1868,37 @@ fn replace_epub_images_with_temp_files(
             .unwrap_or(&src_value)
             .to_string();
 
-        // Find and extract the image resource from the EPUB
-        let mut extracted = false;
-        let resource_ids: Vec<String> = doc.resources.keys().cloned().collect();
-        for id in &resource_ids {
-            if let Some(item) = doc.resources.get(id) {
-                let path_str = item.path.to_string_lossy();
-                if path_str.ends_with(&resource_name) || id == &resource_name {
-                    if let Some((data, _)) = doc.get_resource(id) {
-                        let img_path = img_dir.join(&resource_name);
-                        if std::fs::write(&img_path, &data).is_ok() {
-                            let file_url = format!("file://{}", img_path.to_string_lossy());
-                            result = format!(
-                                "{}{}{}",
-                                &result[..abs_pos],
-                                file_url,
-                                &result[abs_pos + end_quote..]
-                            );
-                            search_start = abs_pos + file_url.len();
-                            extracted = true;
-                        }
-                    }
-                    break;
+        let resource_id = name_to_id
+            .get(&src_value)
+            .or_else(|| name_to_id.get(&resource_name))
+            .cloned();
+
+        let file_url = if let Some(id) = resource_id {
+            let img_path = img_dir.join(&resource_name);
+            // Skip write if already extracted (re-opening the same book)
+            if !img_path.exists() {
+                if let Some((data, _)) = doc.get_resource(&id) {
+                    let _ = std::fs::write(&img_path, &data);
                 }
             }
-        }
-
-        if !extracted {
+            if img_path.exists() {
+                format!("file://{}", img_path.to_string_lossy())
+            } else {
+                search_start = abs_pos + end_quote;
+                continue;
+            }
+        } else {
             search_start = abs_pos + end_quote;
-        }
+            continue;
+        };
+
+        result = format!(
+            "{}{}{}",
+            &result[..abs_pos],
+            file_url,
+            &result[abs_pos + end_quote..]
+        );
+        search_start = abs_pos + file_url.len();
     }
 
     result
