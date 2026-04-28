@@ -89,6 +89,42 @@ function coverUrl(path: string | undefined): string | undefined {
   return convertFileSrc(path);
 }
 
+async function generatePdfThumbnail(filePath: string, bookId: string): Promise<void> {
+  try {
+    const pdfjsLib = await import('pdfjs-dist');
+    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+      'pdfjs-dist/build/pdf.worker.mjs',
+      import.meta.url,
+    ).toString();
+
+    const bytes = await invoke<number[]>('reader_get_pdf_bytes', { path: filePath });
+    const data = new Uint8Array(bytes);
+    const pdf = await pdfjsLib.getDocument({ data }).promise;
+    const page = await pdf.getPage(1);
+
+    const scale = 0.5;
+    const viewport = page.getViewport({ scale });
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
+    const ctx = canvas.getContext('2d')!;
+
+    await page.render({ canvasContext: ctx as any, canvas, viewport }).promise;
+
+    const blob = await new Promise<Blob>((res, rej) =>
+      canvas.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/jpeg', 0.82)
+    );
+    const arrayBuffer = await blob.arrayBuffer();
+    const jpegBytes = Array.from(new Uint8Array(arrayBuffer));
+
+    await invoke('reader_save_cover', { bookId, jpegBytes });
+    await pdf.destroy();
+  } catch (e) {
+    console.warn('PDF thumbnail generation failed:', e);
+  }
+}
+
 function escapeHtmlTitle(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -965,6 +1001,13 @@ const Reader: Component = () => {
             { paths, collectionId: null }
           );
           await loadLibrary();
+          // Generate thumbnails for any newly imported PDFs that lack covers
+          const pdfsNeedingThumbs = libraryBooks().filter(
+            (b) => b.format === 'pdf' && !b.cover_path
+          );
+          for (const b of pdfsNeedingThumbs) {
+            void generatePdfThumbnail(b.file_path, b.id);
+          }
           alert(
             `Imported: ${result.imported}, Skipped (already exists): ${result.skipped}, Failed: ${result.failed}`
           );
@@ -1026,6 +1069,13 @@ const Reader: Component = () => {
       );
       await loadLibrary();
       await loadCollections();
+      // Generate thumbnails for any newly imported PDFs that lack covers
+      const pdfsNeedingThumbs = libraryBooks().filter(
+        (b) => b.format === 'pdf' && !b.cover_path
+      );
+      for (const b of pdfsNeedingThumbs) {
+        void generatePdfThumbnail(b.file_path, b.id);
+      }
       setShowImportModal(false);
       alert(
         `Imported: ${result.imported}\nSkipped (already exists): ${result.skipped}\nFailed: ${result.failed}`
@@ -1096,6 +1146,11 @@ const Reader: Component = () => {
       // For PDFs, start loading after view transition
       if (content.format === 'pdf' && content.file_path) {
         setTimeout(() => loadPdf(content.file_path!), 100);
+      }
+
+      // Generate PDF thumbnail if this book has no cover yet
+      if (content.format === 'pdf' && content.file_path && !imported.cover_path) {
+        void generatePdfThumbnail(content.file_path, imported.id);
       }
 
       loadLibrary();
