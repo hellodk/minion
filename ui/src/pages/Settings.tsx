@@ -7,13 +7,6 @@ const Settings: Component = () => {
   const [systemInfo, setSystemInfo] = createSignal<SystemInfo | null>(null);
   const [theme, setTheme] = createSignal('system');
   const [animations, setAnimations] = createSignal(true);
-  const [ollamaUrl, setOllamaUrl] = createSignal('http://192.168.1.10:11434');
-  const [aiModel, setAiModel] = createSignal('llama3.2:3b');
-  const [aiTestStatus, setAiTestStatus] = createSignal<'idle' | 'testing' | 'success' | 'error'>('idle');
-  const [aiTestMessage, setAiTestMessage] = createSignal('');
-  const [aiSaving, setAiSaving] = createSignal(false);
-  const [aiDiscoveredModels, setAiDiscoveredModels] = createSignal<string[]>([]);
-
   // Google Fit state
   const [gfitConnected, setGfitConnected] = createSignal(false);
   const [gfitClientId, setGfitClientId] = createSignal('');
@@ -190,9 +183,6 @@ const Settings: Component = () => {
         setTheme(config.ui.theme);
         setAnimations(config.ui.animations);
       }
-      if (config.ai_ollama_url) setOllamaUrl(config.ai_ollama_url);
-      if (config.ai_model) setAiModel(config.ai_model);
-
       try {
         const connected = await invoke<boolean>('gfit_check_connected');
         setGfitConnected(connected);
@@ -328,110 +318,6 @@ const Settings: Component = () => {
           <button class="btn btn-secondary w-full">
             Export All Data
           </button>
-        </div>
-      </section>
-
-      {/* AI / LLM */}
-      <section class="card p-4 mb-6">
-        <h2 class="text-lg font-medium mb-4">AI / LLM</h2>
-
-        <div class="space-y-4">
-          <div>
-            <label class="block text-sm font-medium mb-2">Ollama URL</label>
-            <input
-              type="text"
-              class="input w-full"
-              value={ollamaUrl()}
-              onInput={(e) => setOllamaUrl(e.currentTarget.value)}
-              placeholder="http://192.168.1.10:11434"
-            />
-          </div>
-
-          <div>
-            <label class="block text-sm font-medium mb-2">Model Name</label>
-            <Show
-              when={aiDiscoveredModels().length > 0}
-              fallback={
-                <input
-                  type="text"
-                  class="input w-full"
-                  value={aiModel()}
-                  onInput={(e) => setAiModel(e.currentTarget.value)}
-                  placeholder="llama3.2:3b — click Test Connection to auto-populate"
-                />
-              }
-            >
-              <select
-                class="input w-full"
-                value={aiModel()}
-                onChange={(e) => setAiModel(e.currentTarget.value)}
-              >
-                <For each={aiDiscoveredModels()}>
-                  {(m) => <option value={m}>{m}</option>}
-                </For>
-              </select>
-            </Show>
-          </div>
-
-          <div class="flex items-center gap-3">
-            <button
-              class="btn btn-secondary"
-              disabled={aiTestStatus() === 'testing'}
-              onClick={async () => {
-                setAiTestStatus('testing');
-                setAiTestMessage('');
-                setAiDiscoveredModels([]);
-                try {
-                  const result = await invoke<string>('ai_test_connection', { url: ollamaUrl() });
-                  const parsed = JSON.parse(result);
-                  const models: string[] = parsed.models?.map((m: any) => m.name) ?? [];
-                  setAiDiscoveredModels(models);
-                  if (models.length > 0 && !aiModel()) setAiModel(models[0]);
-                  setAiTestMessage(`Connected! ${models.length} model(s) found.`);
-                  setAiTestStatus('success');
-                } catch (e: any) {
-                  setAiTestMessage(String(e));
-                  setAiTestStatus('error');
-                }
-              }}
-            >
-              {aiTestStatus() === 'testing' ? 'Testing...' : 'Test Connection'}
-            </button>
-
-            <button
-              class="btn btn-primary"
-              disabled={aiSaving()}
-              onClick={async () => {
-                setAiSaving(true);
-                try {
-                  await invoke('set_config', { key: 'ai_ollama_url', value: ollamaUrl() });
-                  await invoke('set_config', { key: 'ai_model', value: aiModel() });
-                  setAiTestMessage('Settings saved.');
-                  setAiTestStatus('success');
-                } catch (e: any) {
-                  setAiTestMessage('Failed to save: ' + String(e));
-                  setAiTestStatus('error');
-                } finally {
-                  setAiSaving(false);
-                }
-              }}
-            >
-              {aiSaving() ? 'Saving...' : 'Save'}
-            </button>
-          </div>
-
-          <Show when={aiTestMessage()}>
-            <p
-              class="text-sm mt-1"
-              classList={{
-                'text-green-500': aiTestStatus() === 'success',
-                'text-red-500': aiTestStatus() === 'error',
-                'text-gray-500': aiTestStatus() === 'testing',
-              }}
-            >
-              {aiTestMessage()}
-            </p>
-          </Show>
         </div>
       </section>
 

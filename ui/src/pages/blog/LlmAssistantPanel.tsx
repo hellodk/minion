@@ -28,6 +28,7 @@ interface BlogVariant {
 interface LlmEndpoint {
   id: string;
   name: string;
+  default_model: string | null;
 }
 
 type PanelTab = 'lint' | 'writing' | 'seo' | 'distribute';
@@ -58,15 +59,17 @@ const ActionBtn: Component<{ label: string; loading: boolean; onClick: () => voi
   </button>
 );
 
-const ResultBox: Component<{ content: string; onCopy?: () => void }> = (p) => (
+const ResultBox: Component<{ content: string; onCopy?: () => void; onApply?: () => void }> = (p) => (
   <div class="relative mt-2 p-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
     {p.content}
-    <Show when={p.onCopy}>
-      <button
-        onClick={p.onCopy}
-        class="absolute top-2 right-2 px-2 py-0.5 text-[10px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded text-gray-500 hover:text-gray-800 dark:hover:text-gray-200"
-      >Copy</button>
-    </Show>
+    <div class="absolute top-2 right-2 flex gap-1">
+      <Show when={p.onApply}>
+        <button onClick={p.onApply} class="px-2 py-0.5 text-[10px] bg-sky-500 text-white rounded hover:bg-sky-600">Append</button>
+      </Show>
+      <Show when={p.onCopy}>
+        <button onClick={p.onCopy} class="px-2 py-0.5 text-[10px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded text-gray-500 hover:text-gray-800 dark:hover:text-gray-200">Copy</button>
+      </Show>
+    </div>
   </div>
 );
 
@@ -91,9 +94,14 @@ const EmptyNote: Component<{ tried: boolean }> = (p) => (
 
 // ── Main panel ────────────────────────────────────────────────────────────────
 
-const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void }> = (props) => {
+const LlmAssistantPanel: Component<{
+  postId: string | null;
+  onClose: () => void;
+  onApply?: (type: 'title' | 'append', value: string) => void;
+}> = (props) => {
   const [tab, setTab] = createSignal<PanelTab>('lint');
   const [hasEndpoint, setHasEndpoint] = createSignal<boolean | null>(null); // null = checking
+  const [modelLabel, setModelLabel] = createSignal<string | null>(null);
 
   // ── Lint ──────────────────────────────────────────────────────────────────
   const [lintIssues, setLintIssues] = createSignal<LintIssue[]>([]);
@@ -270,6 +278,10 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
     try {
       const endpoints = await invoke<LlmEndpoint[]>('llm_list_endpoints');
       setHasEndpoint(endpoints.length > 0);
+      if (endpoints.length > 0) {
+        const ep = endpoints[0];
+        setModelLabel(ep.default_model ? `${ep.name} · ${ep.default_model}` : ep.name);
+      }
     } catch { setHasEndpoint(false); }
 
     // Load lint (rule-based, always works)
@@ -299,7 +311,12 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
     <div class="flex flex-col h-full bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 w-80 shrink-0">
       {/* Header */}
       <div class="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
-        <span class="text-sm font-semibold text-gray-800 dark:text-gray-200">✨ AI Assistant</span>
+        <div>
+          <span class="text-sm font-semibold text-gray-800 dark:text-gray-200">✨ AI Assistant</span>
+          <Show when={modelLabel()}>
+            <span class="ml-1.5 text-[10px] text-gray-400 dark:text-gray-500">{modelLabel()}</span>
+          </Show>
+        </div>
         <button onClick={props.onClose} class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-lg leading-none">×</button>
       </div>
 
@@ -381,7 +398,12 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
                     <div class="p-2 border border-gray-200 dark:border-gray-700 rounded-lg">
                       <div class="flex justify-between items-start gap-1 mb-1">
                         <span class="text-[10px] px-1 py-0.5 bg-sky-100 dark:bg-sky-900/40 text-sky-600 dark:text-sky-400 rounded">{t.style}</span>
-                        <button onClick={() => navigator.clipboard.writeText(t.title)} class="text-[10px] text-gray-400 hover:text-gray-600">Copy</button>
+                        <div class="flex gap-1.5">
+                          <button onClick={() => navigator.clipboard.writeText(t.title)} class="text-[10px] text-gray-400 hover:text-gray-600">Copy</button>
+                          <Show when={props.onApply}>
+                            <button onClick={() => props.onApply!('title', t.title)} class="text-[10px] text-sky-600 hover:text-sky-800 font-medium">Apply</button>
+                          </Show>
+                        </div>
                       </div>
                       <p class="text-xs font-medium text-gray-800 dark:text-gray-200">{t.title}</p>
                       <p class="text-[10px] text-gray-400 mt-0.5">{t.rationale}</p>
@@ -407,7 +429,12 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
                     <div class="p-2 border border-gray-200 dark:border-gray-700 rounded-lg">
                       <div class="flex justify-between mb-1">
                         <span class="text-[10px] text-gray-400">Variant {i() + 1}</span>
-                        <button onClick={() => navigator.clipboard.writeText(v)} class="text-[10px] text-gray-400 hover:text-gray-600">Copy</button>
+                        <div class="flex gap-1.5">
+                          <button onClick={() => navigator.clipboard.writeText(v)} class="text-[10px] text-gray-400 hover:text-gray-600">Copy</button>
+                          <Show when={props.onApply}>
+                            <button onClick={() => props.onApply!('append', v)} class="text-[10px] text-sky-600 hover:text-sky-800 font-medium">Append</button>
+                          </Show>
+                        </div>
                       </div>
                       <p class="text-xs text-gray-700 dark:text-gray-300">{v}</p>
                     </div>
@@ -426,7 +453,7 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
             <Show when={conclusionError()}><ErrorNote msg={conclusionError()} /></Show>
             <EmptyNote tried={conclusionTried() && !conclusion() && !conclusionError()} />
             <Show when={conclusion()}>
-              <ResultBox content={conclusion()} onCopy={() => navigator.clipboard.writeText(conclusion())} />
+              <ResultBox content={conclusion()} onCopy={() => navigator.clipboard.writeText(conclusion())} onApply={props.onApply ? () => props.onApply!('append', conclusion()) : undefined} />
             </Show>
           </div>
 
@@ -599,6 +626,9 @@ const LlmAssistantPanel: Component<{ postId: string | null; onClose: () => void 
                       </div>
                       <div class="flex gap-1 shrink-0">
                         <button onClick={() => navigator.clipboard.writeText(v.content)} class="text-[10px] text-sky-600 hover:text-sky-800">Copy</button>
+                        <Show when={props.onApply}>
+                          <button onClick={() => props.onApply!('append', v.content)} class="text-[10px] text-green-600 hover:text-green-800 font-medium">Apply</button>
+                        </Show>
                         <button onClick={() => deleteVariant(v.id)} class="text-[10px] text-red-400 hover:text-red-600">Del</button>
                       </div>
                     </div>

@@ -209,12 +209,18 @@ pub struct FitnessMetricResponse {
     pub body_fat_pct: Option<f64>,
     pub steps: Option<i64>,
     pub heart_rate_avg: Option<i64>,
+    pub heart_rate_min: Option<i64>,
+    pub heart_rate_max: Option<i64>,
     pub sleep_hours: Option<f64>,
     pub sleep_quality: Option<i64>,
     pub water_ml: Option<i64>,
     pub calories_in: Option<i64>,
-    pub notes: Option<String>,
-    pub created_at: String,
+    pub calories_out: Option<i64>,
+    pub distance_m: Option<f64>,
+    pub active_minutes: Option<i64>,
+    pub spo2_avg: Option<f64>,
+    pub source: Option<String>,
+    pub synced_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3185,12 +3191,18 @@ pub async fn fitness_log_metric(
         body_fat_pct: metric.body_fat_pct,
         steps: metric.steps,
         heart_rate_avg: metric.heart_rate_avg,
+        heart_rate_min: None,
+        heart_rate_max: None,
         sleep_hours: metric.sleep_hours,
         sleep_quality: metric.sleep_quality,
         water_ml: metric.water_ml,
         calories_in: metric.calories_in,
-        notes: metric.notes,
-        created_at: now,
+        calories_out: None,
+        distance_m: None,
+        active_minutes: None,
+        spo2_avg: None,
+        source: Some("manual".to_string()),
+        synced_at: None,
     })
 }
 
@@ -3207,8 +3219,9 @@ pub async fn fitness_get_metrics(
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, date, weight_kg, body_fat_pct, steps, heart_rate_avg, sleep_hours,
-                    sleep_quality, water_ml, calories_in, notes, created_at
+            "SELECT id, date, weight_kg, body_fat_pct, steps, heart_rate_avg, heart_rate_min,
+                    heart_rate_max, sleep_hours, sleep_quality, water_ml, calories_in,
+                    calories_out, distance_m, active_minutes, spo2_avg, source, synced_at
              FROM fitness_metrics WHERE date >= date('now', ?1)
              ORDER BY date DESC",
         )
@@ -3223,12 +3236,18 @@ pub async fn fitness_get_metrics(
                 body_fat_pct: row.get(3)?,
                 steps: row.get(4)?,
                 heart_rate_avg: row.get(5)?,
-                sleep_hours: row.get(6)?,
-                sleep_quality: row.get(7)?,
-                water_ml: row.get(8)?,
-                calories_in: row.get(9)?,
-                notes: row.get(10)?,
-                created_at: row.get(11)?,
+                heart_rate_min: row.get(6)?,
+                heart_rate_max: row.get(7)?,
+                sleep_hours: row.get(8)?,
+                sleep_quality: row.get(9)?,
+                water_ml: row.get(10)?,
+                calories_in: row.get(11)?,
+                calories_out: row.get(12)?,
+                distance_m: row.get(13)?,
+                active_minutes: row.get(14)?,
+                spo2_avg: row.get(15)?,
+                source: row.get(16)?,
+                synced_at: row.get(17)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -4636,25 +4655,17 @@ pub async fn ai_analyze_health(
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
 
-    // Read LLM config from DB
-    let ollama_url: String = conn
-        .query_row(
-            "SELECT value FROM config WHERE key = 'ai_ollama_url'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| "http://192.168.1.10:11434".to_string());
-
-    let model: String = conn
-        .query_row(
-            "SELECT value FROM config WHERE key = 'ai_model'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| "llama3.2:3b".to_string());
+    let endpoint: Option<(String, Option<String>, String)> = conn.query_row(
+        "SELECT base_url, api_key_encrypted, COALESCE(default_model, 'llama3') FROM llm_endpoints LIMIT 1",
+        [],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?)),
+    ).ok();
 
     drop(conn);
     drop(st);
+
+    let (ollama_url, _api_key, model) = endpoint
+        .ok_or_else(|| "No LLM endpoint configured. Add one in Settings → LLM Endpoints.".to_string())?;
 
     let prompt = format!(
         "You are a health and fitness AI assistant. Analyze the following health metrics \

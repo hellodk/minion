@@ -705,6 +705,13 @@ const Blog: Component = () => {
                 <LlmAssistantPanel
                   postId={editingId()}
                   onClose={() => setShowLlmPanel(false)}
+                  onApply={(type, value) => {
+                    if (type === 'title') {
+                      setEdTitle(value);
+                    } else {
+                      setEdContent((c) => c ? c + '\n\n' + value : value);
+                    }
+                  }}
                 />
               </Show>
               </div>
