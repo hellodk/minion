@@ -1,5 +1,6 @@
-import { Component, createSignal, For, Show, Accessor } from 'solid-js';
+import { Component, createSignal, For, Show, Accessor, onMount } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
+import type { Collection } from './types';
 
 // ---- Types ----
 
@@ -9,15 +10,6 @@ interface FolderFileCandidate {
   extension: string;
   size: number;
   already_imported: boolean;
-}
-
-interface Collection {
-  id: string;
-  name: string;
-  description?: string;
-  color: string;
-  book_count: number;
-  created_at: string;
 }
 
 // ---- Helpers ----
@@ -59,31 +51,33 @@ const FolderImportModal: Component<FolderImportModalProps> = (props) => {
   const [importing, setImporting] = createSignal(false);
 
   // Expose imperative API to parent
-  props.apiRef({
-    open: async (path: string, presetCollectionId?: string) => {
-      setFolderPath(path);
-      setShow(true);
-      setLoading(true);
-      setCandidates([]);
-      setSelected(new Set<string>());
-      setFilter('');
-      setTargetCollection(presetCollectionId ?? '');
-      try {
-        const files = await invoke<FolderFileCandidate[]>('reader_list_folder_files', { path });
-        setCandidates(files);
-        // Pre-select all files that aren't already imported
-        const preSelected = new Set(
-          files.filter((f) => !f.already_imported).map((f) => f.path)
-        );
-        setSelected(preSelected);
-      } catch (e) {
-        console.error('Failed to list folder files:', e);
-        alert(`Failed to scan folder: ${e}`);
-        setShow(false);
-      } finally {
-        setLoading(false);
-      }
-    },
+  onMount(() => {
+    props.apiRef({
+      open: async (path: string, presetCollectionId?: string) => {
+        setFolderPath(path);
+        setShow(true);
+        setLoading(true);
+        setCandidates([]);
+        setSelected(new Set<string>());
+        setFilter('');
+        setTargetCollection(presetCollectionId ?? '');
+        try {
+          const files = await invoke<FolderFileCandidate[]>('reader_list_folder_files', { path });
+          setCandidates(files);
+          // Pre-select all files that aren't already imported
+          const preSelected = new Set(
+            files.filter((f) => !f.already_imported).map((f) => f.path)
+          );
+          setSelected(preSelected);
+        } catch (e) {
+          console.error('Failed to list folder files:', e);
+          alert(`Failed to scan folder: ${e}`);
+          setShow(false);
+        } finally {
+          setLoading(false);
+        }
+      },
+    });
   });
 
   // ---- Local helpers ----
@@ -296,4 +290,5 @@ const FolderImportModal: Component<FolderImportModalProps> = (props) => {
 };
 
 export { FolderImportModal };
-export type { FolderImportModalProps, FolderFileCandidate, Collection };
+export type { FolderImportModalProps, FolderFileCandidate };
+export type { Collection } from './types';

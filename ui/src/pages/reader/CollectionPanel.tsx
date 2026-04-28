@@ -1,34 +1,7 @@
-import { Component, createSignal, For, Show, JSX, Accessor } from 'solid-js';
+import { Component, createSignal, createEffect, on, For, Show, JSX, Accessor } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-
-// ---- Types (shared with parent — kept minimal here) ----
-
-interface LibraryBook {
-  id: string;
-  title?: string;
-  authors?: string;
-  file_path: string;
-  format?: string;
-  cover_path?: string;
-  pages?: number;
-  current_position?: string;
-  progress: number;
-  rating?: number;
-  favorite: boolean;
-  tags?: string;
-  added_at: string;
-  last_read_at?: string;
-}
-
-interface Collection {
-  id: string;
-  name: string;
-  description?: string;
-  color: string;
-  book_count: number;
-  created_at: string;
-}
+import type { LibraryBook, Collection } from './types';
 
 // ---- Preset colors (same as Reader.tsx) ----
 
@@ -69,6 +42,20 @@ const CollectionPanel: Component<CollectionPanelProps> = (props) => {
 
   // "Add files" in-progress flag
   const [addingFiles, setAddingFiles] = createSignal(false);
+
+  // Re-sync collection book list when parent collections update (e.g. after removal)
+  createEffect(on(props.collections, async () => {
+    const id = expandedCollection();
+    if (!id) return;
+    try {
+      const books = await invoke<LibraryBook[]>('reader_get_collection_books', {
+        collectionId: id,
+      });
+      setCollectionBooks(books);
+    } catch {
+      // silently ignore — list will refresh on next expansion
+    }
+  }));
 
   // ---- Collection CRUD ----
 
@@ -261,7 +248,7 @@ const CollectionPanel: Component<CollectionPanelProps> = (props) => {
                   placeholder="e.g., Computer Science, Fiction..."
                   value={newCollectionName()}
                   onInput={(e) => setNewCollectionName(e.currentTarget.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && createCollection()}
+                  onKeyDown={(e) => e.key === 'Enter' && createCollection()}
                 />
               </div>
               <div>
@@ -412,9 +399,8 @@ const CollectionPanel: Component<CollectionPanelProps> = (props) => {
                       </button>
                       <button
                         class="btn btn-secondary text-xs"
-                        onClick={async (e) => {
+                        onClick={(e) => {
                           e.stopPropagation();
-                          // Pre-set target collection then open the import-folder modal
                           props.onImportFolderForCollection(col.id);
                         }}
                         title="Import new books from a folder into this collection"
@@ -589,4 +575,5 @@ const CollectionPanel: Component<CollectionPanelProps> = (props) => {
 };
 
 export { CollectionPanel };
-export type { CollectionPanelProps, Collection, LibraryBook };
+export type { CollectionPanelProps };
+export type { Collection, LibraryBook } from './types';
