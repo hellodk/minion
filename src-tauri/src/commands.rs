@@ -4173,27 +4173,35 @@ pub async fn reader_list_folder_files(
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
 
-    // Batch-check all paths in a single query instead of N round-trips
+    // Batch-check all paths in chunked queries to stay under SQLite 32766 variable limit
     let all_paths: Vec<&str> = candidates.iter().map(|c| c.path.as_str()).collect();
     if !all_paths.is_empty() {
-        let placeholders = all_paths
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 1))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let query = format!(
-            "SELECT file_path FROM reader_books WHERE file_path IN ({})",
-            placeholders
-        );
-        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
-        let imported_paths: std::collections::HashSet<String> = stmt
-            .query_map(rusqlite::params_from_iter(all_paths.iter()), |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
+        const SQLITE_VAR_LIMIT: usize = 900;
+        let mut imported_paths: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for chunk in all_paths.chunks(SQLITE_VAR_LIMIT) {
+            let placeholders = chunk
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let query = format!(
+                "SELECT file_path FROM reader_books WHERE file_path IN ({})",
+                placeholders
+            );
+            let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+            let chunk_imported: std::collections::HashSet<String> = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            imported_paths.extend(chunk_imported);
+        }
+
         for c in candidates.iter_mut() {
             c.already_imported = imported_paths.contains(&c.path);
         }
