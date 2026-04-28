@@ -362,6 +362,26 @@ const Reader: Component = () => {
     try {
       const books = await invoke<LibraryBook[]>('reader_get_library');
       setLibraryBooks(books);
+      // Backfill: generate thumbnails for PDFs that have no cover yet.
+      // Throttled: process 3 at a time so IPC isn't flooded.
+      const needsThumbnail = books.filter(
+        (b) => b.format === 'pdf' && !b.cover_path
+      );
+      if (needsThumbnail.length > 0) {
+        void (async () => {
+          const CONCURRENCY = 3;
+          for (let i = 0; i < needsThumbnail.length; i += CONCURRENCY) {
+            await Promise.all(
+              needsThumbnail.slice(i, i + CONCURRENCY).map((b) =>
+                generatePdfThumbnail(b.file_path, b.id)
+              )
+            );
+          }
+          // Reload library once all covers are saved so the cards update
+          const refreshed = await invoke<LibraryBook[]>('reader_get_library');
+          setLibraryBooks(refreshed);
+        })();
+      }
     } catch (e) {
       console.error('Failed to load library:', e);
     }
