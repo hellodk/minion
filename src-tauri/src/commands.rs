@@ -1481,16 +1481,6 @@ pub async fn files_bulk_move(
 // ============================================================================
 
 #[derive(Debug, Serialize)]
-pub struct BookInfo {
-    pub id: String,
-    pub title: String,
-    pub authors: Vec<String>,
-    pub path: String,
-    pub format: String,
-    pub cover_url: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
 pub struct ChapterInfo {
     pub index: usize,
     pub title: String,
@@ -1977,46 +1967,6 @@ fn markdown_to_html(md: &str) -> String {
          </div>",
         html_output
     )
-}
-
-#[tauri::command]
-pub async fn reader_list_books(directory: String) -> Result<Vec<BookInfo>, String> {
-    let dir_path = PathBuf::from(&directory);
-
-    if !dir_path.exists() || !dir_path.is_dir() {
-        return Err(format!("Invalid directory: {}", directory));
-    }
-
-    let mut books = Vec::new();
-    let supported_extensions = ["epub", "pdf", "txt", "md", "markdown", "html", "htm"];
-
-    if let Ok(entries) = std::fs::read_dir(&dir_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if supported_extensions.contains(&ext.to_lowercase().as_str()) {
-                        let filename = path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("Unknown")
-                            .to_string();
-
-                        books.push(BookInfo {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            title: filename,
-                            authors: vec![],
-                            path: path.to_string_lossy().to_string(),
-                            format: ext.to_uppercase(),
-                            cover_url: None,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(books)
 }
 
 // ============================================================================

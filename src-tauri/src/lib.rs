@@ -139,7 +139,6 @@ pub fn run() {
             commands::reader_prefetch_epub_chapters,
             commands::reader_get_pdf_path,
             commands::reader_get_pdf_bytes,
-            commands::reader_list_books,
             // Finance commands
             commands::finance_add_account,
             commands::finance_list_accounts,
