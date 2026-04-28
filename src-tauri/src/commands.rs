@@ -3818,6 +3818,27 @@ pub async fn reader_save_cover(
     Ok(cover_path)
 }
 
+/// Delete extracted EPUB images for a book from the temp directory.
+/// Called when the user closes a book to prevent unbounded /tmp growth.
+#[tauri::command]
+pub async fn reader_cleanup_book_images(book_path: String) -> Result<(), String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    book_path.hash(&mut hasher);
+    let book_hash = format!("{:x}", hasher.finish());
+
+    let img_dir = std::env::temp_dir()
+        .join("minion_book_images")
+        .join(&book_hash);
+
+    if img_dir.exists() {
+        std::fs::remove_dir_all(&img_dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn reader_add_annotation(
     state: State<'_, AppStateHandle>,
