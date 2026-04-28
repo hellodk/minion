@@ -528,6 +528,11 @@ const Reader: Component = () => {
     if (doc) {
       doc.destroy().catch(() => {});
     }
+    // Clean up temp EPUB image dir for the open book
+    const openBook = currentBook();
+    if (openBook?.file_path && openBook.format === 'epub') {
+      void invoke('reader_cleanup_book_images', { bookPath: openBook.file_path });
+    }
   });
 
   // ============================================================================
@@ -1175,6 +1180,10 @@ const Reader: Component = () => {
 
   const closeBook = () => {
     if (bookClosing()) return;
+    const book = currentBook();
+    if (book?.file_path && book.format === 'epub') {
+      void invoke('reader_cleanup_book_images', { bookPath: book.file_path });
+    }
     // Always exit fullscreen when closing book
     if (isFullscreen()) exitFullscreen();
     setBookClosing(true);
