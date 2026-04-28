@@ -1564,7 +1564,7 @@ const Reader: Component = () => {
       >
         <div
           class="book-card-inner card p-3 relative overflow-hidden"
-          style={{ transform: 'rotateX(var(--tilt-x)) rotateY(var(--tilt-y)) translateZ(0px)' }}
+          style={{ transform: 'rotateX(var(--tilt-x)) rotateY(var(--tilt-y)) var(--card-lift)' }}
         >
           <div class="book-cover-shine" />
           <div class="aspect-[2/3] bg-gradient-to-br from-minion-100 to-minion-200 dark:from-minion-900 dark:to-minion-800 rounded-lg mb-2 flex items-center justify-center relative overflow-hidden">
@@ -1724,6 +1724,8 @@ const Reader: Component = () => {
         .book-card-inner {
           --tilt-x: 0deg;
           --tilt-y: 0deg;
+          --card-lift: translateZ(0px);
+          transform: rotateX(var(--tilt-x)) rotateY(var(--tilt-y)) var(--card-lift);
           transition: transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94), box-shadow 0.4s ease;
           transform-style: preserve-3d;
           will-change: transform;
@@ -1735,7 +1737,7 @@ const Reader: Component = () => {
         }
 
         .book-card-inner:hover {
-          transform: translateY(-8px) scale(1.02);
+          --card-lift: translateY(-8px) scale(1.02) translateZ(8px);
           box-shadow:
             -6px 20px 40px rgba(0,0,0,0.2),
             -3px 8px 16px rgba(0,0,0,0.12),
