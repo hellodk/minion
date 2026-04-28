@@ -4280,11 +4280,32 @@ pub async fn reader_import_paths(
             let id = uuid::Uuid::new_v4().to_string();
             let now = chrono::Utc::now().to_rfc3339();
 
+            let cover_path: Option<String> = if ext == "epub" {
+                if let Ok(mut doc) = epub::doc::EpubDoc::new(&book_path) {
+                    if let Some((cover_data, _mime)) = doc.get_cover() {
+                        let covers_dir = st.data_dir.join("covers");
+                        let _ = std::fs::create_dir_all(&covers_dir);
+                        let cover_file = covers_dir.join(format!("{}.jpg", id));
+                        if std::fs::write(&cover_file, &cover_data).is_ok() {
+                            Some(cover_file.to_string_lossy().to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             if conn
                 .execute(
-                    "INSERT INTO reader_books (id, title, authors, file_path, format, progress, added_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-                    rusqlite::params![id, title, authors, p, ext, now],
+                    "INSERT INTO reader_books (id, title, authors, file_path, format, cover_path, progress, added_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+                    rusqlite::params![id, title, authors, p, ext, cover_path, now],
                 )
                 .is_err()
             {
