@@ -219,7 +219,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 21);
+        assert_eq!(count, 22);
     }
 
     #[test]

@@ -32,7 +32,15 @@ impl SeoAnalyzer {
     /// - Keyword density:     up to 25 points (1-3 % ideal)
     /// - Heading structure:   up to 25 points (has `##` headings)
     /// - Content length:      up to 25 points (> 300 words)
-    pub fn analyze(title: &str, content: &str, keywords: &[String]) -> SeoAnalysis {
+    /// Analyse a post and return an `SeoAnalysis`.
+    ///
+    /// `excerpt` should be the post's meta description / summary if one exists.
+    pub fn analyze(
+        title: &str,
+        content: &str,
+        keywords: &[String],
+        excerpt: Option<&str>,
+    ) -> SeoAnalysis {
         let mut suggestions = Vec::new();
 
         let (title_score, title_suggestion) = Self::check_title_length(title);
@@ -57,12 +65,23 @@ impl SeoAnalyzer {
             suggestions.push(s);
         }
 
-        let title_len = title.len();
-        // A reasonable meta description is roughly a sentence between 50 and 160 chars.
-        // We approximate "has meta description" as the first paragraph being in that range,
-        // but since we only have title + content we simply check title length as a proxy.
-        let has_meta_description = (50..=160).contains(&title_len);
+        // has_meta_description: the excerpt must exist and be 50-160 chars
+        // (standard meta description length). An empty or missing excerpt fails.
+        let has_meta_description = excerpt
+            .map(|e| {
+                let trimmed = e.trim();
+                let len = trimmed.len();
+                (50..=160).contains(&len)
+            })
+            .unwrap_or(false);
 
+        if !has_meta_description {
+            suggestions.push(
+                "Add a 50-160 character excerpt to serve as the SEO meta description".to_string(),
+            );
+        }
+
+        let title_len = title.len();
         let score = (title_score + keyword_score + heading_score + content_score).min(100);
 
         SeoAnalysis {
@@ -364,7 +383,8 @@ mod tests {
         let content = lines.join("\n\n");
 
         let keywords = vec!["rust".to_string()];
-        let analysis = SeoAnalyzer::analyze(&title, &content, &keywords);
+        let excerpt = "A".repeat(55); // 55 chars — valid meta description length
+        let analysis = SeoAnalyzer::analyze(&title, &content, &keywords, Some(&excerpt));
 
         assert_eq!(analysis.score, 100);
         assert!(analysis.suggestions.is_empty());
@@ -378,14 +398,14 @@ mod tests {
         let content = "short";
         let keywords: Vec<String> = Vec::new();
 
-        let analysis = SeoAnalyzer::analyze(title, content, &keywords);
+        let analysis = SeoAnalyzer::analyze(title, content, &keywords, None);
         assert!(analysis.score < 50);
         assert!(!analysis.suggestions.is_empty());
     }
 
     #[test]
     fn test_analyze_serde_roundtrip() {
-        let analysis = SeoAnalyzer::analyze("Some Title", "Some content", &[]);
+        let analysis = SeoAnalyzer::analyze("Some Title", "Some content", &[], None);
         let json = serde_json::to_string(&analysis).unwrap();
         let deserialized: SeoAnalysis = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.score, analysis.score);
@@ -402,7 +422,7 @@ mod tests {
         body.push_str(&"keyword ".repeat(10));
         let keywords = vec!["keyword".to_string()];
 
-        let analysis = SeoAnalyzer::analyze(&title, &body, &keywords);
+        let analysis = SeoAnalyzer::analyze(&title, &body, &keywords, None);
         assert!(analysis.score <= 100);
     }
 }

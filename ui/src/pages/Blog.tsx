@@ -28,11 +28,13 @@ interface BlogPost {
   created_at: string;
   updated_at: string;
   published_at: string | null;
+  canonical_url: string | null;
 }
 
 interface SeoAnalysis {
   score: number;
   title_length: number;
+  has_meta_description: boolean;
   keyword_density: number;
   heading_structure: boolean;
   word_count: number;
@@ -86,6 +88,12 @@ const Blog: Component = () => {
   const [statusFilter, setStatusFilter] = createSignal<string | null>(null);
   const [loading, setLoading] = createSignal(false);
 
+  // Search
+  const [searchQuery, setSearchQuery] = createSignal('');
+  const [searchResults, setSearchResults] = createSignal<BlogPost[] | null>(null);
+  const [searching, setSearching] = createSignal(false);
+  let searchDebounce: ReturnType<typeof setTimeout> | undefined;
+
   // Editor state
   const [editingId, setEditingId] = createSignal<string | null>(null);
   const [edTitle, setEdTitle] = createSignal('');
@@ -93,6 +101,7 @@ const Blog: Component = () => {
   const [edStatus, setEdStatus] = createSignal('draft');
   const [edTags, setEdTags] = createSignal('');
   const [edAuthor, setEdAuthor] = createSignal('');
+  const [edCanonicalUrl, setEdCanonicalUrl] = createSignal('');
   const [edSeoResult, setEdSeoResult] = createSignal<SeoAnalysis | null>(null);
   const [saving, setSaving] = createSignal(false);
 
@@ -183,6 +192,36 @@ const Blog: Component = () => {
   };
 
   onMount(loadPosts);
+  onCleanup(() => { if (searchDebounce) clearTimeout(searchDebounce); });
+
+  const handleSearch = (q: string) => {
+    setSearchQuery(q);
+    if (searchDebounce) clearTimeout(searchDebounce);
+    if (!q.trim()) {
+      setSearchResults(null);
+      return;
+    }
+    setSearching(true);
+    searchDebounce = setTimeout(async () => {
+      try {
+        const results = await invoke<BlogPost[]>('blog_search_posts', { query: q });
+        setSearchResults(results);
+      } catch (e) {
+        console.error('Search failed:', e);
+      } finally {
+        setSearching(false);
+      }
+    }, 300);
+  };
+
+  const clearSearch = () => {
+    setSearchQuery('');
+    setSearchResults(null);
+    setSearching(false);
+    if (searchDebounce) clearTimeout(searchDebounce);
+  };
+
+  const visiblePosts = () => searchResults() ?? posts();
 
   // ---------------------------------------------------------------------------
   // Editor actions
@@ -195,6 +234,7 @@ const Blog: Component = () => {
     setEdStatus('draft');
     setEdTags('');
     setEdAuthor('');
+    setEdCanonicalUrl('');
     setEdSeoResult(null);
     setTab('editor');
   };
@@ -209,6 +249,7 @@ const Blog: Component = () => {
       setEdStatus(full.status);
       setEdTags(full.tags || '');
       setEdAuthor(full.author || '');
+      setEdCanonicalUrl(full.canonical_url || '');
       setEdSeoResult(null);
       setTab('editor');
     } catch (e) {
@@ -227,12 +268,14 @@ const Blog: Component = () => {
           content: edContent(),
           status: edStatus(),
           tags: edTags() || null,
+          canonicalUrl: edCanonicalUrl() || null,
         });
       } else {
         const created = await invoke<BlogPost>('blog_create_post', {
           title: edTitle(),
           content: edContent(),
           author: edAuthor() || null,
+          canonicalUrl: edCanonicalUrl() || null,
         });
         setEditingId(created.id);
         // Apply status/tags if not default
@@ -241,6 +284,7 @@ const Blog: Component = () => {
             postId: created.id,
             status: edStatus(),
             tags: edTags() || null,
+            canonicalUrl: null,
           });
         }
       }
@@ -274,6 +318,7 @@ const Blog: Component = () => {
         title: edTitle(),
         content: edContent(),
         keywords,
+        excerpt: null,
       });
       setEdSeoResult(result);
     } catch (e) {
@@ -296,6 +341,7 @@ const Blog: Component = () => {
         title: seoTitle(),
         content: seoContent(),
         keywords,
+        excerpt: null,
       });
       setSeoResult(result);
     } catch (e) {
@@ -383,58 +429,113 @@ const Blog: Component = () => {
           {/* ==================== POSTS TAB ==================== */}
           <Match when={tab() === 'posts'}>
             <div class="px-8 py-6">
-              {/* Status filter */}
-              <div class="flex gap-2 mb-6">
-                {[
-                  { label: 'All', value: null },
-                  { label: 'Draft', value: 'draft' },
-                  { label: 'Review', value: 'review' },
-                  { label: 'Published', value: 'published' },
-                ].map((f) => (
+              {/* Search bar */}
+              <div class="relative mb-4">
+                <svg
+                  class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none"
+                  fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                >
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" />
+                </svg>
+                <input
+                  type="text"
+                  placeholder="Fuzzy search — title, tags, author, content…"
+                  value={searchQuery()}
+                  onInput={(e) => handleSearch(e.currentTarget.value)}
+                  class="w-full pl-10 pr-10 py-2.5 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 outline-none focus:border-sky-400 dark:focus:border-sky-600 transition-colors"
+                />
+                <Show when={searchQuery()}>
                   <button
-                    onClick={() => {
-                      setStatusFilter(f.value);
-                      loadPosts();
-                    }}
-                    class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
-                    classList={{
-                      'bg-sky-500 text-white': statusFilter() === f.value,
-                      'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700':
-                        statusFilter() !== f.value,
-                    }}
+                    onClick={clearSearch}
+                    class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                    title="Clear search"
                   >
-                    {f.label}
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
                   </button>
-                ))}
+                </Show>
               </div>
 
-              <Show when={loading()}>
-                <div class="text-center py-12 text-gray-400">Loading...</div>
+              {/* Status filters — hidden while searching */}
+              <Show when={!searchQuery()}>
+                <div class="flex gap-2 mb-6">
+                  {[
+                    { label: 'All', value: null },
+                    { label: 'Draft', value: 'draft' },
+                    { label: 'Review', value: 'review' },
+                    { label: 'Published', value: 'published' },
+                  ].map((f) => (
+                    <button
+                      onClick={() => {
+                        setStatusFilter(f.value);
+                        loadPosts();
+                      }}
+                      class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                      classList={{
+                        'bg-sky-500 text-white': statusFilter() === f.value,
+                        'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700':
+                          statusFilter() !== f.value,
+                      }}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
               </Show>
 
-              <Show when={!loading() && posts().length === 0}>
+              {/* Search result summary */}
+              <Show when={searchQuery() && !searching()}>
+                <div class="mb-4 text-xs text-gray-500 dark:text-gray-400">
+                  <Show
+                    when={(searchResults()?.length ?? 0) > 0}
+                    fallback={<span>No results for <span class="font-medium text-gray-700 dark:text-gray-300">"{searchQuery()}"</span></span>}
+                  >
+                    <span>{searchResults()!.length} result{searchResults()!.length !== 1 ? 's' : ''} for <span class="font-medium text-gray-700 dark:text-gray-300">"{searchQuery()}"</span></span>
+                  </Show>
+                </div>
+              </Show>
+
+              <Show when={loading() || searching()}>
+                <div class="text-center py-12 text-gray-400">
+                  {searching() ? 'Searching…' : 'Loading…'}
+                </div>
+              </Show>
+
+              <Show when={!loading() && !searching() && visiblePosts().length === 0}>
                 <div class="text-center py-16">
                   <div class="text-4xl mb-3 text-gray-300 dark:text-gray-600">
                     <svg class="w-12 h-12 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                     </svg>
                   </div>
-                  <p class="text-gray-500 dark:text-gray-400 font-medium">No posts yet</p>
-                  <p class="text-sm text-gray-400 dark:text-gray-500 mt-1">
-                    Create your first blog post to get started
-                  </p>
-                  <button
-                    onClick={openNewPost}
-                    class="mt-4 px-4 py-2 rounded-lg text-sm font-medium text-white bg-sky-500 hover:bg-sky-600 transition-colors"
-                  >
-                    New Post
-                  </button>
+                  <Show when={searchQuery()} fallback={
+                    <>
+                      <p class="text-gray-500 dark:text-gray-400 font-medium">No posts yet</p>
+                      <p class="text-sm text-gray-400 dark:text-gray-500 mt-1">
+                        Create your first blog post to get started
+                      </p>
+                      <button
+                        onClick={openNewPost}
+                        class="mt-4 px-4 py-2 rounded-lg text-sm font-medium text-white bg-sky-500 hover:bg-sky-600 transition-colors"
+                      >
+                        New Post
+                      </button>
+                    </>
+                  }>
+                    <p class="text-gray-500 dark:text-gray-400 font-medium">No matches found</p>
+                    <p class="text-sm text-gray-400 dark:text-gray-500 mt-1">Try different keywords or clear the search</p>
+                    <button onClick={clearSearch} class="mt-4 px-4 py-2 rounded-lg text-sm font-medium text-sky-600 dark:text-sky-400 bg-sky-50 dark:bg-sky-900/20 hover:bg-sky-100 dark:hover:bg-sky-900/40 transition-colors">
+                      Clear search
+                    </button>
+                  </Show>
                 </div>
               </Show>
 
-              <Show when={!loading() && posts().length > 0}>
+              <Show when={!loading() && !searching() && visiblePosts().length > 0}>
                 <div class="space-y-3">
-                  <For each={posts()}>
+                  <For each={visiblePosts()}>
                     {(post) => (
                       <div
                         class="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-5 hover:border-sky-300 dark:hover:border-sky-700 transition-colors cursor-pointer group"
@@ -460,6 +561,9 @@ const Blog: Component = () => {
                               <span>{formatDate(post.updated_at)}</span>
                               <Show when={post.author}>
                                 <span>by {post.author}</span>
+                              </Show>
+                              <Show when={post.tags && searchQuery()}>
+                                <span class="text-sky-500 dark:text-sky-400">{post.tags}</span>
                               </Show>
                             </div>
                           </div>
@@ -633,6 +737,19 @@ const Blog: Component = () => {
                     class="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-sm text-gray-800 dark:text-gray-200 outline-none focus:border-sky-300"
                   />
                   <p class="text-[10px] text-gray-400 mt-1">Comma-separated</p>
+                </div>
+
+                {/* Canonical URL */}
+                <div>
+                  <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">Canonical URL</label>
+                  <input
+                    type="text"
+                    placeholder="https://yourblog.com/post-slug"
+                    value={edCanonicalUrl()}
+                    onInput={(e) => setEdCanonicalUrl(e.currentTarget.value)}
+                    class="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-sm text-gray-800 dark:text-gray-200 outline-none focus:border-sky-300"
+                  />
+                  <p class="text-[10px] text-gray-400 mt-1">Original source (for cross-posting)</p>
                 </div>
 
                 {/* Slug preview */}
@@ -819,6 +936,19 @@ const Blog: Component = () => {
                       <div class="flex-1">
                         <div class="text-sm text-gray-700 dark:text-gray-300">Title Length</div>
                         <div class="text-xs text-gray-400">{seoResult()!.title_length} characters (ideal: 50-60)</div>
+                      </div>
+                    </div>
+
+                    {/* Meta description */}
+                    <div class="flex items-center gap-3">
+                      <div class={`w-5 h-5 rounded-full flex items-center justify-center text-white text-xs ${seoResult()!.has_meta_description ? 'bg-emerald-500' : 'bg-red-500'}`}>
+                        {seoResult()!.has_meta_description ? '✓' : '!'}
+                      </div>
+                      <div class="flex-1">
+                        <div class="text-sm text-gray-700 dark:text-gray-300">Meta Description</div>
+                        <div class="text-xs text-gray-400">
+                          {seoResult()!.has_meta_description ? 'Excerpt present and correct length' : 'Add a 50-160 char excerpt'}
+                        </div>
                       </div>
                     </div>
 

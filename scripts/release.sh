@@ -137,12 +137,16 @@ if $DO_INSTALL; then
 fi
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
+# Remove all of target/debug — we just shipped release, no need to keep debug
+# artifacts. Intentionally keep:
+#   ui/node_modules      — pnpm links from global store; wipe only wastes 30s
+#   ~/.cargo/registry    — download cache; never touch this
 
 if $DO_CLEAN; then
     echo ""
-    echo "── Cleaning build artifacts ──"
+    echo "── Cleaning debug artifacts ──"
     BEFORE=$(df / | awk 'NR==2{print $3}')
-    rm -rf target/debug ui/node_modules ~/.cargo/registry/src
+    rm -rf target/debug
     AFTER=$(df / | awk 'NR==2{print $3}')
     FREED_MB=$(( (BEFORE - AFTER) / 1024 ))
     echo "  Freed ~${FREED_MB} MB"

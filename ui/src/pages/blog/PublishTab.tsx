@@ -19,8 +19,8 @@ interface ExportPayload {
   copy_text: string; open_url: string | null;
 }
 
-const AUTO_PLATFORMS = ['wordpress', 'devto', 'hashnode'];
-const MANUAL_PLATFORMS = ['linkedin', 'medium', 'substack', 'twitter'];
+const AUTO_PLATFORMS = ['wordpress', 'devto', 'hashnode', 'ghost', 'webhook'];
+const MANUAL_PLATFORMS = ['linkedin', 'medium', 'substack', 'twitter', 'diffstack', 'hellodk', 'blogspot'];
 
 function normalisePlatform(p: string): string {
   return p === 'dev_to' ? 'devto' : p;
@@ -30,11 +30,19 @@ const PLATFORM_LABELS: Record<string, string> = {
   wordpress: 'WordPress',
   devto: 'Dev.to',
   hashnode: 'Hashnode',
+  ghost: 'Ghost',
+  webhook: 'Webhook / Custom',
   medium: 'Medium',
   substack: 'Substack',
   linkedin: 'LinkedIn',
   twitter: 'Twitter / X',
+  diffstack: 'Diffstack',
+  hellodk: 'hellodk.io',
+  blogspot: 'Blogspot',
 };
+
+// Dev.to always creates a draft on their end regardless of post status.
+const PUBLISHES_AS_DRAFT: ReadonlySet<string> = new Set(['devto']);
 const platformLabel = (p: string) => PLATFORM_LABELS[normalisePlatform(p)] ?? p;
 const fmtTimestamp = (s: string | null) => {
   if (!s) return '—';
@@ -341,6 +349,11 @@ const PublishTab: Component = () => {
                         <div class="text-[10px] text-gray-400">
                           {row.auto ? 'Auto-publish' : 'Manual export'}
                         </div>
+                        <Show when={PUBLISHES_AS_DRAFT.has(row.platform)}>
+                          <div class="text-[10px] text-amber-500 mt-0.5">
+                            Creates a draft on their end — publish manually there
+                          </div>
+                        </Show>
                       </td>
                       <td class="p-3">
                         <Show

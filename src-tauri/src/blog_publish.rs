@@ -2,16 +2,18 @@
 //!
 //! Two flavors:
 //!
-//! * **Auto-publish** (WordPress, Dev.to, Hashnode) — we call the
+//! * **Auto-publish** (WordPress, Dev.to, Hashnode, Ghost, Webhook) — we call the
 //!   platform's REST/GraphQL API from Rust and record `remote_url` +
 //!   `remote_id` in `blog_platform_publications`.
-//! * **Manual export** (Medium, Substack, LinkedIn, X/Twitter) — the
-//!   backend produces a platform-tailored payload (markdown/HTML/text)
+//! * **Manual export** (Medium, Substack, LinkedIn, X/Twitter, Diffstack, hellodk.io,
+//!   Blogspot) — the backend produces a platform-tailored payload (markdown/HTML/text)
 //!   and the UI copies it to clipboard + opens the target editor.
 //!
 //! Account credentials live in `blog_platform_accounts`. API keys are
-//! stored as written today; the same at-rest encryption work queued for
-//! Health Vault will cover this table on the next pass.
+//! encrypted with AES-256-GCM using a per-installation key stored at
+//! `data_dir/blog.key`. Legacy plaintext rows are detected by the absence
+//! of the `$enc1$` prefix and are still accepted but will be re-encrypted
+//! on the next account write.
 
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,37 @@ use tauri::State;
 use tokio::sync::RwLock;
 
 type AppStateHandle = Arc<RwLock<AppState>>;
+
+// =====================================================================
+// API key encryption helpers
+// =====================================================================
+
+const ENC_PREFIX: &str = "$enc1$";
+
+/// Platforms that cannot be scheduled (no API — copy-paste only).
+const MANUAL_PLATFORMS: &[&str] = &[
+    "linkedin", "medium", "substack", "twitter", "x",
+    "diffstack", "hellodk", "blogspot",
+];
+
+fn encrypt_api_key(key: &[u8; 32], plaintext: &str) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let ciphertext = minion_crypto::encrypt(key, plaintext.as_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(format!("{}{}", ENC_PREFIX, B64.encode(&ciphertext)))
+}
+
+fn decrypt_api_key(key: &[u8; 32], stored: &str) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    if let Some(encoded) = stored.strip_prefix(ENC_PREFIX) {
+        let ciphertext = B64.decode(encoded).map_err(|e| e.to_string())?;
+        let plaintext = minion_crypto::decrypt(key, &ciphertext)
+            .map_err(|e| e.to_string())?;
+        String::from_utf8(plaintext).map_err(|e| e.to_string())
+    } else {
+        Ok(stored.to_string()) // legacy plaintext — pass through unchanged
+    }
+}
 
 // =====================================================================
 // Accounts
@@ -109,7 +142,14 @@ pub async fn blog_create_platform_account(
         .as_ref()
         .and_then(|v| serde_json::to_string(v).ok());
     let st = state.read().await;
+    let enc_key = st.blog_enc_key;
     let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    let stored_key: Option<String> = match account.api_key.as_deref() {
+        None | Some("") => None,
+        Some(k) => Some(encrypt_api_key(&enc_key, k)?),
+    };
+
     conn.execute(
         "INSERT INTO blog_platform_accounts
          (id, platform, account_label, base_url, api_key_encrypted,
@@ -120,7 +160,7 @@ pub async fn blog_create_platform_account(
             account.platform,
             account.account_label,
             account.base_url,
-            account.api_key,
+            stored_key,
             account.publication_id,
             default_tags_json,
         ],
@@ -154,6 +194,7 @@ async fn load_account(
     account_id: &str,
 ) -> Result<(PlatformAccount, Option<String>), String> {
     let st = state.read().await;
+    let enc_key = st.blog_enc_key;
     let conn = st.db.get().map_err(|e| e.to_string())?;
     let sql = format!(
         "SELECT {} FROM blog_platform_accounts WHERE id = ?1",
@@ -162,13 +203,19 @@ async fn load_account(
     let account = conn
         .query_row(&sql, rusqlite::params![account_id], row_to_account)
         .map_err(|e| format!("account not found: {}", e))?;
-    let key: Option<String> = conn
+    let raw_key: Option<String> = conn
         .query_row(
             "SELECT api_key_encrypted FROM blog_platform_accounts WHERE id = ?1",
             rusqlite::params![account_id],
             |r| r.get(0),
         )
-        .ok();
+        .ok()
+        .flatten();
+    let key = match raw_key {
+        None => None,
+        Some(k) if k.is_empty() => None,
+        Some(k) => Some(decrypt_api_key(&enc_key, &k)?),
+    };
     Ok((account, key))
 }
 
@@ -341,6 +388,12 @@ pub async fn blog_schedule_publish(
         .with_timezone(&chrono::Utc)
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let (account, _key) = load_account(state.inner(), &account_id).await?;
+    if MANUAL_PLATFORMS.contains(&account.platform.as_str()) {
+        return Err(format!(
+            "{} does not support scheduled publishing — use Export instead",
+            account.platform
+        ));
+    }
     let id = uuid::Uuid::new_v4().to_string();
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
@@ -1316,6 +1369,9 @@ pub async fn blog_export_for_platform(
         "medium" => export_medium(&post),
         "substack" => export_substack(&post),
         "twitter" | "x" => export_twitter(&post),
+        "diffstack" => export_diffstack(&post),
+        "hellodk" => export_hellodk(&post),
+        "blogspot" => export_blogspot(&post),
         other => ExportPayload {
             platform: other.to_string(),
             format: "markdown".into(),
@@ -1421,6 +1477,52 @@ fn export_twitter(post: &LoadedPost) -> ExportPayload {
         format: "text".into(),
         copy_text: numbered.join("\n\n---\n\n"),
         open_url: Some("https://twitter.com/compose/tweet".into()),
+    }
+}
+
+fn export_diffstack(post: &LoadedPost) -> ExportPayload {
+    // diffstack.co — developer-focused markdown posts.
+    // No public API yet; copy markdown and open the new-post editor.
+    let body = format!("# {}\n\n{}", post.title, post.content);
+    ExportPayload {
+        platform: "diffstack".into(),
+        format: "markdown".into(),
+        copy_text: body,
+        open_url: Some("https://diffstack.co/new".into()),
+    }
+}
+
+fn export_hellodk(post: &LoadedPost) -> ExportPayload {
+    // hellodk.io — personal site. Paste markdown into the CMS editor
+    // or drop the file into the content directory if self-hosted.
+    let mut body = post.content.clone();
+    if let Some(url) = &post.canonical_url {
+        body.push_str(&format!(
+            "\n\n---\n*Originally published at [{}]({})*.",
+            url, url
+        ));
+    }
+    ExportPayload {
+        platform: "hellodk".into(),
+        format: "markdown".into(),
+        copy_text: format!("# {}\n\n{}", post.title, body),
+        open_url: Some("https://hellodk.io/admin".into()),
+    }
+}
+
+fn export_blogspot(post: &LoadedPost) -> ExportPayload {
+    // Blogger/Blogspot — compose editor accepts HTML.
+    // Convert markdown to HTML so the user can paste directly.
+    let html = markdown_to_html(&post.content);
+    ExportPayload {
+        platform: "blogspot".into(),
+        format: "html".into(),
+        copy_text: format!(
+            "<h1>{}</h1>\n\n{}",
+            post.title.replace('<', "&lt;").replace('>', "&gt;"),
+            html
+        ),
+        open_url: Some("https://www.blogger.com/blog/post/create".into()),
     }
 }
 

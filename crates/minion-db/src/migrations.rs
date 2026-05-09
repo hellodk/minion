@@ -48,6 +48,10 @@ pub fn run(conn: &Connection) -> Result<()> {
             "021_reader_file_path_index",
             migrate_021_reader_file_path_index,
         ),
+        (
+            "022_blog_canonical_url",
+            migrate_022_blog_canonical_url,
+        ),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -1321,6 +1325,13 @@ fn migrate_021_reader_file_path_index(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_022_blog_canonical_url(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE blog_posts ADD COLUMN canonical_url TEXT;",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1439,7 +1450,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 21);
+        assert_eq!(count, 22);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn

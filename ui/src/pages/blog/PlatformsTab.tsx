@@ -17,10 +17,15 @@ const ALL_PLATFORMS = [
   { value: 'wordpress', label: 'WordPress', auto: true },
   { value: 'devto', label: 'Dev.to', auto: true },
   { value: 'hashnode', label: 'Hashnode', auto: true },
+  { value: 'ghost', label: 'Ghost', auto: true },
+  { value: 'webhook', label: 'Webhook / Custom', auto: true },
   { value: 'medium', label: 'Medium', auto: false },
   { value: 'substack', label: 'Substack', auto: false },
   { value: 'linkedin', label: 'LinkedIn', auto: false },
   { value: 'twitter', label: 'Twitter / X', auto: false },
+  { value: 'diffstack', label: 'Diffstack', auto: false },
+  { value: 'hellodk', label: 'hellodk.io', auto: false },
+  { value: 'blogspot', label: 'Blogspot', auto: false },
 ];
 
 function isAutoPlatform(p: string): boolean {

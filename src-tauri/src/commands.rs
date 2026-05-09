@@ -6593,12 +6593,14 @@ pub struct BlogPostResponse {
     pub created_at: String,
     pub updated_at: String,
     pub published_at: Option<String>,
+    pub canonical_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SeoAnalysisResponse {
     pub score: i32,
     pub title_length: i32,
+    pub has_meta_description: bool,
     pub keyword_density: f64,
     pub heading_structure: bool,
     pub word_count: i32,
@@ -6611,6 +6613,7 @@ pub async fn blog_create_post(
     title: String,
     content: String,
     author: Option<String>,
+    canonical_url: Option<String>,
 ) -> Result<BlogPostResponse, String> {
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
@@ -6620,12 +6623,13 @@ pub async fn blog_create_post(
     let wc = minion_blog::posts::word_count(&content) as i32;
     let rt = minion_blog::posts::calculate_reading_time(&content) as i32;
     let now = Utc::now().to_rfc3339();
+    let canonical = canonical_url.filter(|u| !u.is_empty());
 
     conn.execute(
         "INSERT INTO blog_posts (id, title, slug, content, status, author, \
-         word_count, reading_time, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'draft', ?5, ?6, ?7, ?8, ?8)",
-        rusqlite::params![id, title, slug, content, author, wc, rt, now],
+         word_count, reading_time, canonical_url, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'draft', ?5, ?6, ?7, ?8, ?9, ?9)",
+        rusqlite::params![id, title, slug, content, author, wc, rt, canonical, now],
     )
     .map_err(|e| e.to_string())?;
 
@@ -6644,6 +6648,7 @@ pub async fn blog_create_post(
         created_at: now.clone(),
         updated_at: now,
         published_at: None,
+        canonical_url: canonical,
     })
 }
 
@@ -6657,14 +6662,16 @@ pub async fn blog_list_posts(
 
     let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match &status {
         Some(s) => (
-            "SELECT id, title, slug, content, excerpt, status, author, tags, \
-             seo_score, word_count, reading_time, created_at, updated_at, published_at \
+            "SELECT id, title, slug, NULL, excerpt, status, author, tags, \
+             seo_score, word_count, reading_time, created_at, updated_at, published_at, \
+             canonical_url \
              FROM blog_posts WHERE status = ?1 ORDER BY updated_at DESC",
             vec![Box::new(s.clone())],
         ),
         None => (
-            "SELECT id, title, slug, content, excerpt, status, author, tags, \
-             seo_score, word_count, reading_time, created_at, updated_at, published_at \
+            "SELECT id, title, slug, NULL, excerpt, status, author, tags, \
+             seo_score, word_count, reading_time, created_at, updated_at, published_at, \
+             canonical_url \
              FROM blog_posts ORDER BY updated_at DESC",
             vec![],
         ),
@@ -6689,6 +6696,7 @@ pub async fn blog_list_posts(
                 created_at: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
                 updated_at: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
                 published_at: row.get(13)?,
+                canonical_url: row.get(14)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -6710,7 +6718,8 @@ pub async fn blog_get_post(
 
     conn.query_row(
         "SELECT id, title, slug, content, excerpt, status, author, tags, \
-         seo_score, word_count, reading_time, created_at, updated_at, published_at \
+         seo_score, word_count, reading_time, created_at, updated_at, published_at, \
+         canonical_url \
          FROM blog_posts WHERE id = ?1",
         rusqlite::params![post_id],
         |row| {
@@ -6729,6 +6738,7 @@ pub async fn blog_get_post(
                 created_at: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
                 updated_at: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
                 published_at: row.get(13)?,
+                canonical_url: row.get(14)?,
             })
         },
     )
@@ -6743,25 +6753,55 @@ pub async fn blog_update_post(
     content: Option<String>,
     status: Option<String>,
     tags: Option<String>,
+    canonical_url: Option<String>,
 ) -> Result<(), String> {
+    const VALID_STATUSES: &[&str] = &["draft", "review", "published", "archived"];
+    if let Some(ref s) = status {
+        if !VALID_STATUSES.contains(&s.as_str()) {
+            return Err(format!(
+                "invalid status '{}'; must be one of: draft, review, published, archived",
+                s
+            ));
+        }
+    }
+
     let st = state.read().await;
-    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let mut conn = st.db.get().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
 
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
     if let Some(ref t) = title {
-        let slug = minion_blog::posts::slugify(t);
-        conn.execute(
-            "UPDATE blog_posts SET title = ?1, slug = ?2, updated_at = ?3 \
-             WHERE id = ?4",
-            rusqlite::params![t, slug, now, post_id],
-        )
-        .map_err(|e| e.to_string())?;
+        // Don't regenerate the slug for posts that have already been published —
+        // changing the slug would silently break any external links.
+        let already_published: bool = tx
+            .query_row(
+                "SELECT published_at IS NOT NULL FROM blog_posts WHERE id = ?1",
+                rusqlite::params![post_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+
+        if already_published {
+            tx.execute(
+                "UPDATE blog_posts SET title = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![t, now, post_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            let slug = minion_blog::posts::slugify(t);
+            tx.execute(
+                "UPDATE blog_posts SET title = ?1, slug = ?2, updated_at = ?3 WHERE id = ?4",
+                rusqlite::params![t, slug, now, post_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
     }
 
     if let Some(ref c) = content {
         let wc = minion_blog::posts::word_count(c) as i32;
         let rt = minion_blog::posts::calculate_reading_time(c) as i32;
-        conn.execute(
+        tx.execute(
             "UPDATE blog_posts SET content = ?1, word_count = ?2, \
              reading_time = ?3, updated_at = ?4 WHERE id = ?5",
             rusqlite::params![c, wc, rt, now, post_id],
@@ -6775,7 +6815,7 @@ pub async fn blog_update_post(
         } else {
             None
         };
-        conn.execute(
+        tx.execute(
             "UPDATE blog_posts SET status = ?1, \
              published_at = COALESCE(published_at, ?2), \
              updated_at = ?3 WHERE id = ?4",
@@ -6785,13 +6825,27 @@ pub async fn blog_update_post(
     }
 
     if let Some(ref tg) = tags {
-        conn.execute(
+        tx.execute(
             "UPDATE blog_posts SET tags = ?1, updated_at = ?2 WHERE id = ?3",
             rusqlite::params![tg, now, post_id],
         )
         .map_err(|e| e.to_string())?;
     }
 
+    if let Some(url_value) = canonical_url {
+        let url: Option<String> = if url_value.is_empty() {
+            None
+        } else {
+            Some(url_value)
+        };
+        tx.execute(
+            "UPDATE blog_posts SET canonical_url = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![url, now, post_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -6838,12 +6892,15 @@ pub async fn blog_analyze_seo(
     title: String,
     content: String,
     keywords: Vec<String>,
+    excerpt: Option<String>,
 ) -> Result<SeoAnalysisResponse, String> {
-    let analysis = minion_blog::seo::SeoAnalyzer::analyze(&title, &content, &keywords);
+    let analysis =
+        minion_blog::seo::SeoAnalyzer::analyze(&title, &content, &keywords, excerpt.as_deref());
 
     Ok(SeoAnalysisResponse {
         score: analysis.score as i32,
         title_length: analysis.title_length as i32,
+        has_meta_description: analysis.has_meta_description,
         keyword_density: analysis.keyword_density,
         heading_structure: analysis.heading_structure,
         word_count: analysis.word_count as i32,
@@ -6854,4 +6911,124 @@ pub async fn blog_analyze_seo(
 #[tauri::command]
 pub async fn blog_generate_slug(title: String) -> Result<String, String> {
     Ok(minion_blog::posts::slugify(&title))
+}
+
+/// Score a query against a text field using word-level Jaro-Winkler.
+/// Returns 0.92 on substring match, otherwise the best per-word similarity.
+fn score_field(query: &str, text: &str) -> f64 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let t = text.to_lowercase();
+    let q = query;
+    if t.contains(q) {
+        return 0.92;
+    }
+    t.split_whitespace()
+        .map(|w| strsim::jaro_winkler(q, w))
+        .fold(0.0_f64, f64::max)
+}
+
+#[tauri::command]
+pub async fn blog_search_posts(
+    state: State<'_, AppStateHandle>,
+    query: String,
+) -> Result<Vec<BlogPostResponse>, String> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return blog_list_posts(state, None).await;
+    }
+
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+
+    // Fetch metadata columns + a boolean flag for content presence.
+    // Content is not returned in the list (it can be MBs); LIKE on the DB
+    // side is fast enough for moderate libraries.
+    let content_pat = format!("%{}%", q);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title, slug, excerpt, status, author, tags, \
+             seo_score, word_count, reading_time, created_at, updated_at, \
+             published_at, canonical_url, \
+             CASE WHEN LOWER(COALESCE(content,'')) LIKE ?1 THEN 1 ELSE 0 END \
+             FROM blog_posts",
+        )
+        .map_err(|e| e.to_string())?;
+
+    struct Row {
+        post: BlogPostResponse,
+        content_hit: bool,
+    }
+
+    let rows: Vec<Row> = stmt
+        .query_map(rusqlite::params![content_pat], |r| {
+            Ok(Row {
+                post: BlogPostResponse {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    slug: r.get(2)?,
+                    content: None,
+                    excerpt: r.get(3)?,
+                    status: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    author: r.get(5)?,
+                    tags: r.get(6)?,
+                    seo_score: r.get(7)?,
+                    word_count: r.get(8)?,
+                    reading_time: r.get(9)?,
+                    created_at: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                    updated_at: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                    published_at: r.get(12)?,
+                    canonical_url: r.get(13)?,
+                },
+                content_hit: r.get::<_, i32>(14)? != 0,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    const THRESHOLD: f64 = 0.68;
+
+    let mut scored: Vec<(f64, BlogPostResponse)> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let title_score = score_field(&q, &row.post.title);
+            let tag_score = row
+                .post
+                .tags
+                .as_deref()
+                .map(|t| score_field(&q, t))
+                .unwrap_or(0.0);
+            let author_score = row
+                .post
+                .author
+                .as_deref()
+                .map(|a| score_field(&q, a))
+                .unwrap_or(0.0);
+            let excerpt_score = row
+                .post
+                .excerpt
+                .as_deref()
+                .map(|e| score_field(&q, e))
+                .unwrap_or(0.0);
+            let content_score = if row.content_hit { 0.78 } else { 0.0 };
+
+            // Weighted: title matters most, content is a binary bonus
+            let score = title_score * 0.50
+                + tag_score * 0.20
+                + author_score * 0.10
+                + excerpt_score * 0.10
+                + content_score * 0.10;
+
+            if score >= THRESHOLD {
+                Some((score, row.post))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(scored.into_iter().map(|(_, p)| p).collect())
 }

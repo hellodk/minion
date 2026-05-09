@@ -3,6 +3,7 @@
 use minion_core::{Config, EventBus, TaskScheduler};
 use minion_db::Database;
 use minion_files::{DuplicateGroup, FileInfo};
+use rand::RngCore;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -86,6 +87,10 @@ pub struct AppState {
 
     /// Mutex flag to prevent concurrent Google Fit syncs
     pub gfit_sync_running: Arc<AtomicBool>,
+
+    /// AES-256-GCM key for encrypting blog platform API keys at rest.
+    /// Loaded from (or generated into) `data_dir/blog.key` on first run.
+    pub blog_enc_key: [u8; 32],
 }
 
 impl AppState {
@@ -112,6 +117,25 @@ impl AppState {
 
         let data_dir = config.data_dir.clone();
 
+        // Load or generate the blog API-key encryption key.
+        let blog_enc_key = {
+            let key_path = data_dir.join("blog.key");
+            if key_path.exists() {
+                let bytes = std::fs::read(&key_path)?;
+                if bytes.len() != 32 {
+                    return Err("blog.key is corrupt (expected 32 bytes)".into());
+                }
+                let mut k = [0u8; 32];
+                k.copy_from_slice(&bytes);
+                k
+            } else {
+                let mut k = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut k);
+                std::fs::write(&key_path, &k)?;
+                k
+            }
+        };
+
         Ok(Self {
             config,
             db,
@@ -122,6 +146,7 @@ impl AppState {
             scan_tasks: HashMap::new(),
             scan_cache: None,
             gfit_sync_running: Arc::new(AtomicBool::new(false)),
+            blog_enc_key,
         })
     }
 }

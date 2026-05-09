@@ -1,0 +1,14 @@
+[build]
+# Explicit so the count survives env differences (CI, containers, etc.)
+jobs = 20
+
+[target.x86_64-unknown-linux-gnu]
+# mold is 5-10× faster than the default GNU ld for large workspaces.
+# Install once: sudo apt-get install mold
+# Then uncomment the two lines below — no other change needed.
+#linker = "clang"
+#rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[env]
+# Prevent sccache / cargo cache confusion with split-debuginfo
+CARGO_INCREMENTAL = "1"

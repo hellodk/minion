@@ -251,6 +251,7 @@ pub fn run() {
             commands::blog_delete_post,
             commands::blog_analyze_seo,
             commands::blog_generate_slug,
+            commands::blog_search_posts,
             // Blog v2 — import + tags + assets
             blog_import::blog_import_files,
             blog_import::blog_import_folder,

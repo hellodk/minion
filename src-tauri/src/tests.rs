@@ -41,6 +41,7 @@ mod tests {
             scan_tasks: HashMap::new(),
             scan_cache: None,
             gfit_sync_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            blog_enc_key: [0u8; 32],
         })))
     }
 
