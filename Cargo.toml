@@ -21,7 +21,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.11.31"
+version = "1.11.32"
 authors = ["Deepak Gupta <hello.dk@outlook.com>"]
 edition = "2021"
 rust-version = "1.75"
@@ -125,6 +125,20 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 1
+# Line tables only — halves incremental/ artifact size with no debugging impact
+debug = 1
+# Avoids re-merging DWARF sections on every link (Linux speedup)
+split-debuginfo = "unpacked"
 
 [profile.dev.package."*"]
+# All non-workspace deps compile at full optimisation so the app stays usable
 opt-level = 3
+
+# Fast local build: between dev (slow) and release (very slow to compile).
+# Run with: cargo build --profile fast
+[profile.fast]
+inherits = "release"
+lto = "thin"       # ~2-3x faster than fat LTO, marginal size increase
+codegen-units = 4  # parallelism; smaller binary than dev, faster than release
+strip = false      # keep symbols for crash reports
+debug = 1
