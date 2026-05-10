@@ -6613,6 +6613,7 @@ pub async fn blog_create_post(
     title: String,
     content: String,
     author: Option<String>,
+    excerpt: Option<String>,
     canonical_url: Option<String>,
 ) -> Result<BlogPostResponse, String> {
     let st = state.read().await;
@@ -6624,12 +6625,13 @@ pub async fn blog_create_post(
     let rt = minion_blog::posts::calculate_reading_time(&content) as i32;
     let now = Utc::now().to_rfc3339();
     let canonical = canonical_url.filter(|u| !u.is_empty());
+    let exc = excerpt.filter(|e| !e.is_empty());
 
     conn.execute(
-        "INSERT INTO blog_posts (id, title, slug, content, status, author, \
+        "INSERT INTO blog_posts (id, title, slug, content, excerpt, status, author, \
          word_count, reading_time, canonical_url, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'draft', ?5, ?6, ?7, ?8, ?9, ?9)",
-        rusqlite::params![id, title, slug, content, author, wc, rt, canonical, now],
+         VALUES (?1, ?2, ?3, ?4, ?5, 'draft', ?6, ?7, ?8, ?9, ?10, ?10)",
+        rusqlite::params![id, title, slug, content, exc, author, wc, rt, canonical, now],
     )
     .map_err(|e| e.to_string())?;
 
@@ -6638,7 +6640,7 @@ pub async fn blog_create_post(
         title,
         slug,
         content: Some(content),
-        excerpt: None,
+        excerpt: exc,
         status: "draft".to_string(),
         author,
         tags: None,
@@ -6753,6 +6755,8 @@ pub async fn blog_update_post(
     content: Option<String>,
     status: Option<String>,
     tags: Option<String>,
+    author: Option<String>,
+    excerpt: Option<String>,
     canonical_url: Option<String>,
 ) -> Result<(), String> {
     const VALID_STATUSES: &[&str] = &["draft", "review", "published", "archived"];
@@ -6832,6 +6836,7 @@ pub async fn blog_update_post(
         .map_err(|e| e.to_string())?;
     }
 
+    // canonical_url: always update when caller sends a value (even empty = clear)
     if let Some(url_value) = canonical_url {
         let url: Option<String> = if url_value.is_empty() {
             None
@@ -6841,6 +6846,32 @@ pub async fn blog_update_post(
         tx.execute(
             "UPDATE blog_posts SET canonical_url = ?1, updated_at = ?2 WHERE id = ?3",
             rusqlite::params![url, now, post_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    if let Some(author_value) = author {
+        let a: Option<String> = if author_value.is_empty() {
+            None
+        } else {
+            Some(author_value)
+        };
+        tx.execute(
+            "UPDATE blog_posts SET author = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![a, now, post_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    if let Some(excerpt_value) = excerpt {
+        let e: Option<String> = if excerpt_value.is_empty() {
+            None
+        } else {
+            Some(excerpt_value)
+        };
+        tx.execute(
+            "UPDATE blog_posts SET excerpt = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![e, now, post_id],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -6945,13 +6976,15 @@ pub async fn blog_search_posts(
     // Fetch metadata columns + a boolean flag for content presence.
     // Content is not returned in the list (it can be MBs); LIKE on the DB
     // side is fast enough for moderate libraries.
-    let content_pat = format!("%{}%", q);
+    // Escape % and _ so user input is treated as literals, not LIKE wildcards.
+    let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let content_pat = format!("%{}%", escaped);
     let mut stmt = conn
         .prepare(
             "SELECT id, title, slug, excerpt, status, author, tags, \
              seo_score, word_count, reading_time, created_at, updated_at, \
              published_at, canonical_url, \
-             CASE WHEN LOWER(COALESCE(content,'')) LIKE ?1 THEN 1 ELSE 0 END \
+             CASE WHEN LOWER(COALESCE(content,'')) LIKE ?1 ESCAPE '\\' THEN 1 ELSE 0 END \
              FROM blog_posts",
         )
         .map_err(|e| e.to_string())?;
@@ -6988,7 +7021,7 @@ pub async fn blog_search_posts(
         .filter_map(|r| r.ok())
         .collect();
 
-    const THRESHOLD: f64 = 0.68;
+    const THRESHOLD: f64 = 0.30;
 
     let mut scored: Vec<(f64, BlogPostResponse)> = rows
         .into_iter()

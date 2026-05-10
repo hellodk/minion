@@ -94,6 +94,10 @@ const Blog: Component = () => {
   const [searching, setSearching] = createSignal(false);
   let searchDebounce: ReturnType<typeof setTimeout> | undefined;
 
+  // Sort
+  type SortKey = 'updated_desc' | 'updated_asc' | 'created_desc' | 'created_asc' | 'published_desc' | 'title_asc';
+  const [sortBy, setSortBy] = createSignal<SortKey>('updated_desc');
+
   // Editor state
   const [editingId, setEditingId] = createSignal<string | null>(null);
   const [edTitle, setEdTitle] = createSignal('');
@@ -101,6 +105,7 @@ const Blog: Component = () => {
   const [edStatus, setEdStatus] = createSignal('draft');
   const [edTags, setEdTags] = createSignal('');
   const [edAuthor, setEdAuthor] = createSignal('');
+  const [edExcerpt, setEdExcerpt] = createSignal('');
   const [edCanonicalUrl, setEdCanonicalUrl] = createSignal('');
   const [edSeoResult, setEdSeoResult] = createSignal<SeoAnalysis | null>(null);
   const [saving, setSaving] = createSignal(false);
@@ -221,7 +226,29 @@ const Blog: Component = () => {
     if (searchDebounce) clearTimeout(searchDebounce);
   };
 
-  const visiblePosts = () => searchResults() ?? posts();
+  const sortPosts = (list: BlogPost[]): BlogPost[] => {
+    const key = sortBy();
+    return [...list].sort((a, b) => {
+      switch (key) {
+        case 'updated_asc':  return (a.updated_at ?? '').localeCompare(b.updated_at ?? '');
+        case 'created_desc': return (b.created_at ?? '').localeCompare(a.created_at ?? '');
+        case 'created_asc':  return (a.created_at ?? '').localeCompare(b.created_at ?? '');
+        case 'published_desc': {
+          const pa = a.published_at ?? '';
+          const pb = b.published_at ?? '';
+          if (!pa && !pb) return 0;
+          if (!pa) return 1;
+          if (!pb) return -1;
+          return pb.localeCompare(pa);
+        }
+        case 'title_asc': return a.title.localeCompare(b.title);
+        default: return (b.updated_at ?? '').localeCompare(a.updated_at ?? ''); // updated_desc
+      }
+    });
+  };
+
+  // When searching, results are already ranked by relevance — don't re-sort.
+  const visiblePosts = createMemo(() => searchResults() ? searchResults()! : sortPosts(posts()));
 
   // ---------------------------------------------------------------------------
   // Editor actions
@@ -234,6 +261,7 @@ const Blog: Component = () => {
     setEdStatus('draft');
     setEdTags('');
     setEdAuthor('');
+    setEdExcerpt('');
     setEdCanonicalUrl('');
     setEdSeoResult(null);
     setTab('editor');
@@ -249,6 +277,7 @@ const Blog: Component = () => {
       setEdStatus(full.status);
       setEdTags(full.tags || '');
       setEdAuthor(full.author || '');
+      setEdExcerpt(full.excerpt || '');
       setEdCanonicalUrl(full.canonical_url || '');
       setEdSeoResult(null);
       setTab('editor');
@@ -262,19 +291,23 @@ const Blog: Component = () => {
     try {
       const id = editingId();
       if (id) {
+        // Always pass canonicalUrl (even empty string) so the backend can clear it.
         await invoke('blog_update_post', {
           postId: id,
           title: edTitle(),
           content: edContent(),
           status: edStatus(),
           tags: edTags() || null,
-          canonicalUrl: edCanonicalUrl() || null,
+          author: edAuthor(),
+          excerpt: edExcerpt(),
+          canonicalUrl: edCanonicalUrl(),
         });
       } else {
         const created = await invoke<BlogPost>('blog_create_post', {
           title: edTitle(),
           content: edContent(),
           author: edAuthor() || null,
+          excerpt: edExcerpt() || null,
           canonicalUrl: edCanonicalUrl() || null,
         });
         setEditingId(created.id);
@@ -284,6 +317,8 @@ const Blog: Component = () => {
             postId: created.id,
             status: edStatus(),
             tags: edTags() || null,
+            author: null,
+            excerpt: null,
             canonicalUrl: null,
           });
         }
@@ -318,7 +353,7 @@ const Blog: Component = () => {
         title: edTitle(),
         content: edContent(),
         keywords,
-        excerpt: null,
+        excerpt: edExcerpt() || null,
       });
       setEdSeoResult(result);
     } catch (e) {
@@ -458,30 +493,50 @@ const Blog: Component = () => {
                 </Show>
               </div>
 
-              {/* Status filters — hidden while searching */}
+              {/* Status filters + sort — hidden while searching */}
               <Show when={!searchQuery()}>
-                <div class="flex gap-2 mb-6">
-                  {[
-                    { label: 'All', value: null },
-                    { label: 'Draft', value: 'draft' },
-                    { label: 'Review', value: 'review' },
-                    { label: 'Published', value: 'published' },
-                  ].map((f) => (
-                    <button
-                      onClick={() => {
-                        setStatusFilter(f.value);
-                        loadPosts();
-                      }}
-                      class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
-                      classList={{
-                        'bg-sky-500 text-white': statusFilter() === f.value,
-                        'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700':
-                          statusFilter() !== f.value,
-                      }}
+                <div class="flex items-center justify-between gap-2 mb-6 flex-wrap">
+                  {/* Status filter pills */}
+                  <div class="flex gap-2 flex-wrap">
+                    {[
+                      { label: 'All', value: null },
+                      { label: 'Draft', value: 'draft' },
+                      { label: 'Review', value: 'review' },
+                      { label: 'Published', value: 'published' },
+                    ].map((f) => (
+                      <button
+                        onClick={() => {
+                          setStatusFilter(f.value);
+                          loadPosts();
+                        }}
+                        class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                        classList={{
+                          'bg-sky-500 text-white': statusFilter() === f.value,
+                          'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700':
+                            statusFilter() !== f.value,
+                        }}
+                      >
+                        {f.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Sort dropdown */}
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs text-gray-400 dark:text-gray-500">Sort:</span>
+                    <select
+                      value={sortBy()}
+                      onChange={(e) => setSortBy(e.currentTarget.value as SortKey)}
+                      class="text-xs rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-2.5 py-1.5 outline-none focus:border-sky-400 transition-colors cursor-pointer"
                     >
-                      {f.label}
-                    </button>
-                  ))}
+                      <option value="updated_desc">Last updated ↓</option>
+                      <option value="updated_asc">Last updated ↑</option>
+                      <option value="created_desc">Newest first</option>
+                      <option value="created_asc">Oldest first</option>
+                      <option value="published_desc">Published date ↓</option>
+                      <option value="title_asc">Title A → Z</option>
+                    </select>
+                  </div>
                 </div>
               </Show>
 
@@ -737,6 +792,27 @@ const Blog: Component = () => {
                     class="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-sm text-gray-800 dark:text-gray-200 outline-none focus:border-sky-300"
                   />
                   <p class="text-[10px] text-gray-400 mt-1">Comma-separated</p>
+                </div>
+
+                {/* Excerpt */}
+                <div>
+                  <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">Excerpt / Meta description</label>
+                  <textarea
+                    placeholder="50–160 char summary shown in search results"
+                    value={edExcerpt()}
+                    onInput={(e) => setEdExcerpt(e.currentTarget.value)}
+                    rows={3}
+                    class="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-sm text-gray-800 dark:text-gray-200 outline-none focus:border-sky-300 resize-none"
+                  />
+                  <p class="text-[10px] mt-1"
+                    classList={{
+                      'text-emerald-500': edExcerpt().length >= 50 && edExcerpt().length <= 160,
+                      'text-amber-400': edExcerpt().length > 0 && (edExcerpt().length < 50 || edExcerpt().length > 160),
+                      'text-gray-400': edExcerpt().length === 0,
+                    }}
+                  >
+                    {edExcerpt().length}/160 chars{edExcerpt().length >= 50 && edExcerpt().length <= 160 ? ' ✓' : ' (50–160 recommended)'}
+                  </p>
                 </div>
 
                 {/* Canonical URL */}
