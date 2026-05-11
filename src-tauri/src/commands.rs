@@ -6594,6 +6594,7 @@ pub struct BlogPostResponse {
     pub updated_at: String,
     pub published_at: Option<String>,
     pub canonical_url: Option<String>,
+    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -6651,6 +6652,7 @@ pub async fn blog_create_post(
         updated_at: now,
         published_at: None,
         canonical_url: canonical,
+        source_path: None,
     })
 }
 
@@ -6666,14 +6668,14 @@ pub async fn blog_list_posts(
         Some(s) => (
             "SELECT id, title, slug, NULL, excerpt, status, author, tags, \
              seo_score, word_count, reading_time, created_at, updated_at, published_at, \
-             canonical_url \
+             canonical_url, source_path \
              FROM blog_posts WHERE status = ?1 ORDER BY updated_at DESC",
             vec![Box::new(s.clone())],
         ),
         None => (
             "SELECT id, title, slug, NULL, excerpt, status, author, tags, \
              seo_score, word_count, reading_time, created_at, updated_at, published_at, \
-             canonical_url \
+             canonical_url, source_path \
              FROM blog_posts ORDER BY updated_at DESC",
             vec![],
         ),
@@ -6699,6 +6701,7 @@ pub async fn blog_list_posts(
                 updated_at: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
                 published_at: row.get(13)?,
                 canonical_url: row.get(14)?,
+                source_path: row.get(15)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -6721,7 +6724,7 @@ pub async fn blog_get_post(
     conn.query_row(
         "SELECT id, title, slug, content, excerpt, status, author, tags, \
          seo_score, word_count, reading_time, created_at, updated_at, published_at, \
-         canonical_url \
+         canonical_url, source_path \
          FROM blog_posts WHERE id = ?1",
         rusqlite::params![post_id],
         |row| {
@@ -6741,6 +6744,7 @@ pub async fn blog_get_post(
                 updated_at: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
                 published_at: row.get(13)?,
                 canonical_url: row.get(14)?,
+                source_path: row.get(15)?,
             })
         },
     )
@@ -6983,7 +6987,7 @@ pub async fn blog_search_posts(
         .prepare(
             "SELECT id, title, slug, excerpt, status, author, tags, \
              seo_score, word_count, reading_time, created_at, updated_at, \
-             published_at, canonical_url, \
+             published_at, canonical_url, source_path, \
              CASE WHEN LOWER(COALESCE(content,'')) LIKE ?1 ESCAPE '\\' THEN 1 ELSE 0 END \
              FROM blog_posts",
         )
@@ -7013,8 +7017,9 @@ pub async fn blog_search_posts(
                     updated_at: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
                     published_at: r.get(12)?,
                     canonical_url: r.get(13)?,
+                    source_path: r.get(14)?,
                 },
-                content_hit: r.get::<_, i32>(14)? != 0,
+                content_hit: r.get::<_, i32>(15)? != 0,
             })
         })
         .map_err(|e| e.to_string())?
@@ -7064,4 +7069,124 @@ pub async fn blog_search_posts(
 
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     Ok(scored.into_iter().map(|(_, p)| p).collect())
+}
+
+#[tauri::command]
+pub async fn blog_reveal_post_file(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("Path no longer exists: {}", p.display()));
+    }
+    let dir = if p.is_file() {
+        p.parent().unwrap_or(p)
+    } else {
+        p
+    };
+
+    #[cfg(target_os = "linux")]
+    { std::process::Command::new("xdg-open").arg(dir).spawn().map_err(|e| format!("xdg-open failed: {e}"))?; }
+
+    #[cfg(target_os = "macos")]
+    { std::process::Command::new("open").arg(dir).spawn().map_err(|e| format!("open failed: {e}"))?; }
+
+    #[cfg(target_os = "windows")]
+    { std::process::Command::new("explorer").arg(dir).spawn().map_err(|e| format!("explorer failed: {e}"))?; }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    return Err("Opening file location is not supported on this platform".to_string());
+
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SvgConvertResult {
+    pub content: String,
+    pub converted: usize,
+    pub errors: Vec<String>,
+}
+
+/// Convert all SVG images to PNG for platforms that don't support SVG.
+///
+/// Design decisions:
+/// - Accepts `content` directly (from the editor) so unsaved / new posts work.
+/// - When `post_id` is supplied the converted content is saved to the DB.
+/// - Converted PNGs are inserted into `blog_assets` so cleanup tools see them.
+/// - Rendering uses restricted `usvg::Options` (no external URL loading).
+/// - Position-based regex iteration: each match processed exactly once.
+/// - Failed conversions are reported in `errors`; the original text is kept.
+#[tauri::command]
+pub async fn blog_convert_post_svgs(
+    state: State<'_, AppStateHandle>,
+    app: tauri::AppHandle,
+    content: String,
+    post_id: Option<String>,
+    max_width: Option<u32>,
+) -> Result<SvgConvertResult, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
+    let vault = crate::blog_import::asset_vault_dir(&app_data);
+    std::fs::create_dir_all(&vault).map_err(|e| e.to_string())?;
+
+    let mw = max_width.unwrap_or(1200);
+
+    let (content, assets1, errs1) =
+        crate::blog_svg::replace_svg_refs(&content, &vault, Some(mw))?;
+    let (content, assets2, errs2) =
+        crate::blog_svg::replace_inline_svgs(&content, &vault, Some(mw))?;
+
+    let all_assets: Vec<_> = assets1.into_iter().chain(assets2).collect();
+    let all_errors: Vec<String> = errs1.into_iter().chain(errs2).collect();
+    let converted = all_assets.len();
+
+    // Register each converted PNG in blog_assets so cleanup tools track them.
+    if !all_assets.is_empty() {
+        let st = state.read().await;
+        let conn = st.db.get().map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for asset in &all_assets {
+            let stored = vault
+                .join(&asset.filename)
+                .to_string_lossy()
+                .into_owned();
+            let size = asset.png_data.len() as i64;
+            let asset_id = uuid::Uuid::new_v4().to_string();
+
+            // INSERT OR IGNORE so re-converting the same SVG is idempotent.
+            conn.execute(
+                "INSERT OR IGNORE INTO blog_assets \
+                 (id, sha256, stored_path, original_filename, mime_type, size_bytes, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, 'image/png', ?5, ?6)",
+                rusqlite::params![
+                    asset_id,
+                    asset.sha256_hex,
+                    stored,
+                    asset.filename,
+                    size,
+                    now,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        // Auto-save content to the post if a post_id was provided.
+        if let Some(ref pid) = post_id {
+            let wc = minion_blog::posts::word_count(&content) as i32;
+            let rt = minion_blog::posts::calculate_reading_time(&content) as i32;
+            conn.execute(
+                "UPDATE blog_posts SET content = ?1, word_count = ?2, \
+                 reading_time = ?3, updated_at = ?4 WHERE id = ?5",
+                rusqlite::params![content, wc, rt, now, pid],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(SvgConvertResult {
+        content,
+        converted,
+        errors: all_errors,
+    })
 }

@@ -8,6 +8,7 @@ mod blog_lint;
 mod blog_llm;
 mod blog_preview;
 mod blog_publish;
+mod blog_svg;
 mod calendar_integration;
 mod commands;
 mod health_analysis;
@@ -252,6 +253,8 @@ pub fn run() {
             commands::blog_analyze_seo,
             commands::blog_generate_slug,
             commands::blog_search_posts,
+            commands::blog_reveal_post_file,
+            commands::blog_convert_post_svgs,
             // Blog v2 — import + tags + assets
             blog_import::blog_import_files,
             blog_import::blog_import_folder,

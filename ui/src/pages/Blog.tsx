@@ -29,6 +29,7 @@ interface BlogPost {
   updated_at: string;
   published_at: string | null;
   canonical_url: string | null;
+  source_path: string | null;
 }
 
 interface SeoAnalysis {
@@ -107,8 +108,16 @@ const Blog: Component = () => {
   const [edAuthor, setEdAuthor] = createSignal('');
   const [edExcerpt, setEdExcerpt] = createSignal('');
   const [edCanonicalUrl, setEdCanonicalUrl] = createSignal('');
+  const [edSourcePath, setEdSourcePath] = createSignal<string | null>(null);
   const [edSeoResult, setEdSeoResult] = createSignal<SeoAnalysis | null>(null);
   const [saving, setSaving] = createSignal(false);
+  const [convertingSvg, setConvertingSvg] = createSignal(false);
+  const [svgConvertResult, setSvgConvertResult] = createSignal<{ content: string; converted: number; errors: string[] } | null>(null);
+
+  // Refs for SEO apply actions
+  let titleInputRef: HTMLInputElement | undefined;
+  let excerptTextareaRef: HTMLTextAreaElement | undefined;
+  let tagsInputRef: HTMLInputElement | undefined;
 
   // SEO tool state
   const [seoTitle, setSeoTitle] = createSignal('');
@@ -170,6 +179,38 @@ const Blog: Component = () => {
   // Derived
   const edWordCount = createMemo(() => wordCount(edContent()));
   const edReadingTime = createMemo(() => readingTime(edContent()));
+
+  // Map a suggestion string to an apply action.
+  type SeoApplyAction = 'add_heading' | 'focus_excerpt' | 'focus_title' | 'focus_tags';
+  const getSeoApplyAction = (suggestion: string): SeoApplyAction | null => {
+    const s = suggestion.toLowerCase();
+    if (s.includes('heading')) return 'add_heading';
+    if (s.includes('excerpt') || s.includes('meta description')) return 'focus_excerpt';
+    if (s.includes('title is too')) return 'focus_title';
+    if (s.includes('keyword')) return 'focus_tags';
+    return null;
+  };
+
+  const applySeoSuggestion = (action: SeoApplyAction) => {
+    switch (action) {
+      case 'add_heading':
+        setEdContent((c) => c.trimEnd() + '\n\n## Summary\n\n');
+        break;
+      case 'focus_excerpt':
+        excerptTextareaRef?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        excerptTextareaRef?.focus();
+        break;
+      case 'focus_title':
+        titleInputRef?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        titleInputRef?.focus();
+        break;
+      case 'focus_tags':
+        tagsInputRef?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        tagsInputRef?.focus();
+        break;
+    }
+  };
+
   const edSlug = createMemo(() => {
     const t = edTitle();
     return t
@@ -263,6 +304,7 @@ const Blog: Component = () => {
     setEdAuthor('');
     setEdExcerpt('');
     setEdCanonicalUrl('');
+    setEdSourcePath(null);
     setEdSeoResult(null);
     setTab('editor');
   };
@@ -279,6 +321,7 @@ const Blog: Component = () => {
       setEdAuthor(full.author || '');
       setEdExcerpt(full.excerpt || '');
       setEdCanonicalUrl(full.canonical_url || '');
+      setEdSourcePath(full.source_path ?? null);
       setEdSeoResult(null);
       setTab('editor');
     } catch (e) {
@@ -687,6 +730,7 @@ const Blog: Component = () => {
                 <div class={`flex flex-col p-6 overflow-y-auto ${viewMode() === 'split' ? 'w-1/2 border-r border-gray-200 dark:border-gray-700' : 'flex-1'}`}>
                 {/* Title */}
                 <input
+                  ref={titleInputRef}
                   type="text"
                   placeholder="Post title..."
                   value={edTitle()}
@@ -785,6 +829,7 @@ const Blog: Component = () => {
                 <div>
                   <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">Tags</label>
                   <input
+                    ref={tagsInputRef}
                     type="text"
                     placeholder="rust, programming, web"
                     value={edTags()}
@@ -798,6 +843,7 @@ const Blog: Component = () => {
                 <div>
                   <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">Excerpt / Meta description</label>
                   <textarea
+                    ref={excerptTextareaRef}
                     placeholder="50–160 char summary shown in search results"
                     value={edExcerpt()}
                     onInput={(e) => setEdExcerpt(e.currentTarget.value)}
@@ -864,31 +910,131 @@ const Blog: Component = () => {
                   >
                     Analyze SEO
                   </button>
+                  <Show when={edSourcePath()}>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await invoke('blog_reveal_post_file', { path: edSourcePath() });
+                        } catch (e) {
+                          console.error('Reveal failed:', e);
+                        }
+                      }}
+                      class="w-full px-4 py-2 rounded-lg text-sm font-medium text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex items-center justify-center gap-2"
+                      title={edSourcePath()!}
+                    >
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M3 7a2 2 0 012-2h4l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+                      </svg>
+                      Open File Location
+                    </button>
+                  </Show>
+
+                  {/* SVG → PNG conversion for LinkedIn / Medium */}
+                  <button
+                    onClick={async () => {
+                      setSvgConvertResult(null);
+                      setConvertingSvg(true);
+                      try {
+                        const r = await invoke<{ content: string; converted: number; errors: string[] }>(
+                          'blog_convert_post_svgs',
+                          {
+                            content: edContent(),
+                            postId: editingId() ?? null,
+                            maxWidth: 1200,
+                          },
+                        );
+                        setSvgConvertResult(r);
+                        if (r.converted > 0) {
+                          setEdContent(r.content);
+                          // Reload posts so updated word count appears in list
+                          await loadPosts();
+                        }
+                      } catch (e) {
+                        console.error('SVG convert failed:', e);
+                      } finally {
+                        setConvertingSvg(false);
+                      }
+                    }}
+                    disabled={convertingSvg() || !edContent().trim()}
+                    class="w-full px-4 py-2 rounded-lg text-sm font-medium text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-900/20 hover:bg-violet-100 dark:hover:bg-violet-900/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+                    title="Convert SVG images to PNG for LinkedIn, Medium, etc. PNG preserves full colour — GIF is limited to 256 colours and is unsuitable for SVG."
+                  >
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                    {convertingSvg() ? 'Converting…' : 'Convert SVGs → PNG'}
+                  </button>
+
+                  <Show when={svgConvertResult()}>
+                    <div class="rounded-lg px-3 py-2 text-[11px] space-y-1">
+                      <Show
+                        when={svgConvertResult()!.converted > 0}
+                        fallback={
+                          <span class="text-gray-500">No SVG images found in this post.</span>
+                        }
+                      >
+                        <p class="text-emerald-700 dark:text-emerald-300">
+                          {svgConvertResult()!.converted} SVG{svgConvertResult()!.converted !== 1 ? 's' : ''} converted to PNG
+                          {editingId() ? ' and saved.' : ' — save the post to persist.'}
+                        </p>
+                      </Show>
+                      <Show when={(svgConvertResult()!.errors?.length ?? 0) > 0}>
+                        <ul class="text-amber-600 dark:text-amber-400 space-y-0.5">
+                          <For each={svgConvertResult()!.errors}>
+                            {(err) => <li>⚠ {err}</li>}
+                          </For>
+                        </ul>
+                      </Show>
+                    </div>
+                  </Show>
                 </div>
 
-                {/* Inline SEO result */}
+                {/* Inline SEO result — with apply buttons */}
                 <Show when={edSeoResult()}>
                   <div class="bg-gray-50 dark:bg-gray-900 rounded-lg p-4">
                     <div class="flex items-center gap-2 mb-3">
                       <div
-                        class="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm"
+                        class="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm shrink-0"
                         style={{ background: scoreColor(edSeoResult()!.score) }}
                       >
                         {edSeoResult()!.score}
                       </div>
-                      <span class="text-xs text-gray-500">SEO Score</span>
+                      <div>
+                        <div class="text-xs font-medium text-gray-700 dark:text-gray-300">SEO Score</div>
+                        <div class="text-[10px] text-gray-400">
+                          {edSeoResult()!.score >= 80 ? 'Excellent' : edSeoResult()!.score >= 60 ? 'Good' : edSeoResult()!.score >= 40 ? 'Needs work' : 'Poor'}
+                        </div>
+                      </div>
                     </div>
                     <Show when={edSeoResult()!.suggestions.length > 0}>
-                      <ul class="space-y-1">
+                      <ul class="space-y-2">
                         <For each={edSeoResult()!.suggestions}>
-                          {(s) => (
-                            <li class="text-[11px] text-gray-500 dark:text-gray-400 flex items-start gap-1.5">
-                              <span class="text-amber-500 mt-0.5 shrink-0">!</span>
-                              {s}
-                            </li>
-                          )}
+                          {(s) => {
+                            const action = getSeoApplyAction(s);
+                            return (
+                              <li class="flex items-start gap-1.5">
+                                <span class="text-amber-500 mt-0.5 shrink-0 text-[11px]">!</span>
+                                <div class="flex-1 min-w-0">
+                                  <p class="text-[11px] text-gray-500 dark:text-gray-400">{s}</p>
+                                  <Show when={action}>
+                                    <button
+                                      onClick={() => applySeoSuggestion(action!)}
+                                      class="mt-1 text-[10px] font-medium text-sky-600 dark:text-sky-400 hover:underline"
+                                    >
+                                      Apply fix →
+                                    </button>
+                                  </Show>
+                                </div>
+                              </li>
+                            );
+                          }}
                         </For>
                       </ul>
+                    </Show>
+                    <Show when={edSeoResult()!.suggestions.length === 0}>
+                      <p class="text-[11px] text-emerald-600 dark:text-emerald-400">All checks passed!</p>
                     </Show>
                   </div>
                 </Show>

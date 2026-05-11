@@ -327,8 +327,9 @@ async fn insert_one_post(
 
     tx.execute(
         "INSERT INTO blog_posts (id, title, slug, content, excerpt, status,
-         author, word_count, reading_time, created_at, updated_at, published_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         author, word_count, reading_time, created_at, updated_at, published_at,
+         source_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         rusqlite::params![
             post_id,
             entry.title,
@@ -346,6 +347,7 @@ async fn insert_one_post(
             } else {
                 None
             },
+            entry.source_path,
         ],
     )
     .map_err(|e| e.to_string())?;
