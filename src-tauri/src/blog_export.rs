@@ -295,7 +295,7 @@ pub fn build_html(
 
         let src = &cap[1];
         match embed_asset(src, vault_dir, &mut svg_ids, &mut svg_counter, ext_cache) {
-            Embed::InlineSvgFirst { id, markup, alt } => {
+            Embed::InlineSvgFirst { id, markup, alt: _ } => {
                 // Add id= to the root <svg> element for <use> references.
                 let with_id = markup.replacen("<svg", &format!(r#"<svg id="{id}""#), 1);
                 // If the <svg> already has an id, the replacen inserts a second one —
@@ -425,38 +425,3 @@ pub fn build_html(
 }
 
 // ---------------------------------------------------------------------------
-// Filename sanitisation (#7)
-// ---------------------------------------------------------------------------
-
-/// Convert a post title to a safe ASCII filename slug.
-/// Non-ASCII chars are dropped (not blindly replaced with dashes),
-/// consecutive dashes are collapsed, and the result is capped at 80 chars.
-pub fn title_to_filename(title: &str) -> String {
-    let slug: String = title
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-
-    // Collapse consecutive dashes, strip leading/trailing
-    let mut prev_dash = true; // skip leading dashes
-    let clean: String = slug
-        .chars()
-        .filter(|&c| {
-            if c == '-' {
-                if prev_dash { return false; }
-                prev_dash = true;
-            } else {
-                prev_dash = false;
-            }
-            true
-        })
-        .collect();
-    let clean = clean.trim_end_matches('-');
-
-    if clean.is_empty() {
-        "post".to_owned()
-    } else {
-        format!("{}.html", &clean[..clean.len().min(80)])
-    }
-}
