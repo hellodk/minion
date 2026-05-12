@@ -90,10 +90,14 @@ hr { border: none; border-top: 1px solid #e5e5e5; margin: 2.5rem 0; }
   margin: 0 0.2rem 0.2rem 0;
   font-family: system-ui, sans-serif;
 }
+/* Mermaid diagram containers */
+.mermaid-wrap { margin: 1.5rem auto; text-align: center; overflow-x: auto; }
+.mermaid-wrap svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
 @media print {
   body { padding: 0; font-size: 16px; }
   h2 { border-bottom-color: #ccc; }
   pre { break-inside: avoid; }
+  .mermaid-wrap { break-inside: avoid; }
   /* Do NOT expand link URLs — creates cluttered output (#22) */
 }
 "#;
@@ -387,7 +391,68 @@ pub fn build_html(
         })
         .unwrap_or_default();
 
-    let print_script = if for_print {
+    // Detect Mermaid code blocks — pulldown-cmark emits
+    // `<code class="language-mermaid">` for fenced ```mermaid blocks.
+    let has_mermaid = embedded.contains("language-mermaid");
+
+    // Mermaid CDN script (loaded in <head> so it's ready at DOMContentLoaded).
+    // Mermaid v11 matches what the app uses. Diagrams fall back to code-text if
+    // the CDN is unreachable (e.g. fully offline).
+    let mermaid_cdn = if has_mermaid {
+        r#"<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>"#
+    } else {
+        ""
+    };
+
+    // Transform `<pre><code class="language-mermaid">` → `<div class="mermaid-wrap"><div class="mermaid">`
+    // and run Mermaid. For the print workflow, delay window.print() until rendering completes.
+    let mermaid_init = if has_mermaid && for_print {
+        r#"<script>
+document.addEventListener('DOMContentLoaded', function() {
+  var blocks = document.querySelectorAll('pre code.language-mermaid');
+  blocks.forEach(function(el) {
+    var wrap = document.createElement('div');
+    wrap.className = 'mermaid-wrap';
+    var d = document.createElement('div');
+    d.className = 'mermaid';
+    d.textContent = el.textContent || '';
+    wrap.appendChild(d);
+    (el.closest('pre') || el).replaceWith(wrap);
+  });
+  if (typeof mermaid !== 'undefined' && blocks.length > 0) {
+    mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+    var p = mermaid.run();
+    if (p && typeof p.then === 'function') {
+      p.then(function() { setTimeout(window.print, 600); })
+       .catch(function() { setTimeout(window.print, 350); });
+    } else {
+      setTimeout(window.print, 800);
+    }
+  } else {
+    setTimeout(window.print, 350);
+  }
+});
+</script>"#
+    } else if has_mermaid {
+        r#"<script>
+document.addEventListener('DOMContentLoaded', function() {
+  var blocks = document.querySelectorAll('pre code.language-mermaid');
+  blocks.forEach(function(el) {
+    var wrap = document.createElement('div');
+    wrap.className = 'mermaid-wrap';
+    var d = document.createElement('div');
+    d.className = 'mermaid';
+    d.textContent = el.textContent || '';
+    wrap.appendChild(d);
+    (el.closest('pre') || el).replaceWith(wrap);
+  });
+  if (typeof mermaid !== 'undefined' && blocks.length > 0) {
+    mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+    mermaid.run();
+  }
+});
+</script>"#
+    } else if for_print {
         r#"<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),350));</script>"#
     } else {
         ""
@@ -403,7 +468,8 @@ pub fn build_html(
 {desc_meta}
 <title>{title_esc}</title>
 <style>{css}</style>
-{print_script}
+{mermaid_cdn}
+{mermaid_init}
 </head>
 <body>
 <h1>{title_esc}</h1>
