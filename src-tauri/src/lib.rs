@@ -3,6 +3,7 @@
 //! Main entry point for the Tauri desktop application.
 
 mod blog_assets;
+mod blog_export;
 mod blog_import;
 mod blog_lint;
 mod blog_llm;
@@ -255,6 +256,8 @@ pub fn run() {
             commands::blog_search_posts,
             commands::blog_reveal_post_file,
             commands::blog_convert_post_svgs,
+            commands::blog_export_html,
+            commands::blog_open_print_preview,
             // Blog v2 — import + tags + assets
             blog_import::blog_import_files,
             blog_import::blog_import_folder,

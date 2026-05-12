@@ -6983,13 +6983,15 @@ pub async fn blog_search_posts(
     // Escape % and _ so user input is treated as literals, not LIKE wildcards.
     let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
     let content_pat = format!("%{}%", escaped);
+    // Cap at 200 rows to prevent full-table LOWER(content) scans on large
+    // libraries. FTS5 is the proper long-term solution (#14).
     let mut stmt = conn
         .prepare(
             "SELECT id, title, slug, excerpt, status, author, tags, \
              seo_score, word_count, reading_time, created_at, updated_at, \
              published_at, canonical_url, source_path, \
              CASE WHEN LOWER(COALESCE(content,'')) LIKE ?1 ESCAPE '\\' THEN 1 ELSE 0 END \
-             FROM blog_posts",
+             FROM blog_posts LIMIT 200",
         )
         .map_err(|e| e.to_string())?;
 
@@ -7023,8 +7025,9 @@ pub async fn blog_search_posts(
             })
         })
         .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
+        // Propagate row-level errors instead of silently dropping them (#12).
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
 
     const THRESHOLD: f64 = 0.30;
 
@@ -7131,10 +7134,22 @@ pub async fn blog_convert_post_svgs(
 
     let mw = max_width.unwrap_or(1200);
 
-    let (content, assets1, errs1) =
-        crate::blog_svg::replace_svg_refs(&content, &vault, Some(mw))?;
-    let (content, assets2, errs2) =
-        crate::blog_svg::replace_inline_svgs(&content, &vault, Some(mw))?;
+    // SVG rasterization is CPU-bound; spawn_blocking so the async runtime
+    // is not starved during multi-SVG conversions (#2).
+    let vault_clone = vault.clone();
+    let (content, assets1, errs1) = tokio::task::spawn_blocking(move || {
+        crate::blog_svg::replace_svg_refs(&content, &vault_clone, Some(mw))
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))??;
+
+    let vault_clone2 = vault.clone();
+    let content_clone = content.clone();
+    let (content, assets2, errs2) = tokio::task::spawn_blocking(move || {
+        crate::blog_svg::replace_inline_svgs(&content_clone, &vault_clone2, Some(mw))
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))??;
 
     let all_assets: Vec<_> = assets1.into_iter().chain(assets2).collect();
     let all_errors: Vec<String> = errs1.into_iter().chain(errs2).collect();
@@ -7189,4 +7204,172 @@ pub async fn blog_convert_post_svgs(
         converted,
         errors: all_errors,
     })
+}
+
+// ---------------------------------------------------------------------------
+// HTML / PDF export
+// ---------------------------------------------------------------------------
+
+/// Full post data for export — typed struct replaces positional tuple (#20 / #11).
+struct PostForExport {
+    title: String,
+    content: String,
+    author: Option<String>,
+    tags: Option<String>,
+    excerpt: Option<String>,
+    created_at: String,
+    published_at: Option<String>,
+    word_count: Option<i32>,
+    reading_time: Option<i32>,
+}
+
+/// Load all fields needed for export.  Includes published_at, excerpt,
+/// word_count, reading_time — previously missing (#11).
+fn load_post_for_export(
+    conn: &rusqlite::Connection,
+    post_id: &str,
+) -> Result<PostForExport, String> {
+    conn.query_row(
+        "SELECT title, COALESCE(content,''), author, tags, excerpt, \
+         created_at, published_at, word_count, reading_time \
+         FROM blog_posts WHERE id = ?1",
+        rusqlite::params![post_id],
+        |r| {
+            Ok(PostForExport {
+                title:        r.get(0)?,
+                content:      r.get(1)?,
+                author:       r.get(2)?,
+                tags:         r.get(3)?,
+                excerpt:      r.get(4)?,
+                created_at:   r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                published_at: r.get(6)?,
+                word_count:   r.get(7)?,
+                reading_time: r.get(8)?,
+            })
+        },
+    )
+    .map_err(|e| format!("Post not found: {e}"))
+}
+
+/// Build PostMeta from a PostForExport, optionally overriding the content.
+fn make_meta(p: &PostForExport) -> crate::blog_export::PostMeta {
+    crate::blog_export::PostMeta {
+        title:        p.title.clone(),
+        author:       p.author.clone(),
+        tags:         p.tags.clone(),
+        excerpt:      p.excerpt.clone(),
+        created_at:   p.created_at.clone(),
+        published_at: p.published_at.clone(),
+        word_count:   p.word_count,
+        reading_time: p.reading_time,
+    }
+}
+
+/// Export a blog post as a fully self-contained HTML file.
+///
+/// Changes vs v1:
+/// - `output_path` is now required — no longer returns multi-MB HTML through IPC (#1).
+/// - `content_override` lets the frontend pass unsaved editor content (#4).
+/// - `build_html` runs in spawn_blocking (CPU + file I/O off async thread) (#2).
+/// - Typed return — no more serde_json::Value (#20).
+/// - Filename sanitisation handles Unicode and consecutive dashes (#7).
+#[tauri::command]
+pub async fn blog_export_html(
+    state: State<'_, AppStateHandle>,
+    app: tauri::AppHandle,
+    post_id: String,
+    output_path: String,
+    content_override: Option<String>,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let mut post = load_post_for_export(&conn, &post_id)?;
+    drop(conn);
+    drop(st);
+
+    // Use the live editor content if the caller supplied it (#4).
+    if let Some(ov) = content_override {
+        post.content = ov;
+    }
+
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let vault = crate::blog_import::asset_vault_dir(&app_data);
+    let meta = make_meta(&post);
+
+    // CPU-bound rendering off the async thread (#2).
+    let html = tokio::task::spawn_blocking(move || {
+        crate::blog_export::build_html(&meta, &post.content, &vault, false)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))??;
+
+    std::fs::write(&output_path, html.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Open the blog post in the system browser as a self-contained HTML page
+/// with an auto-print trigger, allowing the user to save as PDF via the
+/// OS print dialog.
+///
+/// Changes vs v1:
+/// - Old temp files (minion_blog_print_*.html) are deleted on each call (#5).
+/// - UUID-based filename prevents second-precision collisions (#10).
+/// - `content_override` lets the frontend pass unsaved editor content (#4).
+/// - `build_html` runs in spawn_blocking (#2).
+#[tauri::command]
+pub async fn blog_open_print_preview(
+    state: State<'_, AppStateHandle>,
+    app: tauri::AppHandle,
+    post_id: String,
+    content_override: Option<String>,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let mut post = load_post_for_export(&conn, &post_id)?;
+    drop(conn);
+    drop(st);
+
+    if let Some(ov) = content_override {
+        post.content = ov;
+    }
+
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let vault = crate::blog_import::asset_vault_dir(&app_data);
+    let meta = make_meta(&post);
+
+    let html = tokio::task::spawn_blocking(move || {
+        crate::blog_export::build_html(&meta, &post.content, &vault, true)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))??;
+
+    // Delete stale temp files from previous sessions (#5).
+    let tmp_dir = std::env::temp_dir();
+    if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let n = name.to_string_lossy();
+            if n.starts_with("minion_blog_print_") && n.ends_with(".html") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    // UUID ensures no collision even on sub-second rapid calls (#10).
+    let uid = uuid::Uuid::new_v4().simple().to_string();
+    let tmp_path = tmp_dir.join(format!("minion_blog_print_{uid}.html"));
+    std::fs::write(&tmp_path, html.as_bytes()).map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "linux")]
+    { std::process::Command::new("xdg-open").arg(&tmp_path).spawn().map_err(|e| format!("xdg-open failed: {e}"))?; }
+
+    #[cfg(target_os = "macos")]
+    { std::process::Command::new("open").arg(&tmp_path).spawn().map_err(|e| format!("open failed: {e}"))?; }
+
+    #[cfg(target_os = "windows")]
+    { std::process::Command::new("cmd").args(["/C", "start", "", &tmp_path.to_string_lossy()]).spawn().map_err(|e| format!("start failed: {e}"))?; }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    return Err("Opening the browser is not supported on this platform".to_string());
+
+    Ok(())
 }

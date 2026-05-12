@@ -79,6 +79,17 @@ function readingTime(text: string): number {
   return Math.max(1, Math.ceil(wc / 200));
 }
 
+// Mirrors Rust title_to_filename() — used client-side to avoid a round-trip (#1)
+function titleToFilename(title: string): string {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80);
+  return (slug || 'post') + '.html';
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -113,6 +124,10 @@ const Blog: Component = () => {
   const [saving, setSaving] = createSignal(false);
   const [convertingSvg, setConvertingSvg] = createSignal(false);
   const [svgConvertResult, setSvgConvertResult] = createSignal<{ content: string; converted: number; errors: string[] } | null>(null);
+  // Export state (#8 #18)
+  const [exportingHtml, setExportingHtml] = createSignal(false);
+  const [exportingPdf, setExportingPdf] = createSignal(false);
+  const [exportError, setExportError] = createSignal<string | null>(null);
 
   // Refs for SEO apply actions
   let titleInputRef: HTMLInputElement | undefined;
@@ -987,6 +1002,86 @@ const Blog: Component = () => {
                           </For>
                         </ul>
                       </Show>
+                    </div>
+                  </Show>
+
+                  {/* ── Export ─────────────────────────────────── */}
+                  <Show when={editingId()}>
+                    <div class="border-t border-gray-100 dark:border-gray-700 pt-3 mt-1">
+                      <p class="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-2">Export</p>
+                      <div class="flex gap-2">
+                        {/* Save as HTML — single invoke, filename computed client-side (#1) */}
+                        <button
+                          disabled={exportingHtml()}
+                          onClick={async () => {
+                            setExportError(null);
+                            setExportingHtml(true);
+                            try {
+                              const { save } = await import('@tauri-apps/plugin-dialog');
+                              const savePath = await save({
+                                defaultPath: titleToFilename(edTitle()),
+                                filters: [{ name: 'HTML', extensions: ['html'] }],
+                              });
+                              if (savePath) {
+                                // Pass current editor content so unsaved changes are captured (#4)
+                                await invoke('blog_export_html', {
+                                  postId: editingId(),
+                                  outputPath: savePath,
+                                  contentOverride: edContent(),
+                                });
+                              }
+                            } catch (e) {
+                              setExportError(String(e));
+                            } finally {
+                              setExportingHtml(false);
+                            }
+                          }}
+                          class="flex-1 px-3 py-2 rounded-lg text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-1.5"
+                          title="Save as a fully self-contained HTML file. SVG animations and animated GIFs are preserved."
+                        >
+                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+                          </svg>
+                          {exportingHtml() ? '…' : 'HTML'}
+                        </button>
+
+                        {/* Open print preview → PDF. Passes live content (#4). */}
+                        <button
+                          disabled={exportingPdf()}
+                          onClick={async () => {
+                            setExportError(null);
+                            setExportingPdf(true);
+                            try {
+                              await invoke('blog_open_print_preview', {
+                                postId: editingId(),
+                                contentOverride: edContent(),
+                              });
+                            } catch (e) {
+                              setExportError(String(e));
+                            } finally {
+                              setExportingPdf(false);
+                            }
+                          }}
+                          class="flex-1 px-3 py-2 rounded-lg text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-1.5"
+                          title="Open in browser print dialog — choose 'Save as PDF'. Note: animations become static in PDF."
+                        >
+                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
+                          </svg>
+                          {exportingPdf() ? '…' : 'PDF'}
+                        </button>
+                      </div>
+
+                      {/* Error display (#8) */}
+                      <Show when={exportError()}>
+                        <p class="text-[10px] text-red-500 dark:text-red-400 mt-1.5 break-words">{exportError()}</p>
+                      </Show>
+
+                      <p class="text-[9px] text-gray-400 mt-1.5 leading-tight">
+                        HTML: SVG/GIF animations preserved · PDF: opens browser print dialog (animations static)
+                      </p>
                     </div>
                   </Show>
                 </div>

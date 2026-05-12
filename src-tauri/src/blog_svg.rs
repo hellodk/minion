@@ -59,9 +59,10 @@ pub fn replace_svg_refs(
     vault_dir: &Path,
     max_width: Option<u32>,
 ) -> Result<(String, Vec<ConvertedAsset>, Vec<String>), String> {
-    // Capture group 2 uses [^\(\)]*  to allow parentheses in path components,
-    // then anchors on `.svg)` at the end.
-    let re = regex::Regex::new(r"!\[([^\]]*)\]\(([^)]*?\.svg)\)")
+    // [^"<>\s]*? matches path chars including '(' and ')' so paths like
+    // assets/(old)/diagram.svg are handled correctly (#13).
+    // The non-greedy *? ensures we stop at the first .svg boundary.
+    let re = regex::Regex::new(r#"!\[([^\]]*)\]\(([^"<>\s]*?\.svg)\)"#)
         .map_err(|e| e.to_string())?;
 
     let mut out = String::new();
