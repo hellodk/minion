@@ -18,12 +18,24 @@ pub struct ConvertedAsset {
 /// Rasterize raw SVG bytes to PNG bytes.
 /// `max_width` scales proportionally; `None` uses the SVG's native size.
 pub fn rasterize_to_png(svg_data: &[u8], max_width: Option<u32>) -> Result<Vec<u8>, String> {
-    // Restrict resource loading: no external URLs, no local file:// references.
+    // Restrict external resource loading (security), but load system fonts
+    // so text elements render correctly instead of being invisible.
     let mut opts = resvg::usvg::Options::default();
-    opts.resources_dir = None; // disable relative-path resource loading
-    // resvg uses only bundled fonts by default; external @font-face URLs are ignored.
+    opts.resources_dir = None;
 
-    let tree = resvg::usvg::Tree::from_data(svg_data, &opts)
+    // SVGs that use `currentColor` (very common in diagram generators like
+    // Mermaid) need an explicit colour context — resvg defaults to black which
+    // makes multi-colour diagrams render as monochrome.  We pre-process the SVG
+    // to replace `currentColor` with `#333333` so the rasterised PNG retains
+    // the visual intent of the original diagram.
+    let svg_str = std::str::from_utf8(svg_data).unwrap_or_default();
+    let patched: std::borrow::Cow<str> = if svg_str.contains("currentColor") {
+        svg_str.replace("currentColor", "#333333").into()
+    } else {
+        svg_str.into()
+    };
+
+    let tree = resvg::usvg::Tree::from_data(patched.as_bytes(), &opts)
         .map_err(|e| format!("SVG parse error: {e}"))?;
 
     let native = tree.size().to_int_size();

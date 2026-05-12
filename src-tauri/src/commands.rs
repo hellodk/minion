@@ -7265,14 +7265,54 @@ fn make_meta(p: &PostForExport) -> crate::blog_export::PostMeta {
     }
 }
 
+/// Download all external image URLs found in the markdown content.
+/// Returns a map of url → bytes.  Failures are silently skipped.
+async fn fetch_external_images(content_md: &str) -> std::collections::HashMap<String, Vec<u8>> {
+    use std::collections::{HashMap, HashSet};
+
+    // Match http(s) image URLs in both markdown and raw HTML img tags.
+    let re = regex::Regex::new(
+        r#"(?:!\[[^\]]*\]\(|src=")(https?://[^\s")<>]+)"#
+    ).unwrap();
+
+    let urls: Vec<String> = re.captures_iter(content_md)
+        .filter_map(|c| c.get(1))
+        .map(|m| m.as_str().to_owned())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    if urls.is_empty() {
+        return HashMap::new();
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .user_agent("Mozilla/5.0 (compatible; Minion-BlogExport/1.0)")
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut out = HashMap::new();
+    for url in urls {
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().is_success() {
+                if let Ok(bytes) = resp.bytes().await {
+                    out.insert(url, bytes.to_vec());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Export a blog post as a fully self-contained HTML file.
 ///
-/// Changes vs v1:
-/// - `output_path` is now required — no longer returns multi-MB HTML through IPC (#1).
-/// - `content_override` lets the frontend pass unsaved editor content (#4).
-/// - `build_html` runs in spawn_blocking (CPU + file I/O off async thread) (#2).
-/// - Typed return — no more serde_json::Value (#20).
-/// - Filename sanitisation handles Unicode and consecutive dashes (#7).
+/// External images (http/https) are downloaded and embedded as data URIs
+/// so the file is portable without internet access.
+/// `content_override` captures unsaved editor changes.
 #[tauri::command]
 pub async fn blog_export_html(
     state: State<'_, AppStateHandle>,
@@ -7287,18 +7327,19 @@ pub async fn blog_export_html(
     drop(conn);
     drop(st);
 
-    // Use the live editor content if the caller supplied it (#4).
     if let Some(ov) = content_override {
         post.content = ov;
     }
+
+    // Download external images async before entering spawn_blocking.
+    let ext_cache = fetch_external_images(&post.content).await;
 
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let vault = crate::blog_import::asset_vault_dir(&app_data);
     let meta = make_meta(&post);
 
-    // CPU-bound rendering off the async thread (#2).
     let html = tokio::task::spawn_blocking(move || {
-        crate::blog_export::build_html(&meta, &post.content, &vault, false)
+        crate::blog_export::build_html(&meta, &post.content, &vault, false, &ext_cache)
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))??;
@@ -7306,15 +7347,12 @@ pub async fn blog_export_html(
     std::fs::write(&output_path, html.as_bytes()).map_err(|e| e.to_string())
 }
 
-/// Open the blog post in the system browser as a self-contained HTML page
-/// with an auto-print trigger, allowing the user to save as PDF via the
-/// OS print dialog.
+/// Open the blog post for print-to-PDF via Tauri's own WebviewWindow.
 ///
-/// Changes vs v1:
-/// - Old temp files (minion_blog_print_*.html) are deleted on each call (#5).
-/// - UUID-based filename prevents second-precision collisions (#10).
-/// - `content_override` lets the frontend pass unsaved editor content (#4).
-/// - `build_html` runs in spawn_blocking (#2).
+/// Uses `WebviewUrl::File` so the embedded renderer (WebKit/WebView2) opens
+/// the HTML — not xdg-open, which may open a text editor on some systems.
+/// The HTML contains `window.print()` which fires the OS print dialog.
+/// User selects "Save as PDF" in the dialog.
 #[tauri::command]
 pub async fn blog_open_print_preview(
     state: State<'_, AppStateHandle>,
@@ -7332,44 +7370,59 @@ pub async fn blog_open_print_preview(
         post.content = ov;
     }
 
+    // Download external images so the print preview is also self-contained.
+    let ext_cache = fetch_external_images(&post.content).await;
+
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let vault = crate::blog_import::asset_vault_dir(&app_data);
     let meta = make_meta(&post);
+    let title = post.title.clone();
 
     let html = tokio::task::spawn_blocking(move || {
-        crate::blog_export::build_html(&meta, &post.content, &vault, true)
+        crate::blog_export::build_html(&meta, &post.content, &vault, true, &ext_cache)
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))??;
 
-    // Delete stale temp files from previous sessions (#5).
+    // Clean up stale print temp files.
     let tmp_dir = std::env::temp_dir();
     if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
         for entry in entries.flatten() {
-            let name = entry.file_name();
-            let n = name.to_string_lossy();
-            if n.starts_with("minion_blog_print_") && n.ends_with(".html") {
+            let n = entry.file_name();
+            let ns = n.to_string_lossy();
+            if ns.starts_with("minion_blog_print_") && ns.ends_with(".html") {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
     }
 
-    // UUID ensures no collision even on sub-second rapid calls (#10).
     let uid = uuid::Uuid::new_v4().simple().to_string();
     let tmp_path = tmp_dir.join(format!("minion_blog_print_{uid}.html"));
     std::fs::write(&tmp_path, html.as_bytes()).map_err(|e| e.to_string())?;
 
-    #[cfg(target_os = "linux")]
-    { std::process::Command::new("xdg-open").arg(&tmp_path).spawn().map_err(|e| format!("xdg-open failed: {e}"))?; }
+    // Open in Tauri's own WebviewWindow — guaranteed to be a browser renderer
+    // (WebKit on Linux/macOS, WebView2 on Windows), unlike xdg-open which may
+    // open a text editor or file manager.
+    // Strategy: create window with App URL (loads fast), then immediately
+    // navigate to the file:// temp path. The window.print() fires after 350 ms.
+    let label = format!("print-{}", &uid[..8]);
+    let file_url = url::Url::from_file_path(&tmp_path)
+        .map_err(|_| format!("Cannot build file:// URL for {}", tmp_path.display()))?;
 
-    #[cfg(target_os = "macos")]
-    { std::process::Command::new("open").arg(&tmp_path).spawn().map_err(|e| format!("open failed: {e}"))?; }
+    let win = tauri::WebviewWindowBuilder::new(
+        &app,
+        label,
+        tauri::WebviewUrl::App(std::path::PathBuf::from("index.html")),
+    )
+    .title(format!("Print: {title}"))
+    .inner_size(900.0, 750.0)
+    .focused(true)
+    .build()
+    .map_err(|e| format!("Failed to open print window: {e}"))?;
 
-    #[cfg(target_os = "windows")]
-    { std::process::Command::new("cmd").args(["/C", "start", "", &tmp_path.to_string_lossy()]).spawn().map_err(|e| format!("start failed: {e}"))?; }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    return Err("Opening the browser is not supported on this platform".to_string());
+    // Navigate to the self-contained print HTML immediately after creation.
+    win.navigate(file_url)
+        .map_err(|e| format!("Navigate failed: {e}"))?;
 
     Ok(())
 }

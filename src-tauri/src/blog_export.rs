@@ -147,12 +147,42 @@ enum Embed {
     Passthrough,
 }
 
+/// Build a DataUri Embed from raw bytes, guessing mime from the URL extension.
+fn make_data_uri_embed(src: &str, data: &[u8]) -> Embed {
+    let ext = src.rsplit('.').next().unwrap_or("").split('?').next().unwrap_or("").to_lowercase();
+    let mime = match ext.as_str() {
+        "png"        => "image/png",
+        "jpg"|"jpeg" => "image/jpeg",
+        "gif"        => "image/gif",
+        "webp"       => "image/webp",
+        "svg"        => "image/svg+xml",
+        "avif"       => "image/avif",
+        _            => "image/png",  // safe fallback
+    };
+    Embed::DataUri(format!("data:{mime};base64,{}", B64.encode(data)))
+}
+
+/// Returns true for http:// and https:// URLs.
+fn is_external(src: &str) -> bool {
+    src.starts_with("http://") || src.starts_with("https://")
+}
+
 fn embed_asset(
     src: &str,
     vault_dir: &Path,
     svg_ids: &mut HashMap<String, String>,
     svg_counter: &mut u32,
+    ext_cache: &HashMap<String, Vec<u8>>,
 ) -> Embed {
+    // External URLs: use pre-downloaded bytes if available, else Passthrough
+    // (the URL stays in the HTML and browsers will load it if online).
+    if is_external(src) {
+        return match ext_cache.get(src) {
+            Some(data) => make_data_uri_embed(src, data),
+            None => Embed::Passthrough,
+        };
+    }
+
     let filename = Path::new(src)
         .file_name()
         .and_then(|n| n.to_str())
@@ -231,13 +261,14 @@ pub struct PostMeta {
 /// Build a fully self-contained HTML string from a blog post.
 ///
 /// `for_print` injects `window.print()` on load (PDF workflow).
-/// This function does synchronous file I/O and CPU work — wrap in
-/// `tokio::task::spawn_blocking` when calling from async context (#2).
+/// `ext_cache` holds pre-downloaded external image bytes (url → bytes).
+/// This function does synchronous file I/O — wrap in `spawn_blocking`.
 pub fn build_html(
     meta: &PostMeta,
     content_md: &str,
     vault_dir: &Path,
     for_print: bool,
+    ext_cache: &HashMap<String, Vec<u8>>,
 ) -> Result<String, String> {
     let opts = Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
@@ -263,7 +294,7 @@ pub fn build_html(
         embedded.push_str(&body_html[last..m.start()]);
 
         let src = &cap[1];
-        match embed_asset(src, vault_dir, &mut svg_ids, &mut svg_counter) {
+        match embed_asset(src, vault_dir, &mut svg_ids, &mut svg_counter, ext_cache) {
             Embed::InlineSvgFirst { id, markup, alt } => {
                 // Add id= to the root <svg> element for <use> references.
                 let with_id = markup.replacen("<svg", &format!(r#"<svg id="{id}""#), 1);
