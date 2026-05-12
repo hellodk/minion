@@ -6974,24 +6974,47 @@ pub async fn blog_search_posts(
         return blog_list_posts(state, None).await;
     }
 
+    // Build FTS5 prefix query before touching state.
+    let fts_terms: Vec<String> = q
+        .split_whitespace()
+        .filter_map(|w| {
+            let clean: String = w
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-')
+                .collect();
+            if clean.len() >= 2 {
+                Some(format!("\"{}\"*", clean))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if fts_terms.is_empty() {
+        return blog_list_posts(state, None).await;
+    }
+    let fts_query = fts_terms.join(" OR ");
+
     let st = state.read().await;
     let conn = st.db.get().map_err(|e| e.to_string())?;
 
-    // Fetch metadata columns + a boolean flag for content presence.
-    // Content is not returned in the list (it can be MBs); LIKE on the DB
-    // side is fast enough for moderate libraries.
-    // Escape % and _ so user input is treated as literals, not LIKE wildcards.
+    // Fetch candidates via FTS5 joined to full post metadata.
+    // The CASE expression checks whether the *body* column specifically matched
+    // (title/tags/author/excerpt are available for Jaro-Winkler; body match is
+    // treated as a binary bonus just like the old LIKE approach).
     let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
     let content_pat = format!("%{}%", escaped);
-    // Cap at 200 rows to prevent full-table LOWER(content) scans on large
-    // libraries. FTS5 is the proper long-term solution (#14).
+
     let mut stmt = conn
         .prepare(
-            "SELECT id, title, slug, excerpt, status, author, tags, \
-             seo_score, word_count, reading_time, created_at, updated_at, \
-             published_at, canonical_url, source_path, \
-             CASE WHEN LOWER(COALESCE(content,'')) LIKE ?1 ESCAPE '\\' THEN 1 ELSE 0 END \
-             FROM blog_posts LIMIT 200",
+            "SELECT p.id, p.title, p.slug, p.excerpt, p.status, p.author, p.tags, \
+             p.seo_score, p.word_count, p.reading_time, p.created_at, p.updated_at, \
+             p.published_at, p.canonical_url, p.source_path, \
+             CASE WHEN LOWER(COALESCE(f.body,'')) LIKE ?2 ESCAPE '\\' THEN 1 ELSE 0 END \
+             FROM blog_fts f \
+             JOIN blog_posts p ON p.id = f.post_id \
+             WHERE blog_fts MATCH ?1 \
+             LIMIT 100",
         )
         .map_err(|e| e.to_string())?;
 
@@ -7001,7 +7024,7 @@ pub async fn blog_search_posts(
     }
 
     let rows: Vec<Row> = stmt
-        .query_map(rusqlite::params![content_pat], |r| {
+        .query_map(rusqlite::params![fts_query, content_pat], |r| {
             Ok(Row {
                 post: BlogPostResponse {
                     id: r.get(0)?,
@@ -7025,7 +7048,6 @@ pub async fn blog_search_posts(
             })
         })
         .map_err(|e| e.to_string())?
-        // Propagate row-level errors instead of silently dropping them (#12).
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
@@ -7034,39 +7056,19 @@ pub async fn blog_search_posts(
     let mut scored: Vec<(f64, BlogPostResponse)> = rows
         .into_iter()
         .filter_map(|row| {
-            let title_score = score_field(&q, &row.post.title);
-            let tag_score = row
-                .post
-                .tags
-                .as_deref()
-                .map(|t| score_field(&q, t))
-                .unwrap_or(0.0);
-            let author_score = row
-                .post
-                .author
-                .as_deref()
-                .map(|a| score_field(&q, a))
-                .unwrap_or(0.0);
-            let excerpt_score = row
-                .post
-                .excerpt
-                .as_deref()
-                .map(|e| score_field(&q, e))
-                .unwrap_or(0.0);
+            let title_score   = score_field(&q, &row.post.title);
+            let tag_score     = row.post.tags.as_deref().map(|t| score_field(&q, t)).unwrap_or(0.0);
+            let author_score  = row.post.author.as_deref().map(|a| score_field(&q, a)).unwrap_or(0.0);
+            let excerpt_score = row.post.excerpt.as_deref().map(|e| score_field(&q, e)).unwrap_or(0.0);
             let content_score = if row.content_hit { 0.78 } else { 0.0 };
 
-            // Weighted: title matters most, content is a binary bonus
-            let score = title_score * 0.50
-                + tag_score * 0.20
-                + author_score * 0.10
-                + excerpt_score * 0.10
-                + content_score * 0.10;
+            let score = title_score   * 0.50
+                      + tag_score     * 0.20
+                      + author_score  * 0.10
+                      + excerpt_score * 0.10
+                      + content_score * 0.10;
 
-            if score >= THRESHOLD {
-                Some((score, row.post))
-            } else {
-                None
-            }
+            if score >= THRESHOLD { Some((score, row.post)) } else { None }
         })
         .collect();
 
@@ -7134,8 +7136,12 @@ pub async fn blog_convert_post_svgs(
 
     let mw = max_width.unwrap_or(1200);
 
+    // Expand reference-style image links before regex processing so that
+    // `![alt][ref]` + `[ref]: file.svg` definitions are matched.
+    let content = crate::blog_svg::expand_reference_links(&content).into_owned();
+
     // SVG rasterization is CPU-bound; spawn_blocking so the async runtime
-    // is not starved during multi-SVG conversions (#2).
+    // is not starved during multi-SVG conversions.
     let vault_clone = vault.clone();
     let (content, assets1, errs1) = tokio::task::spawn_blocking(move || {
         crate::blog_svg::replace_svg_refs(&content, &vault_clone, Some(mw))
@@ -7146,6 +7152,7 @@ pub async fn blog_convert_post_svgs(
     let vault_clone2 = vault.clone();
     let content_clone = content.clone();
     let (content, assets2, errs2) = tokio::task::spawn_blocking(move || {
+        // replace_inline_svgs also handles entity-encoded &lt;svg&gt; blocks.
         crate::blog_svg::replace_inline_svgs(&content_clone, &vault_clone2, Some(mw))
     })
     .await
@@ -7155,7 +7162,8 @@ pub async fn blog_convert_post_svgs(
     let all_errors: Vec<String> = errs1.into_iter().chain(errs2).collect();
     let converted = all_assets.len();
 
-    // Register each converted PNG in blog_assets so cleanup tools track them.
+    // Register each converted PNG in blog_assets AND blog_post_assets so
+    // the post→asset relationship is tracked and cascade deletes work.
     if !all_assets.is_empty() {
         let st = state.read().await;
         let conn = st.db.get().map_err(|e| e.to_string())?;
@@ -7184,6 +7192,25 @@ pub async fn blog_convert_post_svgs(
                 ],
             )
             .map_err(|e| e.to_string())?;
+
+            // Link asset to post so cascade delete works when post is removed.
+            if let Some(ref pid) = post_id {
+                // Fetch the real asset id (may differ if INSERT OR IGNORE skipped).
+                let real_id: String = conn
+                    .query_row(
+                        "SELECT id FROM blog_assets WHERE sha256 = ?1",
+                        rusqlite::params![asset.sha256_hex],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(asset_id.clone());
+
+                conn.execute(
+                    "INSERT OR IGNORE INTO blog_post_assets (post_id, asset_id, referenced_as) \
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![pid, real_id, asset.filename],
+                )
+                .map_err(|e| e.to_string())?;
+            }
         }
 
         // Auto-save content to the post if a post_id was provided.

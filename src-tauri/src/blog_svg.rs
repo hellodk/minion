@@ -9,6 +9,84 @@
 use sha2::Digest;
 use std::path::Path;
 
+// ---------------------------------------------------------------------------
+// Pre-processing helpers
+// ---------------------------------------------------------------------------
+
+/// Expand CommonMark reference-style image links into inline links so the
+/// SVG regex can match them.
+///
+/// `![alt][label]` + `[label]: url` definition → `![alt](url)`
+///
+/// This handles the case where the user writes:
+/// ```markdown
+/// ![My diagram][arch-svg]
+/// [arch-svg]: assets/abc123.svg
+/// ```
+pub fn expand_reference_links(content: &str) -> std::borrow::Cow<'_, str> {
+    use std::collections::HashMap;
+
+    // Find all link definitions: `[label]: url` (optional angle-bracket quoting,
+    // optional title on the same line, up to 3 leading spaces).
+    let def_re = regex::Regex::new(
+        r#"(?m)^[ ]{0,3}\[([^\]]+)\]:\s+<?(https?://[^\s>]+|[^\s>]+)>?"#,
+    )
+    .unwrap();
+
+    let mut defs: HashMap<String, String> = HashMap::new();
+    for cap in def_re.captures_iter(content) {
+        defs.insert(cap[1].to_lowercase(), cap[2].to_owned());
+    }
+
+    if defs.is_empty() {
+        return std::borrow::Cow::Borrowed(content);
+    }
+
+    // Replace `![alt][label]` (and `![alt][]` — implicit label = alt).
+    let img_re = regex::Regex::new(r"!\[([^\]]*)\]\[([^\]]*)\]").unwrap();
+
+    let mut result = String::new();
+    let mut last = 0usize;
+
+    for cap in img_re.captures_iter(content) {
+        let m = cap.get(0).unwrap();
+        result.push_str(&content[last..m.start()]);
+
+        let alt = &cap[1];
+        let raw_label = &cap[2];
+        let key = if raw_label.is_empty() {
+            alt.to_lowercase()
+        } else {
+            raw_label.to_lowercase()
+        };
+
+        if let Some(url) = defs.get(&key) {
+            result.push_str(&format!("![{alt}]({url})"));
+        } else {
+            result.push_str(m.as_str());
+        }
+        last = m.end();
+    }
+    result.push_str(&content[last..]);
+    std::borrow::Cow::Owned(result)
+}
+
+/// Decode HTML entities in the content so that entity-encoded SVG blocks
+/// (`&lt;svg&gt;…&lt;/svg&gt;`) are detected by the inline-SVG regex.
+///
+/// Only applied when `&lt;svg` is present — avoids touching unrelated content.
+fn decode_entities_for_svg<'a>(content: &'a str) -> std::borrow::Cow<'a, str> {
+    if !content.contains("&lt;svg") && !content.contains("&lt;SVG") {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    // Targeted entity decoding: only the three that affect SVG tag structure.
+    let decoded = content
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    std::borrow::Cow::Owned(decoded)
+}
+
 pub struct ConvertedAsset {
     pub png_data: Vec<u8>,
     pub sha256_hex: String,
@@ -158,7 +236,10 @@ pub fn replace_svg_refs(
 
 /// Replace inline `<svg …>…</svg>` blocks in `content` with PNG img references.
 ///
-/// Each block is rasterized and saved as `{sha256}.png` in `vault_dir`.
+/// Also handles entity-encoded blocks (`&lt;svg…&gt;`) by decoding before
+/// matching — the returned content will contain the decoded (corrected) form
+/// with SVG blocks replaced by PNG references.
+///
 /// Uses position-based iteration so duplicate blocks are not double-processed.
 /// Returns (updated_content, assets, errors).
 pub fn replace_inline_svgs(
@@ -166,9 +247,11 @@ pub fn replace_inline_svgs(
     vault_dir: &Path,
     max_width: Option<u32>,
 ) -> Result<(String, Vec<ConvertedAsset>, Vec<String>), String> {
-    // (?si) — dot-matches-newline, case-insensitive. The [^>]* for the opening
-    // tag does not recurse into inner SVGs, so deeply nested <svg> inside <svg>
-    // will be caught on the outer match.
+    // Decode HTML entities so &lt;svg&gt; blocks are found by the regex.
+    let working = decode_entities_for_svg(content);
+    let content = working.as_ref();
+
+    // (?si) — dot-matches-newline, case-insensitive.
     let re = regex::Regex::new(r"(?si)<svg[^>]*>.*?</svg>")
         .map_err(|e| e.to_string())?;
 

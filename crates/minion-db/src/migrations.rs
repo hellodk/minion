@@ -56,6 +56,10 @@ pub fn run(conn: &Connection) -> Result<()> {
             "023_blog_source_path",
             migrate_023_blog_source_path,
         ),
+        (
+            "024_blog_fts5",
+            migrate_024_blog_fts5,
+        ),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -1343,6 +1347,62 @@ fn migrate_023_blog_source_path(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_024_blog_fts5(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        // FTS5 virtual table — tokenises title, tags, author, excerpt, and the
+        // first 4 000 chars of content (enough for search without bloating the index).
+        "CREATE VIRTUAL TABLE IF NOT EXISTS blog_fts USING fts5(
+            post_id UNINDEXED,
+            title,
+            tags,
+            author,
+            excerpt,
+            body,
+            tokenize = 'unicode61 remove_diacritics 1'
+        );
+
+        -- Populate from existing posts.
+        INSERT INTO blog_fts(post_id, title, tags, author, excerpt, body)
+        SELECT id,
+               COALESCE(title, ''),
+               COALESCE(tags, ''),
+               COALESCE(author, ''),
+               COALESCE(excerpt, ''),
+               SUBSTR(COALESCE(content, ''), 1, 4000)
+        FROM blog_posts;
+
+        -- Keep FTS in sync with blog_posts via triggers.
+        CREATE TRIGGER IF NOT EXISTS blog_fts_ai
+        AFTER INSERT ON blog_posts BEGIN
+            INSERT INTO blog_fts(post_id, title, tags, author, excerpt, body)
+            VALUES (new.id,
+                    COALESCE(new.title, ''),
+                    COALESCE(new.tags, ''),
+                    COALESCE(new.author, ''),
+                    COALESCE(new.excerpt, ''),
+                    SUBSTR(COALESCE(new.content, ''), 1, 4000));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS blog_fts_au
+        AFTER UPDATE ON blog_posts BEGIN
+            DELETE FROM blog_fts WHERE post_id = old.id;
+            INSERT INTO blog_fts(post_id, title, tags, author, excerpt, body)
+            VALUES (new.id,
+                    COALESCE(new.title, ''),
+                    COALESCE(new.tags, ''),
+                    COALESCE(new.author, ''),
+                    COALESCE(new.excerpt, ''),
+                    SUBSTR(COALESCE(new.content, ''), 1, 4000));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS blog_fts_ad
+        AFTER DELETE ON blog_posts BEGIN
+            DELETE FROM blog_fts WHERE post_id = old.id;
+        END;",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1461,7 +1521,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 23);
+        assert_eq!(count, 24);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn
