@@ -13,6 +13,7 @@ import Calendar from './pages/Calendar';
 import Blog from './pages/Blog';
 import Sysmon from './pages/Sysmon';
 import Settings from './pages/Settings';
+import Explorer from './pages/Explorer';
 import './styles/index.css';
 
 const root = document.getElementById('root');
@@ -33,6 +34,7 @@ render(
       <Route path="/media" component={Media} />
       <Route path="/calendar" component={Calendar} />
       <Route path="/blog" component={Blog} />
+      <Route path="/explorer" component={Explorer} />
       <Route path="/sysmon" component={Sysmon} />
       <Route path="/settings" component={Settings} />
     </Router>

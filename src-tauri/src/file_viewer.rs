@@ -1,0 +1,272 @@
+//! VS Code-style file explorer backend.
+//!
+//! Workspace folders are persisted in `file_viewer_workspaces`.
+//! The directory tree is loaded lazily: `fv_read_dir` is called per directory
+//! when the user expands a node in the frontend.
+
+use crate::state::AppState;
+use serde::Serialize;
+use std::sync::Arc;
+use tauri::State;
+use tokio::sync::RwLock;
+
+type AppStateHandle = Arc<RwLock<AppState>>;
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct FvWorkspace {
+    pub path: String,
+    pub label: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FvEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub extension: Option<String>,
+    pub size: u64,
+    pub modified: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FvFileContent {
+    pub text: String,
+    pub size: u64,
+    pub is_binary: bool,
+    pub language: String,
+    pub line_count: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+fn path_label(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+        .to_owned()
+}
+
+fn ext_to_language(ext: &str) -> &'static str {
+    match ext.to_lowercase().as_str() {
+        "rs"               => "rust",
+        "js"|"mjs"|"cjs"   => "javascript",
+        "ts"|"mts"|"cts"   => "typescript",
+        "jsx"              => "javascript",
+        "tsx"              => "typescript",
+        "py"|"pyi"         => "python",
+        "go"               => "go",
+        "java"             => "java",
+        "kt"|"kts"         => "kotlin",
+        "rb"               => "ruby",
+        "php"              => "php",
+        "cs"               => "csharp",
+        "c"|"h"            => "c",
+        "cpp"|"cc"|"cxx"|"hpp" => "cpp",
+        "swift"            => "swift",
+        "html"|"htm"       => "html",
+        "css"              => "css",
+        "scss"|"sass"      => "scss",
+        "less"             => "less",
+        "json"|"jsonc"     => "json",
+        "yaml"|"yml"       => "yaml",
+        "toml"             => "toml",
+        "xml"|"svg"        => "xml",
+        "sql"              => "sql",
+        "sh"|"bash"|"zsh"|"fish" => "bash",
+        "ps1"|"psm1"       => "powershell",
+        "md"|"markdown"|"mdx" => "markdown",
+        "dockerfile"       => "dockerfile",
+        "lua"              => "lua",
+        "r"                => "r",
+        "scala"            => "scala",
+        "ex"|"exs"         => "elixir",
+        "hs"               => "haskell",
+        "vim"              => "vim",
+        _                  => "plaintext",
+    }
+}
+
+/// Returns true when the byte slice looks like binary data.
+fn is_binary(data: &[u8]) -> bool {
+    let sample = &data[..data.len().min(8192)];
+    // Null byte → almost certainly binary.
+    if sample.contains(&0u8) {
+        return true;
+    }
+    // >30 % high bytes AND not valid UTF-8 → treat as binary.
+    let high = sample.iter().filter(|&&b| b > 127).count();
+    high as f32 / sample.len() as f32 > 0.30 && std::str::from_utf8(data).is_err()
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+/// Return all saved workspace folders in insertion order.
+#[tauri::command]
+pub async fn fv_list_workspaces(
+    state: State<'_, AppStateHandle>,
+) -> Result<Vec<FvWorkspace>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, label FROM file_viewer_workspaces ORDER BY added_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<FvWorkspace> = stmt
+        .query_map([], |r| {
+            Ok(FvWorkspace { path: r.get(0)?, label: r.get(1)? })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// Add a folder to the workspace.  The path is canonicalised before saving.
+#[tauri::command]
+pub async fn fv_add_workspace(
+    state: State<'_, AppStateHandle>,
+    path: String,
+) -> Result<FvWorkspace, String> {
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|_| format!("Path does not exist: {path}"))?;
+    if !canonical.is_dir() {
+        return Err(format!("Not a directory: {path}"));
+    }
+    let canonical_str = canonical.to_string_lossy().into_owned();
+    let label = path_label(&canonical_str);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR IGNORE INTO file_viewer_workspaces (path, label, added_at) \
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![canonical_str, label, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(FvWorkspace { path: canonical_str, label })
+}
+
+/// Remove a workspace folder (does not delete anything on disk).
+#[tauri::command]
+pub async fn fv_remove_workspace(
+    state: State<'_, AppStateHandle>,
+    path: String,
+) -> Result<(), String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM file_viewer_workspaces WHERE path = ?1",
+        rusqlite::params![path],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// List the immediate children of a directory.
+/// Hidden entries (starting with `.`) are excluded.
+/// Result is sorted: directories first (a-z), then files (a-z).
+#[tauri::command]
+pub async fn fv_read_dir(path: String) -> Result<Vec<FvEntry>, String> {
+    let mut entries: Vec<FvEntry> = std::fs::read_dir(&path)
+        .map_err(|e| format!("Cannot read directory: {e}"))?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                return None;
+            }
+            let meta = e.metadata().ok()?;
+            let is_dir = meta.is_dir();
+            let ext = if is_dir {
+                None
+            } else {
+                std::path::Path::new(&name)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_lowercase())
+            };
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| {
+                    let secs = t
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()?
+                        .as_secs() as i64;
+                    chrono::DateTime::from_timestamp(secs, 0)
+                        .map(|dt| dt.format("%Y-%m-%d").to_string())
+                })
+                .unwrap_or_default();
+
+            Some(FvEntry {
+                path: e.path().to_string_lossy().into_owned(),
+                name,
+                is_dir,
+                size: if is_dir { 0 } else { meta.len() },
+                extension: ext,
+                modified,
+            })
+        })
+        .collect();
+
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+
+    Ok(entries)
+}
+
+/// Read a text file and return its content with metadata.
+/// Files larger than 5 MB are rejected.
+/// Binary files are detected and flagged — `text` will be empty.
+#[tauri::command]
+pub async fn fv_read_file(path: String) -> Result<FvFileContent, String> {
+    const MAX: u64 = 5 * 1024 * 1024;
+
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    let size = meta.len();
+
+    if size > MAX {
+        return Err(format!(
+            "File too large to preview ({:.1} MB). Limit is 5 MB.",
+            size as f64 / 1_048_576.0
+        ));
+    }
+
+    let data = std::fs::read(&path).map_err(|e| e.to_string())?;
+
+    if is_binary(&data) {
+        return Ok(FvFileContent {
+            text: String::new(),
+            size,
+            is_binary: true,
+            language: "plaintext".to_owned(),
+            line_count: 0,
+        });
+    }
+
+    let text = String::from_utf8_lossy(&data).into_owned();
+    let line_count = text.lines().count();
+    let ext = std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let language = ext_to_language(&ext).to_owned();
+
+    Ok(FvFileContent { text, size, is_binary: false, language, line_count })
+}

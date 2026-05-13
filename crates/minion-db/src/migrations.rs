@@ -60,6 +60,10 @@ pub fn run(conn: &Connection) -> Result<()> {
             "024_blog_fts5",
             migrate_024_blog_fts5,
         ),
+        (
+            "025_file_viewer_workspaces",
+            migrate_025_file_viewer_workspaces,
+        ),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -1347,6 +1351,17 @@ fn migrate_023_blog_source_path(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_025_file_viewer_workspaces(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS file_viewer_workspaces (
+            path     TEXT PRIMARY KEY,
+            label    TEXT NOT NULL,
+            added_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );",
+    )?;
+    Ok(())
+}
+
 fn migrate_024_blog_fts5(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         // FTS5 virtual table — tokenises title, tags, author, excerpt, and the
@@ -1521,7 +1536,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 24);
+        assert_eq!(count, 25);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn

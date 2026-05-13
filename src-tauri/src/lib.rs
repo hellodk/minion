@@ -11,6 +11,7 @@ mod blog_preview;
 mod blog_publish;
 mod blog_svg;
 mod calendar_integration;
+mod file_viewer;
 mod commands;
 mod health_analysis;
 mod health_classify;
@@ -416,6 +417,12 @@ pub fn run() {
             sysmon_commands::sysmon_list_analyses,
             sysmon_commands::sysmon_get_settings,
             sysmon_commands::sysmon_save_settings,
+            // File Viewer / Explorer
+            file_viewer::fv_list_workspaces,
+            file_viewer::fv_add_workspace,
+            file_viewer::fv_remove_workspace,
+            file_viewer::fv_read_dir,
+            file_viewer::fv_read_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
