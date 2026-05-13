@@ -514,10 +514,24 @@ const Explorer: Component = () => {
           </div>
         </Show>
 
-        {/* Loading spinner while cache entry is null */}
+        {/* Loading spinner while cache entry is null/undefined */}
         <Show when={!imgSrc() && isLoading()}>
-          <div class="flex items-center justify-center h-full text-sm text-gray-400 animate-pulse">
-            Loading {fileName(p.path)}…
+          <div class="flex flex-col items-center justify-center h-full gap-3">
+            <div class="text-sm text-gray-400 animate-pulse">Loading {fileName(p.path)}…</div>
+            <div class="text-[10px] text-gray-300 dark:text-gray-600 font-mono">
+              cache={cacheEntry() === undefined ? 'undefined' : cacheEntry() === null ? 'null(loading)' : 'has-data'}
+            </div>
+            <button
+              class="text-xs text-sky-500 underline mt-1"
+              onClick={async () => {
+                try {
+                  const r = await invoke<FvFileContent>('fv_read_file', { path: p.path });
+                  setFileCache(p.path, r);
+                } catch(e) {
+                  setFileCache(p.path, { text: `⚠ Retry failed: ${e}`, size: 0, is_binary: false, language: 'plaintext', line_count: 0 });
+                }
+              }}
+            >Retry load</button>
           </div>
         </Show>
 
