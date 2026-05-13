@@ -123,10 +123,6 @@ const Explorer: Component = () => {
   const [viewMode, setViewMode] = createSignal<ViewMode>('source');
   const [expandedDirs, setExpandedDirs] = createSignal<Set<string>>(new Set());
   const [loadingDirs, setLoadingDirs] = createSignal<Set<string>>(new Set());
-  // Tracks which file paths are currently being loaded.
-  // Kept as a top-level signal (not embedded in tabs) so ContentView can
-  // check it directly — no intermediate .find() call to mistrack.
-  const [loadingFiles, setLoadingFiles] = createSignal<Set<string>>(new Set());
   const [dirContents, setDirContents] = createStore<Record<string, FvEntry[]>>({});
   const [fileCache, setFileCache] = createStore<Record<string, FvFileContent | null>>({});
   const [previewCache, setPreviewCache] = createStore<Record<string, string>>({});
@@ -263,34 +259,19 @@ const Explorer: Component = () => {
     // Images are served directly via convertFileSrc — no IPC read needed.
     if (isImage(entry.extension)) return;
 
-    // Mark as loading using a dedicated signal so ContentView can track it
-    // with a direct .has() check instead of a tabs().find()?.loading chain.
-    setLoadingFiles(s => new Set([...s, entry.path]));
-
-    // 10 s safety timeout: prevents permanent "Loading…" if IPC hangs.
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const failSafe = new Promise<never>((_, reject) => {
-      timeoutId = setTimeout(
-        () => reject(new Error('File load timed out (10 s). Try again.')),
-        10_000,
-      );
-    });
+    // Mark as "loading" by inserting a sentinel null into the cache.
+    // ContentView derives loading state from this: null = loading, FvFileContent = done.
+    // Using the store (not a separate signal) guarantees SolidJS tracks it correctly.
+    setFileCache(entry.path, null);
 
     try {
-      const content = await Promise.race([
-        invoke<FvFileContent>('fv_read_file', { path: entry.path }),
-        failSafe,
-      ]);
-      clearTimeout(timeoutId);
+      const content = await invoke<FvFileContent>('fv_read_file', { path: entry.path });
       setFileCache(entry.path, content);
     } catch (e) {
-      clearTimeout(timeoutId);
       setFileCache(entry.path, {
         text: `⚠ Could not load file\n\n${e}`,
         size: 0, is_binary: false, language: 'plaintext', line_count: 0,
       });
-    } finally {
-      setLoadingFiles(s => { const n = new Set(s); n.delete(entry.path); return n; });
     }
   }
 
@@ -512,71 +493,66 @@ const Explorer: Component = () => {
   // ---------------------------------------------------------------------------
 
   function ContentView(p: { path: string }) {
-    const isFileLoading = () => loadingFiles().has(p.path);
-    const content = () => fileCache[p.path];
-    // Bug 1 fix: must be reactive functions — p.path changes when tabs switch
-    // but ContentView is NOT remounted (Show stays truthy). A plain variable
-    // is computed ONCE at construction, giving stale ext/imgSrc for new tabs.
+    // Derive loading/content state directly from the store.
+    // fileCache[path] states:
+    //   undefined = file not yet opened (shouldn't render ContentView)
+    //   null      = file is being loaded (spinner)
+    //   object    = file loaded (show content)
+    const cacheEntry = () => fileCache[p.path];
+    const isLoading = () => cacheEntry() === null || cacheEntry() === undefined;
+    const content = () => cacheEntry() as FvFileContent | undefined;
     const ext = () => fileExt(p.path);
     const imgSrc = () => isImage(ext()) ? convertFileSrc(p.path) : null;
 
     return (
       <div class="h-full overflow-hidden">
-        <Show when={isFileLoading()}>
+        {/* Image viewer — no cache entry needed */}
+        <Show when={imgSrc()}>
+          <div class="flex items-center justify-center h-full bg-gray-100 dark:bg-gray-900 overflow-auto p-4">
+            <img src={imgSrc()!} alt={fileName(p.path)}
+              class="max-w-full max-h-full object-contain rounded shadow-lg" />
+          </div>
+        </Show>
+
+        {/* Loading spinner while cache entry is null */}
+        <Show when={!imgSrc() && isLoading()}>
           <div class="flex items-center justify-center h-full text-sm text-gray-400 animate-pulse">
             Loading {fileName(p.path)}…
           </div>
         </Show>
 
-        <Show when={!isFileLoading()}>
-          {/* Image viewer */}
-          <Show when={imgSrc()}>
-            <div class="flex items-center justify-center h-full bg-gray-100 dark:bg-gray-900 overflow-auto p-4">
-              <img src={imgSrc()!} alt={fileName(p.path)}
-                class="max-w-full max-h-full object-contain rounded shadow-lg" />
-            </div>
-          </Show>
+        {/* Binary file */}
+        <Show when={!imgSrc() && !isLoading() && content()?.is_binary}>
+          <div class="flex flex-col items-center justify-center h-full gap-3 text-gray-400">
+            <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <p class="text-sm font-medium">Binary file — cannot preview</p>
+            <p class="text-xs">{humanSize(content()?.size ?? 0)}</p>
+          </div>
+        </Show>
 
-          {/* Binary file */}
-          <Show when={!imgSrc() && content()?.is_binary}>
-            <div class="flex flex-col items-center justify-center h-full gap-3 text-gray-400">
-              <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-                  d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              <p class="text-sm font-medium">Binary file — cannot preview</p>
-              <p class="text-xs">{humanSize(content()?.size ?? 0)}</p>
-            </div>
-          </Show>
-
-          {/* Text / code file */}
-          <Show when={!imgSrc() && content() && !content()!.is_binary}>
-            <Switch fallback={null}>
-              <Match when={viewMode() === 'source'}>
-                <SourcePane path={p.path} content={content()!} />
-              </Match>
-              <Match when={viewMode() === 'preview'}>
-                <PreviewPane path={p.path} />
-              </Match>
-              <Match when={viewMode() === 'split'}>
-                <div class="flex h-full">
-                  <div class="w-1/2 border-r border-gray-200 dark:border-gray-700 overflow-hidden">
-                    <SourcePane path={p.path} content={content()!} />
-                  </div>
-                  <div class="w-1/2 overflow-hidden">
-                    <PreviewPane path={p.path} />
-                  </div>
+        {/* Text / code file */}
+        <Show when={!imgSrc() && !isLoading() && content() && !content()!.is_binary}>
+          <Switch fallback={null}>
+            <Match when={viewMode() === 'source'}>
+              <SourcePane path={p.path} content={content()!} />
+            </Match>
+            <Match when={viewMode() === 'preview'}>
+              <PreviewPane path={p.path} />
+            </Match>
+            <Match when={viewMode() === 'split'}>
+              <div class="flex h-full">
+                <div class="w-1/2 border-r border-gray-200 dark:border-gray-700 overflow-hidden">
+                  <SourcePane path={p.path} content={content()!} />
                 </div>
-              </Match>
-            </Switch>
-          </Show>
-
-          {/* No content yet (shouldn't happen, but guard) */}
-          <Show when={!imgSrc() && !content()}>
-            <div class="flex items-center justify-center h-full text-sm text-gray-400">
-              File content unavailable
-            </div>
-          </Show>
+                <div class="w-1/2 overflow-hidden">
+                  <PreviewPane path={p.path} />
+                </div>
+              </div>
+            </Match>
+          </Switch>
         </Show>
       </div>
     );
@@ -720,7 +696,7 @@ const Explorer: Component = () => {
         </div>
 
         {/* View-mode toggle bar — only for MD / HTML */}
-        <Show when={activeTabPath() && !loadingFiles().has(activeTabPath()!) && isPreviewable(activeTabPath()!)}>
+        <Show when={activeTabPath() && !!fileCache[activeTabPath()!] && isPreviewable(activeTabPath()!)}>
           <div class="flex-none flex items-center gap-1 px-3 py-1.5 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
             <span class="text-[10px] text-gray-400 mr-1">View:</span>
             {(['source', 'split', 'preview'] as ViewMode[]).map((m) => (

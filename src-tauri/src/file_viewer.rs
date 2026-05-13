@@ -246,11 +246,13 @@ pub async fn fv_read_dir(path: String) -> Result<Vec<FvEntry>, String> {
 #[tauri::command]
 pub async fn fv_read_file(path: String) -> Result<FvFileContent, String> {
     const MAX: u64 = 5 * 1024 * 1024;
+    tracing::info!("[fv_read_file] start: {}", path);
 
     let meta = tokio::fs::metadata(&path)
         .await
         .map_err(|e| format!("Cannot access '{}': {}", path, e))?;
     let size = meta.len();
+    tracing::info!("[fv_read_file] metadata ok, size={}", size);
 
     if size > MAX {
         return Err(format!(
@@ -262,8 +264,10 @@ pub async fn fv_read_file(path: String) -> Result<FvFileContent, String> {
     let data = tokio::fs::read(&path)
         .await
         .map_err(|e| format!("Cannot read '{}': {}", path, e))?;
+    tracing::info!("[fv_read_file] read {} bytes", data.len());
 
     if is_binary(&data) {
+        tracing::info!("[fv_read_file] binary file detected");
         return Ok(FvFileContent {
             text: String::new(),
             size,
@@ -281,6 +285,7 @@ pub async fn fv_read_file(path: String) -> Result<FvFileContent, String> {
         .unwrap_or("")
         .to_lowercase();
     let language = ext_to_language(&ext).to_owned();
+    tracing::info!("[fv_read_file] done: {} lines, language={}", line_count, language);
 
     Ok(FvFileContent { text, size, is_binary: false, language, line_count })
 }
