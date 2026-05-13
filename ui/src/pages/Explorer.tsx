@@ -131,16 +131,19 @@ const Explorer: Component = () => {
   const [previewCache, setPreviewCache] = createStore<Record<string, string>>({});
   const [previewInFlight, setPreviewInFlight] = createSignal<Set<string>>(new Set());
   const [addingFolder, setAddingFolder] = createSignal(false);
+  const [dbgLog, setDbgLog] = createSignal<string[]>([]);
+  const dbg = (msg: string) => setDbgLog(l => [...l.slice(-6), `${new Date().toLocaleTimeString()}: ${msg}`]);
 
   onMount(async () => {
+    dbg('onMount: invoking fv_list_workspaces');
     try {
       const ws = await invoke<FvWorkspace[]>('fv_list_workspaces');
+      dbg(`onMount: got ${ws.length} workspace(s)`);
       setWorkspaces(ws);
-      // Pre-load top-level of each workspace
       for (const w of ws) {
         void loadDir(w.path);
       }
-    } catch { /* DB not ready yet — ignore */ }
+    } catch (e) { dbg(`onMount ERROR: ${e}`); }
   });
 
   // Reset view mode to 'source' when switching to a non-previewable file
@@ -275,9 +278,11 @@ const Explorer: Component = () => {
   // ---------------------------------------------------------------------------
 
   async function openFile(entry: FvEntry) {
+    dbg(`click: ${entry.name} is_dir=${entry.is_dir}`);
     if (entry.is_dir) { toggleDir(entry.path); return; }
 
     if (tabs().some(t => t.path === entry.path)) {
+      dbg(`already open: ${entry.name}`);
       setActiveTabPath(entry.path);
       return;
     }
@@ -289,10 +294,12 @@ const Explorer: Component = () => {
       return [...trimmed, newTab];
     });
     setActiveTabPath(entry.path);
+    dbg(`tab added: ${entry.name}`);
 
-    if (isImage(entry.extension)) return;
+    if (isImage(entry.extension)) { dbg('image — no IPC needed'); return; }
 
     setFileCache(entry.path, null);
+    dbg(`invoking fv_read_file: ${entry.name}`);
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const failSafe = new Promise<never>((_, reject) => {
@@ -308,9 +315,11 @@ const Explorer: Component = () => {
         failSafe,
       ]);
       clearTimeout(timeoutId);
+      dbg(`loaded OK: ${entry.name} (${content.line_count} lines)`);
       setFileCache(entry.path, content);
     } catch (e) {
       clearTimeout(timeoutId);
+      dbg(`FAILED: ${entry.name} — ${e}`);
       setFileCache(entry.path, {
         text: `⚠ Could not load file\n\n${e}`,
         size: 0, is_binary: false, language: 'plaintext', line_count: 0,
@@ -799,6 +808,13 @@ const Explorer: Component = () => {
           </Show>
         </div>
       </div>
+
+      {/* ── Debug log overlay — remove once bug is found ── */}
+      <Show when={dbgLog().length > 0}>
+        <div class="fixed bottom-2 right-2 z-50 max-w-sm bg-gray-900 text-green-400 text-[10px] font-mono rounded shadow-lg p-2 space-y-0.5 opacity-90">
+          <For each={dbgLog()}>{(line) => <div>{line}</div>}</For>
+        </div>
+      </Show>
 
     </div>
   );
