@@ -247,7 +247,10 @@ const Explorer: Component = () => {
     const next = current.filter(t => t.path !== path);
     setTabs(next);
     if (activeTabPath() === path) {
-      const newActive = next[Math.max(0, idx - 1)]?.path ?? null;
+      // Activate the tab that was to the RIGHT of the closed one (same index
+      // position after removal). Fall back to the new last tab. VS Code
+      // convention: prefer the next tab, not the previous one.
+      const newActive = next[Math.min(idx, next.length - 1)]?.path ?? null;
       setActiveTabPath(newActive);
     }
   }
@@ -413,8 +416,10 @@ const Explorer: Component = () => {
 
   function PreviewPane(p: { path: string }) {
     const html = () => previewCache[p.path];
-    const ext = fileExt(p.path);
-    const isMd = ext === 'md' || ext === 'markdown' || ext === 'mdx';
+    // Bug 2 fix: isMd must be reactive — same root cause as ContentView.ext.
+    // PreviewPane is kept alive across path changes; a static `isMd` is stale
+    // when switching between MD and HTML files in preview/split mode.
+    const isMd = () => { const e = fileExt(p.path); return e === 'md' || e === 'markdown' || e === 'mdx'; };
 
     return (
       <div class="h-full overflow-auto bg-white dark:bg-gray-900">
@@ -423,7 +428,7 @@ const Explorer: Component = () => {
             Rendering preview…
           </div>
         }>
-          <Show when={isMd}
+          <Show when={isMd()}
             fallback={
               // HTML files: sandboxed iframe
               <iframe
@@ -455,8 +460,11 @@ const Explorer: Component = () => {
   function ContentView(p: { path: string }) {
     const tab = () => tabs().find(t => t.path === p.path);
     const content = () => fileCache[p.path];
-    const ext = fileExt(p.path);
-    const imgSrc = isImage(ext ? ext : null) ? convertFileSrc(p.path) : null;
+    // Bug 1 fix: must be reactive functions — p.path changes when tabs switch
+    // but ContentView is NOT remounted (Show stays truthy). A plain variable
+    // is computed ONCE at construction, giving stale ext/imgSrc for new tabs.
+    const ext = () => fileExt(p.path);
+    const imgSrc = () => isImage(ext()) ? convertFileSrc(p.path) : null;
 
     return (
       <div class="h-full overflow-hidden">
@@ -468,15 +476,15 @@ const Explorer: Component = () => {
 
         <Show when={!tab()?.loading}>
           {/* Image viewer */}
-          <Show when={imgSrc}>
+          <Show when={imgSrc()}>
             <div class="flex items-center justify-center h-full bg-gray-100 dark:bg-gray-900 overflow-auto p-4">
-              <img src={imgSrc!} alt={fileName(p.path)}
+              <img src={imgSrc()!} alt={fileName(p.path)}
                 class="max-w-full max-h-full object-contain rounded shadow-lg" />
             </div>
           </Show>
 
           {/* Binary file */}
-          <Show when={!imgSrc && content()?.is_binary}>
+          <Show when={!imgSrc() && content()?.is_binary}>
             <div class="flex flex-col items-center justify-center h-full gap-3 text-gray-400">
               <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
@@ -487,10 +495,8 @@ const Explorer: Component = () => {
             </div>
           </Show>
 
-          {/* Text / code file — Bug #1 fix: use Switch+Match (not Switch+Show).
-               Switch with Show children is a SolidJS no-op: Switch only
-               processes Match children; Show children are silently discarded. */}
-          <Show when={!imgSrc && content() && !content()!.is_binary}>
+          {/* Text / code file */}
+          <Show when={!imgSrc() && content() && !content()!.is_binary}>
             <Switch fallback={null}>
               <Match when={viewMode() === 'source'}>
                 <SourcePane path={p.path} content={content()!} />
@@ -512,7 +518,7 @@ const Explorer: Component = () => {
           </Show>
 
           {/* No content yet (shouldn't happen, but guard) */}
-          <Show when={!imgSrc && !content()}>
+          <Show when={!imgSrc() && !content()}>
             <div class="flex items-center justify-center h-full text-sm text-gray-400">
               File content unavailable
             </div>
@@ -618,12 +624,14 @@ const Explorer: Component = () => {
                 </Show>
                 <IconFile ext={fileExt(tab.path) || null} />
                 <span class="truncate">{tab.name}</span>
-                <span
+                <button
+                  type="button"
                   onClick={(e) => closeTab(tab.path, e)}
-                  class="shrink-0 opacity-0 group-hover:opacity-100 hover:bg-gray-200 dark:hover:bg-gray-700 rounded p-0.5 transition-all"
+                  class="shrink-0 opacity-0 group-hover:opacity-100 hover:bg-gray-200 dark:hover:bg-gray-700 rounded p-0.5 transition-all leading-none"
+                  title="Close tab"
                 >
                   <IconX size={3} />
-                </span>
+                </button>
               </button>
             )}
           </For>
