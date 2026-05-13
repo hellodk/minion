@@ -1,5 +1,5 @@
 import {
-  Component, createSignal, createEffect, For, Show, onMount,
+  Component, createSignal, createEffect, For, Show, onMount, Switch, Match,
 } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { invoke } from '@tauri-apps/api/core';
@@ -362,25 +362,32 @@ const Explorer: Component = () => {
   // ---------------------------------------------------------------------------
 
   function SourcePane(p: { path: string; content: FvFileContent }) {
-    let codeRef: HTMLElement | undefined;
+    // Signal-based ref so the createEffect can track when the element mounts.
+    // A plain `let` ref would be undefined on the effect's first synchronous
+    // run (before the DOM element exists), causing a silent early return with
+    // no reactive dep to trigger a re-run. Bug #2 fix.
+    const [codeEl, setCodeEl] = createSignal<HTMLElement | undefined>(undefined);
 
     createEffect(() => {
-      const el = codeRef;
+      const el = codeEl();          // tracked: re-runs when element mounts
+      const text = p.content.text;  // tracked: re-runs when content changes
+      const lang = p.content.language;
       if (!el || p.content.is_binary) return;
-      el.textContent = p.content.text;
-      // Apply highlight.js
+
+      el.textContent = text;        // set plain text immediately (no flash)
+
+      if (lang === 'plaintext') return;
+
+      // Bug #3 fix: capture `el` before the async gap; verify it's still
+      // the current element after highlight.js loads.
       import('highlight.js').then((hljs) => {
-        if (!el) return;
-        if (p.content.language !== 'plaintext') {
-          try {
-            const lang = hljs.default.getLanguage(p.content.language)
-              ? p.content.language : 'plaintext';
-            const result = hljs.default.highlight(p.content.text, { language: lang });
-            el.innerHTML = result.value;
-          } catch {
-            // leave as-is
+        if (codeEl() !== el) return; // stale — element was replaced
+        try {
+          const safe = hljs.default.getLanguage(lang) ? lang : 'plaintext';
+          if (safe !== 'plaintext') {
+            el.innerHTML = hljs.default.highlight(text, { language: safe }).value;
           }
-        }
+        } catch { /* leave as plain text */ }
       }).catch(() => {});
     });
 
@@ -394,7 +401,7 @@ const Explorer: Component = () => {
         </div>
         <pre class="m-0 p-4 text-[13px] leading-relaxed font-mono overflow-auto hljs"
           style={{ 'tab-size': '2', 'white-space': 'pre', 'min-height': 'calc(100% - 28px)' }}>
-          <code ref={codeRef} class={`language-${p.content.language}`} />
+          <code ref={setCodeEl} class={`language-${p.content.language}`} />
         </pre>
       </div>
     );
@@ -480,16 +487,18 @@ const Explorer: Component = () => {
             </div>
           </Show>
 
-          {/* Text / code file */}
+          {/* Text / code file — Bug #1 fix: use Switch+Match (not Switch+Show).
+               Switch with Show children is a SolidJS no-op: Switch only
+               processes Match children; Show children are silently discarded. */}
           <Show when={!imgSrc && content() && !content()!.is_binary}>
-            <Switch>
-              <Show when={viewMode() === 'source'}>
+            <Switch fallback={null}>
+              <Match when={viewMode() === 'source'}>
                 <SourcePane path={p.path} content={content()!} />
-              </Show>
-              <Show when={viewMode() === 'preview'}>
+              </Match>
+              <Match when={viewMode() === 'preview'}>
                 <PreviewPane path={p.path} />
-              </Show>
-              <Show when={viewMode() === 'split'}>
+              </Match>
+              <Match when={viewMode() === 'split'}>
                 <div class="flex h-full">
                   <div class="w-1/2 border-r border-gray-200 dark:border-gray-700 overflow-hidden">
                     <SourcePane path={p.path} content={content()!} />
@@ -498,7 +507,7 @@ const Explorer: Component = () => {
                     <PreviewPane path={p.path} />
                   </div>
                 </div>
-              </Show>
+              </Match>
             </Switch>
           </Show>
 
@@ -599,7 +608,7 @@ const Explorer: Component = () => {
                 class="flex-none flex items-center gap-1.5 px-3 py-1.5 text-xs border-r border-gray-200 dark:border-gray-700 transition-colors min-w-0 max-w-[180px] group relative"
                 classList={{
                   'bg-white dark:bg-gray-900 text-gray-900 dark:text-white': activeTabPath() === tab.path,
-                  'text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-850 hover:text-gray-700 dark:hover:text-gray-200': activeTabPath() !== tab.path,
+                  'text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-gray-700 dark:hover:text-gray-200': activeTabPath() !== tab.path,
                 }}
                 onClick={() => setActiveTabPath(tab.path)}
                 title={tab.path}
@@ -674,11 +683,5 @@ const Explorer: Component = () => {
     </div>
   );
 };
-
-// Need Switch/Match for view-mode but Show works fine — SolidJS shows only one at a time.
-// The three <Show> blocks inside ContentView correctly gate on a single viewMode() value.
-import { Switch, Match } from 'solid-js';
-// (imported for completeness — not strictly needed since we use Show with conditions)
-void Switch; void Match;
 
 export default Explorer;
