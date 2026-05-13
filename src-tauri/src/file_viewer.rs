@@ -177,67 +177,79 @@ pub async fn fv_remove_workspace(
 /// List the immediate children of a directory.
 /// Hidden entries (starting with `.`) are excluded.
 /// Result is sorted: directories first (a-z), then files (a-z).
+///
+/// Uses spawn_blocking so std::fs::read_dir does not block the tokio executor.
 #[tauri::command]
 pub async fn fv_read_dir(path: String) -> Result<Vec<FvEntry>, String> {
-    let mut entries: Vec<FvEntry> = std::fs::read_dir(&path)
-        .map_err(|e| format!("Cannot read directory: {e}"))?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
-                return None;
-            }
-            let meta = e.metadata().ok()?;
-            let is_dir = meta.is_dir();
-            let ext = if is_dir {
-                None
-            } else {
-                std::path::Path::new(&name)
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_lowercase())
-            };
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|t| {
-                    let secs = t
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .ok()?
-                        .as_secs() as i64;
-                    chrono::DateTime::from_timestamp(secs, 0)
-                        .map(|dt| dt.format("%Y-%m-%d").to_string())
+    tokio::task::spawn_blocking(move || {
+        let mut entries: Vec<FvEntry> = std::fs::read_dir(&path)
+            .map_err(|e| format!("Cannot read directory: {e}"))?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    return None;
+                }
+                let meta = e.metadata().ok()?;
+                let is_dir = meta.is_dir();
+                let ext = if is_dir {
+                    None
+                } else {
+                    std::path::Path::new(&name)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_lowercase())
+                };
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| {
+                        let secs = t
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()?
+                            .as_secs() as i64;
+                        chrono::DateTime::from_timestamp(secs, 0)
+                            .map(|dt| dt.format("%Y-%m-%d").to_string())
+                    })
+                    .unwrap_or_default();
+                Some(FvEntry {
+                    path: e.path().to_string_lossy().into_owned(),
+                    name,
+                    is_dir,
+                    size: if is_dir { 0 } else { meta.len() },
+                    extension: ext,
+                    modified,
                 })
-                .unwrap_or_default();
-
-            Some(FvEntry {
-                path: e.path().to_string_lossy().into_owned(),
-                name,
-                is_dir,
-                size: if is_dir { 0 } else { meta.len() },
-                extension: ext,
-                modified,
             })
-        })
-        .collect();
+            .collect();
 
-    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-    });
+        entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        });
 
-    Ok(entries)
+        Ok(entries)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))
+    .and_then(|r| r)
 }
 
 /// Read a text file and return its content with metadata.
 /// Files larger than 5 MB are rejected.
 /// Binary files are detected and flagged — `text` will be empty.
+///
+/// Uses `tokio::fs` (async I/O) to avoid blocking the tokio executor thread.
+/// Blocking `std::fs` calls inside async Tauri commands stall the IPC
+/// response delivery, causing the frontend promise to never resolve.
 #[tauri::command]
 pub async fn fv_read_file(path: String) -> Result<FvFileContent, String> {
     const MAX: u64 = 5 * 1024 * 1024;
 
-    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| format!("Cannot access '{}': {}", path, e))?;
     let size = meta.len();
 
     if size > MAX {
@@ -247,7 +259,9 @@ pub async fn fv_read_file(path: String) -> Result<FvFileContent, String> {
         ));
     }
 
-    let data = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|e| format!("Cannot read '{}': {}", path, e))?;
 
     if is_binary(&data) {
         return Ok(FvFileContent {

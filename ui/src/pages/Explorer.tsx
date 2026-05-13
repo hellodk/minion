@@ -175,6 +175,39 @@ const Explorer: Component = () => {
     setExpandedDirs(s);
   }
 
+  /** Expand every directory under `rootPath` up to `depth` levels deep. */
+  async function expandAll(rootPath: string, maxDepth = 4) {
+    const queue: Array<{ path: string; depth: number }> = [{ path: rootPath, depth: 0 }];
+    const toExpand = new Set(expandedDirs());
+    toExpand.add(rootPath);
+    setExpandedDirs(new Set(toExpand));
+
+    while (queue.length > 0) {
+      const { path, depth } = queue.shift()!;
+      if (depth >= maxDepth) continue;
+      await loadDir(path);
+      const children = dirContents[path] ?? [];
+      const dirs = children.filter(e => e.is_dir);
+      for (const d of dirs) {
+        toExpand.add(d.path);
+        queue.push({ path: d.path, depth: depth + 1 });
+      }
+      setExpandedDirs(new Set(toExpand));
+    }
+  }
+
+  /** Collapse every directory under `rootPath` (including root itself). */
+  function collapseAll(rootPath: string) {
+    const s = new Set(expandedDirs());
+    // Remove rootPath and everything nested under it
+    for (const p of s) {
+      if (p === rootPath || p.startsWith(rootPath + '/') || p.startsWith(rootPath + '\\')) {
+        s.delete(p);
+      }
+    }
+    setExpandedDirs(s);
+  }
+
   // ---------------------------------------------------------------------------
   // Workspace actions
   // ---------------------------------------------------------------------------
@@ -229,12 +262,23 @@ const Explorer: Component = () => {
       return;
     }
 
-    // Load file content
+    // Load file content — 10 s safety timeout so loading never gets
+    // permanently stuck if the IPC call fails silently.
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const failSafe = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error('Timed out after 10 s')), 10_000);
+    });
+
     try {
-      const content = await invoke<FvFileContent>('fv_read_file', { path: entry.path });
+      const content = await Promise.race([
+        invoke<FvFileContent>('fv_read_file', { path: entry.path }),
+        failSafe,
+      ]);
+      clearTimeout(timeoutId);
       setFileCache(entry.path, content);
     } catch (e) {
-      setFileCache(entry.path, { text: `Error: ${e}`, size: 0, is_binary: false, language: 'plaintext', line_count: 0 });
+      clearTimeout(timeoutId);
+      setFileCache(entry.path, { text: `Error loading file: ${e}`, size: 0, is_binary: false, language: 'plaintext', line_count: 0 });
     } finally {
       setTabs(prev => prev.map(t => t.path === entry.path ? { ...t, loading: false } : t));
     }
@@ -576,7 +620,7 @@ const Explorer: Component = () => {
             {(ws) => (
               <div class="mb-1">
                 {/* Workspace root header */}
-                <div class="group flex items-center gap-1.5 px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer"
+                <div class="group flex items-center gap-1 px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer"
                   onClick={() => toggleDir(ws.path)}>
                   <span class="w-3 h-3 flex items-center justify-center shrink-0">
                     {expandedDirs().has(ws.path) ? <IconChevronDown /> : <IconChevronRight />}
@@ -585,6 +629,29 @@ const Explorer: Component = () => {
                     title={ws.path}>
                     {ws.label}
                   </span>
+                  {/* Expand / Collapse all — visible on hover */}
+                  <Show when={expandedDirs().has(ws.path)}>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); void expandAll(ws.path); }}
+                      title="Expand all (up to 4 levels)"
+                      class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 transition-all"
+                    >
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); collapseAll(ws.path); }}
+                      title="Collapse all"
+                      class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 transition-all"
+                    >
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M5 15l7-7 7 7" />
+                      </svg>
+                    </button>
+                  </Show>
                   <button
                     onClick={(e) => { e.stopPropagation(); void removeWorkspace(ws.path); }}
                     title="Remove folder from workspace"
