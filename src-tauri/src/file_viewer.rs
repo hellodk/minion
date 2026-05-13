@@ -240,19 +240,17 @@ pub async fn fv_read_dir(path: String) -> Result<Vec<FvEntry>, String> {
 /// Files larger than 5 MB are rejected.
 /// Binary files are detected and flagged — `text` will be empty.
 ///
-/// Uses `tokio::fs` (async I/O) to avoid blocking the tokio executor thread.
-/// Blocking `std::fs` calls inside async Tauri commands stall the IPC
-/// response delivery, causing the frontend promise to never resolve.
+/// I/O uses tokio::fs (async). CPU-bound work (binary detection, UTF-8
+/// conversion, line counting) runs in spawn_blocking so the tokio async
+/// thread pool is never stalled by synchronous processing.
 #[tauri::command]
 pub async fn fv_read_file(path: String) -> Result<FvFileContent, String> {
     const MAX: u64 = 5 * 1024 * 1024;
-    tracing::info!("[fv_read_file] start: {}", path);
 
     let meta = tokio::fs::metadata(&path)
         .await
         .map_err(|e| format!("Cannot access '{}': {}", path, e))?;
     let size = meta.len();
-    tracing::info!("[fv_read_file] metadata ok, size={}", size);
 
     if size > MAX {
         return Err(format!(
@@ -264,28 +262,31 @@ pub async fn fv_read_file(path: String) -> Result<FvFileContent, String> {
     let data = tokio::fs::read(&path)
         .await
         .map_err(|e| format!("Cannot read '{}': {}", path, e))?;
-    tracing::info!("[fv_read_file] read {} bytes", data.len());
 
-    if is_binary(&data) {
-        tracing::info!("[fv_read_file] binary file detected");
-        return Ok(FvFileContent {
-            text: String::new(),
-            size,
-            is_binary: true,
-            language: "plaintext".to_owned(),
-            line_count: 0,
-        });
-    }
+    // All remaining work is CPU-bound: move it off the tokio async thread.
+    tokio::task::spawn_blocking(move || {
+        if is_binary(&data) {
+            return Ok(FvFileContent {
+                text: String::new(),
+                size,
+                is_binary: true,
+                language: "plaintext".to_owned(),
+                line_count: 0,
+            });
+        }
 
-    let text = String::from_utf8_lossy(&data).into_owned();
-    let line_count = text.lines().count();
-    let ext = std::path::Path::new(&path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let language = ext_to_language(&ext).to_owned();
-    tracing::info!("[fv_read_file] done: {} lines, language={}", line_count, language);
+        let text = String::from_utf8_lossy(&data).into_owned();
+        let line_count = text.lines().count();
+        let ext = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let language = ext_to_language(&ext).to_owned();
 
-    Ok(FvFileContent { text, size, is_binary: false, language, line_count })
+        Ok(FvFileContent { text, size, is_binary: false, language, line_count })
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))
+    .and_then(|r| r)
 }

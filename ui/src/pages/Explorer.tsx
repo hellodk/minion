@@ -1,7 +1,7 @@
 import {
   Component, createSignal, createEffect, For, Show, onMount, Switch, Match,
 } from 'solid-js';
-import { createStore } from 'solid-js/store';
+import { createStore, produce } from 'solid-js/store';
 import { invoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
 
@@ -60,7 +60,10 @@ function isPreviewable(path: string): boolean {
   return PREVIEW_EXTS.has(ext);
 }
 function fileExt(path: string): string {
-  return path.split('.').pop()?.toLowerCase() ?? '';
+  const base = path.split(/[/\\]/).pop() ?? '';
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0) return '';
+  return base.slice(dot + 1).toLowerCase();
 }
 function fileName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
@@ -126,6 +129,7 @@ const Explorer: Component = () => {
   const [dirContents, setDirContents] = createStore<Record<string, FvEntry[]>>({});
   const [fileCache, setFileCache] = createStore<Record<string, FvFileContent | null>>({});
   const [previewCache, setPreviewCache] = createStore<Record<string, string>>({});
+  const [previewInFlight, setPreviewInFlight] = createSignal<Set<string>>(new Set());
   const [addingFolder, setAddingFolder] = createSignal(false);
 
   onMount(async () => {
@@ -152,7 +156,7 @@ const Explorer: Component = () => {
   // ---------------------------------------------------------------------------
 
   async function loadDir(path: string) {
-    if (dirContents[path]) return; // already loaded
+    if (dirContents[path] !== undefined || loadingDirs().has(path)) return;
     setLoadingDirs(s => new Set([...s, path]));
     try {
       const entries = await invoke<FvEntry[]>('fv_read_dir', { path });
@@ -178,21 +182,21 @@ const Explorer: Component = () => {
   /** Expand every directory under `rootPath` up to `depth` levels deep. */
   async function expandAll(rootPath: string, maxDepth = 4) {
     const queue: Array<{ path: string; depth: number }> = [{ path: rootPath, depth: 0 }];
-    const toExpand = new Set(expandedDirs());
-    toExpand.add(rootPath);
-    setExpandedDirs(new Set(toExpand));
+    setExpandedDirs(s => new Set([...s, rootPath]));
 
     while (queue.length > 0) {
       const { path, depth } = queue.shift()!;
       if (depth >= maxDepth) continue;
       await loadDir(path);
-      const children = dirContents[path] ?? [];
-      const dirs = children.filter(e => e.is_dir);
-      for (const d of dirs) {
-        toExpand.add(d.path);
-        queue.push({ path: d.path, depth: depth + 1 });
+      const newDirs = (dirContents[path] ?? []).filter(e => e.is_dir);
+      if (newDirs.length > 0) {
+        setExpandedDirs(s => {
+          const next = new Set(s);
+          for (const d of newDirs) next.add(d.path);
+          return next;
+        });
+        for (const d of newDirs) queue.push({ path: d.path, depth: depth + 1 });
       }
-      setExpandedDirs(new Set(toExpand));
     }
   }
 
@@ -229,9 +233,41 @@ const Explorer: Component = () => {
     }
   }
 
-  async function removeWorkspace(path: string) {
-    await invoke('fv_remove_workspace', { path });
-    setWorkspaces(prev => prev.filter(w => w.path !== path));
+  async function removeWorkspace(wsPath: string) {
+    await invoke('fv_remove_workspace', { path: wsPath });
+    setWorkspaces(prev => prev.filter(w => w.path !== wsPath));
+
+    // Close tabs for files under this workspace
+    const affectedTabs = tabs().filter(
+      t => t.path === wsPath || t.path.startsWith(wsPath + '/'),
+    );
+    if (affectedTabs.length > 0) {
+      const newTabs = tabs().filter(
+        t => t.path !== wsPath && !t.path.startsWith(wsPath + '/'),
+      );
+      setTabs(newTabs);
+      if (activeTabPath() &&
+          (activeTabPath()! === wsPath || activeTabPath()!.startsWith(wsPath + '/'))) {
+        setActiveTabPath(newTabs[0]?.path ?? null);
+      }
+    }
+
+    // Clear cached dir tree, file contents, and previews for this workspace
+    setDirContents(produce(d => {
+      for (const key of Object.keys(d)) {
+        if (key === wsPath || key.startsWith(wsPath + '/')) delete d[key];
+      }
+    }));
+    setFileCache(produce(d => {
+      for (const key of Object.keys(d)) {
+        if (key === wsPath || key.startsWith(wsPath + '/')) delete d[key];
+      }
+    }));
+    setPreviewCache(produce(d => {
+      for (const key of Object.keys(d)) {
+        if (key === wsPath || key.startsWith(wsPath + '/')) delete d[key];
+      }
+    }));
   }
 
   // ---------------------------------------------------------------------------
@@ -241,13 +277,11 @@ const Explorer: Component = () => {
   async function openFile(entry: FvEntry) {
     if (entry.is_dir) { toggleDir(entry.path); return; }
 
-    // Already open → just activate
     if (tabs().some(t => t.path === entry.path)) {
       setActiveTabPath(entry.path);
       return;
     }
 
-    // Evict oldest tab if at limit
     const newTab: ExplorerTab = { path: entry.path, name: entry.name };
     setTabs(prev => {
       const without = prev.filter(t => t.path !== entry.path);
@@ -256,18 +290,27 @@ const Explorer: Component = () => {
     });
     setActiveTabPath(entry.path);
 
-    // Images are served directly via convertFileSrc — no IPC read needed.
     if (isImage(entry.extension)) return;
 
-    // Mark as "loading" by inserting a sentinel null into the cache.
-    // ContentView derives loading state from this: null = loading, FvFileContent = done.
-    // Using the store (not a separate signal) guarantees SolidJS tracks it correctly.
     setFileCache(entry.path, null);
 
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const failSafe = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(
+        () => reject(new Error('File load timed out (15 s). Click "Retry load" to try again.')),
+        15_000,
+      );
+    });
+
     try {
-      const content = await invoke<FvFileContent>('fv_read_file', { path: entry.path });
+      const content = await Promise.race([
+        invoke<FvFileContent>('fv_read_file', { path: entry.path }),
+        failSafe,
+      ]);
+      clearTimeout(timeoutId);
       setFileCache(entry.path, content);
     } catch (e) {
+      clearTimeout(timeoutId);
       setFileCache(entry.path, {
         text: `⚠ Could not load file\n\n${e}`,
         size: 0, is_binary: false, language: 'plaintext', line_count: 0,
@@ -281,10 +324,10 @@ const Explorer: Component = () => {
     const idx = current.findIndex(t => t.path === path);
     const next = current.filter(t => t.path !== path);
     setTabs(next);
+    if (previewCache[path]) {
+      setPreviewCache(produce(d => { delete d[path]; }));
+    }
     if (activeTabPath() === path) {
-      // Activate the tab that was to the RIGHT of the closed one (same index
-      // position after removal). Fall back to the new last tab. VS Code
-      // convention: prefer the next tab, not the previous one.
       const newActive = next[Math.min(idx, next.length - 1)]?.path ?? null;
       setActiveTabPath(newActive);
     }
@@ -295,15 +338,20 @@ const Explorer: Component = () => {
   // ---------------------------------------------------------------------------
 
   async function renderPreview(path: string, text: string) {
-    if (previewCache[path]) return;
+    if (previewCache[path] || previewInFlight().has(path)) return;
+    setPreviewInFlight(s => new Set([...s, path]));
     const ext = fileExt(path);
-    if (ext === 'md' || ext === 'markdown' || ext === 'mdx') {
-      try {
+    try {
+      if (ext === 'md' || ext === 'markdown' || ext === 'mdx') {
         const html = await invoke<string>('blog_render_preview', { markdown: text });
         setPreviewCache(path, html);
-      } catch { setPreviewCache(path, '<p>Preview failed.</p>'); }
-    } else if (ext === 'html' || ext === 'htm') {
-      setPreviewCache(path, text);
+      } else if (ext === 'html' || ext === 'htm') {
+        setPreviewCache(path, text);
+      }
+    } catch {
+      setPreviewCache(path, '<p>Preview failed.</p>');
+    } finally {
+      setPreviewInFlight(s => { const n = new Set(s); n.delete(path); return n; });
     }
   }
 
@@ -493,81 +541,80 @@ const Explorer: Component = () => {
   // ---------------------------------------------------------------------------
 
   function ContentView(p: { path: string }) {
-    // Derive loading/content state directly from the store.
-    // fileCache[path] states:
-    //   undefined = file not yet opened (shouldn't render ContentView)
-    //   null      = file is being loaded (spinner)
-    //   object    = file loaded (show content)
     const cacheEntry = () => fileCache[p.path];
     const isLoading = () => cacheEntry() === null || cacheEntry() === undefined;
-    const content = () => cacheEntry() as FvFileContent | undefined;
+    // Use ?? undefined to convert null sentinel to undefined, making the type FvFileContent | undefined
+    const content = () => cacheEntry() ?? undefined;
     const ext = () => fileExt(p.path);
     const imgSrc = () => isImage(ext()) ? convertFileSrc(p.path) : null;
 
     return (
       <div class="h-full overflow-hidden">
-        {/* Image viewer — no cache entry needed */}
-        <Show when={imgSrc()}>
-          <div class="flex items-center justify-center h-full bg-gray-100 dark:bg-gray-900 overflow-auto p-4">
-            <img src={imgSrc()!} alt={fileName(p.path)}
-              class="max-w-full max-h-full object-contain rounded shadow-lg" />
-          </div>
-        </Show>
-
-        {/* Loading spinner while cache entry is null/undefined */}
-        <Show when={!imgSrc() && isLoading()}>
-          <div class="flex flex-col items-center justify-center h-full gap-3">
-            <div class="text-sm text-gray-400 animate-pulse">Loading {fileName(p.path)}…</div>
-            <div class="text-[10px] text-gray-300 dark:text-gray-600 font-mono">
-              cache={cacheEntry() === undefined ? 'undefined' : cacheEntry() === null ? 'null(loading)' : 'has-data'}
+        <Switch>
+          <Match when={imgSrc()}>
+            <div class="flex items-center justify-center h-full bg-gray-100 dark:bg-gray-900 overflow-auto p-4">
+              <img src={imgSrc()!} alt={fileName(p.path)}
+                class="max-w-full max-h-full object-contain rounded shadow-lg" />
             </div>
-            <button
-              class="text-xs text-sky-500 underline mt-1"
-              onClick={async () => {
-                try {
-                  const r = await invoke<FvFileContent>('fv_read_file', { path: p.path });
-                  setFileCache(p.path, r);
-                } catch(e) {
-                  setFileCache(p.path, { text: `⚠ Retry failed: ${e}`, size: 0, is_binary: false, language: 'plaintext', line_count: 0 });
-                }
-              }}
-            >Retry load</button>
-          </div>
-        </Show>
+          </Match>
 
-        {/* Binary file */}
-        <Show when={!imgSrc() && !isLoading() && content()?.is_binary}>
-          <div class="flex flex-col items-center justify-center h-full gap-3 text-gray-400">
-            <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-                d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-            <p class="text-sm font-medium">Binary file — cannot preview</p>
-            <p class="text-xs">{humanSize(content()?.size ?? 0)}</p>
-          </div>
-        </Show>
-
-        {/* Text / code file */}
-        <Show when={!imgSrc() && !isLoading() && content() && !content()!.is_binary}>
-          <Switch fallback={null}>
-            <Match when={viewMode() === 'source'}>
-              <SourcePane path={p.path} content={content()!} />
-            </Match>
-            <Match when={viewMode() === 'preview'}>
-              <PreviewPane path={p.path} />
-            </Match>
-            <Match when={viewMode() === 'split'}>
-              <div class="flex h-full">
-                <div class="w-1/2 border-r border-gray-200 dark:border-gray-700 overflow-hidden">
-                  <SourcePane path={p.path} content={content()!} />
-                </div>
-                <div class="w-1/2 overflow-hidden">
-                  <PreviewPane path={p.path} />
-                </div>
+          <Match when={isLoading()}>
+            <div class="flex flex-col items-center justify-center h-full gap-3">
+              <div class="text-sm text-gray-400 animate-pulse">Loading {fileName(p.path)}…</div>
+              <div class="text-[10px] text-gray-300 dark:text-gray-600 font-mono">
+                cache={cacheEntry() === undefined ? 'undefined' : cacheEntry() === null ? 'null(loading)' : 'has-data'}
               </div>
-            </Match>
-          </Switch>
-        </Show>
+              <button
+                class="text-xs text-sky-500 underline mt-1"
+                onClick={async () => {
+                  setFileCache(p.path, null);
+                  let tid: ReturnType<typeof setTimeout> | undefined;
+                  const fs = new Promise<never>((_, r) => { tid = setTimeout(() => r(new Error('timeout')), 15_000); });
+                  try {
+                    const r = await Promise.race([invoke<FvFileContent>('fv_read_file', { path: p.path }), fs]);
+                    clearTimeout(tid);
+                    setFileCache(p.path, r);
+                  } catch(e) {
+                    clearTimeout(tid);
+                    setFileCache(p.path, { text: `⚠ Retry failed: ${e}`, size: 0, is_binary: false, language: 'plaintext', line_count: 0 });
+                  }
+                }}
+              >Retry load</button>
+            </div>
+          </Match>
+
+          <Match when={content()?.is_binary}>
+            <div class="flex flex-col items-center justify-center h-full gap-3 text-gray-400">
+              <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                  d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              <p class="text-sm font-medium">Binary file — cannot preview</p>
+              <p class="text-xs">{humanSize(content()?.size ?? 0)}</p>
+            </div>
+          </Match>
+
+          <Match when={content()}>
+            <Switch fallback={null}>
+              <Match when={viewMode() === 'source'}>
+                <SourcePane path={p.path} content={content()!} />
+              </Match>
+              <Match when={viewMode() === 'preview'}>
+                <PreviewPane path={p.path} />
+              </Match>
+              <Match when={viewMode() === 'split'}>
+                <div class="flex h-full">
+                  <div class="w-1/2 border-r border-gray-200 dark:border-gray-700 overflow-hidden">
+                    <SourcePane path={p.path} content={content()!} />
+                  </div>
+                  <div class="w-1/2 overflow-hidden">
+                    <PreviewPane path={p.path} />
+                  </div>
+                </div>
+              </Match>
+            </Switch>
+          </Match>
+        </Switch>
       </div>
     );
   }
