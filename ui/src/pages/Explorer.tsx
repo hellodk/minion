@@ -18,7 +18,7 @@ interface FvFileContent {
   text: string; size: number; is_binary: boolean;
   language: string; line_count: number;
 }
-interface ExplorerTab { path: string; name: string; loading: boolean; }
+interface ExplorerTab { path: string; name: string; }
 type ViewMode = 'source' | 'split' | 'preview';
 
 // ---------------------------------------------------------------------------
@@ -123,6 +123,10 @@ const Explorer: Component = () => {
   const [viewMode, setViewMode] = createSignal<ViewMode>('source');
   const [expandedDirs, setExpandedDirs] = createSignal<Set<string>>(new Set());
   const [loadingDirs, setLoadingDirs] = createSignal<Set<string>>(new Set());
+  // Tracks which file paths are currently being loaded.
+  // Kept as a top-level signal (not embedded in tabs) so ContentView can
+  // check it directly — no intermediate .find() call to mistrack.
+  const [loadingFiles, setLoadingFiles] = createSignal<Set<string>>(new Set());
   const [dirContents, setDirContents] = createStore<Record<string, FvEntry[]>>({});
   const [fileCache, setFileCache] = createStore<Record<string, FvFileContent | null>>({});
   const [previewCache, setPreviewCache] = createStore<Record<string, string>>({});
@@ -247,8 +251,8 @@ const Explorer: Component = () => {
       return;
     }
 
-    // Evict oldest if at limit
-    const newTab: ExplorerTab = { path: entry.path, name: entry.name, loading: true };
+    // Evict oldest tab if at limit
+    const newTab: ExplorerTab = { path: entry.path, name: entry.name };
     setTabs(prev => {
       const without = prev.filter(t => t.path !== entry.path);
       const trimmed = without.length >= MAX_TABS ? without.slice(1) : without;
@@ -256,17 +260,20 @@ const Explorer: Component = () => {
     });
     setActiveTabPath(entry.path);
 
-    // Skip binary detection for images — we show them directly
-    if (isImage(entry.extension)) {
-      setTabs(prev => prev.map(t => t.path === entry.path ? { ...t, loading: false } : t));
-      return;
-    }
+    // Images are served directly via convertFileSrc — no IPC read needed.
+    if (isImage(entry.extension)) return;
 
-    // Load file content — 10 s safety timeout so loading never gets
-    // permanently stuck if the IPC call fails silently.
+    // Mark as loading using a dedicated signal so ContentView can track it
+    // with a direct .has() check instead of a tabs().find()?.loading chain.
+    setLoadingFiles(s => new Set([...s, entry.path]));
+
+    // 10 s safety timeout: prevents permanent "Loading…" if IPC hangs.
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const failSafe = new Promise<never>((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error('Timed out after 10 s')), 10_000);
+      timeoutId = setTimeout(
+        () => reject(new Error('File load timed out (10 s). Try again.')),
+        10_000,
+      );
     });
 
     try {
@@ -278,9 +285,12 @@ const Explorer: Component = () => {
       setFileCache(entry.path, content);
     } catch (e) {
       clearTimeout(timeoutId);
-      setFileCache(entry.path, { text: `Error loading file: ${e}`, size: 0, is_binary: false, language: 'plaintext', line_count: 0 });
+      setFileCache(entry.path, {
+        text: `⚠ Could not load file\n\n${e}`,
+        size: 0, is_binary: false, language: 'plaintext', line_count: 0,
+      });
     } finally {
-      setTabs(prev => prev.map(t => t.path === entry.path ? { ...t, loading: false } : t));
+      setLoadingFiles(s => { const n = new Set(s); n.delete(entry.path); return n; });
     }
   }
 
@@ -502,7 +512,7 @@ const Explorer: Component = () => {
   // ---------------------------------------------------------------------------
 
   function ContentView(p: { path: string }) {
-    const tab = () => tabs().find(t => t.path === p.path);
+    const isFileLoading = () => loadingFiles().has(p.path);
     const content = () => fileCache[p.path];
     // Bug 1 fix: must be reactive functions — p.path changes when tabs switch
     // but ContentView is NOT remounted (Show stays truthy). A plain variable
@@ -512,13 +522,13 @@ const Explorer: Component = () => {
 
     return (
       <div class="h-full overflow-hidden">
-        <Show when={tab()?.loading}>
+        <Show when={isFileLoading()}>
           <div class="flex items-center justify-center h-full text-sm text-gray-400 animate-pulse">
             Loading {fileName(p.path)}…
           </div>
         </Show>
 
-        <Show when={!tab()?.loading}>
+        <Show when={!isFileLoading()}>
           {/* Image viewer */}
           <Show when={imgSrc()}>
             <div class="flex items-center justify-center h-full bg-gray-100 dark:bg-gray-900 overflow-auto p-4">
@@ -575,8 +585,6 @@ const Explorer: Component = () => {
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
-
-  const activeFile = () => tabs().find(t => t.path === activeTabPath());
 
   return (
     <div class="flex h-full overflow-hidden text-sm bg-white dark:bg-gray-900">
@@ -712,7 +720,7 @@ const Explorer: Component = () => {
         </div>
 
         {/* View-mode toggle bar — only for MD / HTML */}
-        <Show when={activeFile() && !activeFile()!.loading && isPreviewable(activeTabPath()!)}>
+        <Show when={activeTabPath() && !loadingFiles().has(activeTabPath()!) && isPreviewable(activeTabPath()!)}>
           <div class="flex-none flex items-center gap-1 px-3 py-1.5 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
             <span class="text-[10px] text-gray-400 mr-1">View:</span>
             {(['source', 'split', 'preview'] as ViewMode[]).map((m) => (
