@@ -104,6 +104,43 @@ impl ChatMessage {
     }
 }
 
+/// Image URL content for vision-capable models.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,   // "data:image/png;base64,..." or https URL
+}
+
+/// Content parts for a vision message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum VisionContent {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// A message that may contain text + images (for vision models).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisionMessage {
+    pub role: ChatRole,
+    pub content: Vec<VisionContent>,
+}
+
+impl VisionMessage {
+    pub fn user_text(text: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::User,
+            content: vec![VisionContent::Text { text: text.into() }],
+        }
+    }
+
+    pub fn with_image(mut self, data_url: impl Into<String>) -> Self {
+        self.content.push(VisionContent::ImageUrl {
+            image_url: ImageUrl { url: data_url.into() },
+        });
+        self
+    }
+}
+
 /// A chat-completion request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
