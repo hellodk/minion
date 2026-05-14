@@ -16,7 +16,7 @@
 
 use crate::health_entities::{canonicalize_drug, canonicalize_test, resolve_entity};
 use crate::state::AppState;
-use minion_llm::{create_provider, EndpointConfig, JsonExtractRequest, LlmProvider, ProviderType};
+use minion_llm::{create_provider, EndpointConfig, JsonExtractRequest, LlmProvider};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{Emitter, State};
@@ -453,101 +453,6 @@ fn truncate_chars(s: &str, max: usize) -> String {
 // Endpoint lookup
 // =====================================================================
 
-/// Stored endpoint row (used for provider construction).
-#[derive(Debug, Clone)]
-struct StoredEndpoint {
-    #[allow(dead_code)]
-    id: String,
-    provider_type: String,
-    base_url: String,
-    api_key: Option<String>,
-    default_model: Option<String>,
-    extra_headers: Option<String>,
-}
-
-/// Resolve the endpoint to use for the `health_extract` feature.
-/// Delegates to `llm_router` — kept here for backwards compatibility with
-/// callers inside this module that still use the internal `StoredEndpoint`.
-fn get_extract_endpoint(conn: &rusqlite::Connection, feature: &str) -> Option<StoredEndpoint> {
-    // Try feature binding first.
-    let bound: Option<String> = conn
-        .query_row(
-            "SELECT endpoint_id FROM llm_feature_bindings WHERE feature = ?1",
-            rusqlite::params![feature],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-    let query_by_id = |id: &str| -> Option<StoredEndpoint> {
-        conn.query_row(
-            "SELECT id, provider_type, base_url, api_key_encrypted,
-                    default_model, extra_headers
-             FROM llm_endpoints WHERE id = ?1 AND enabled = 1",
-            rusqlite::params![id],
-            |row| {
-                Ok(StoredEndpoint {
-                    id: row.get(0)?,
-                    provider_type: row.get(1)?,
-                    base_url: row.get(2)?,
-                    api_key: row.get(3)?,
-                    default_model: row.get(4)?,
-                    extra_headers: row.get(5)?,
-                })
-            },
-        )
-        .ok()
-    };
-    if let Some(id) = bound {
-        if let Some(ep) = query_by_id(&id) {
-            return Some(ep);
-        }
-    }
-    // Fallback: first enabled endpoint.
-    conn.query_row(
-        "SELECT id, provider_type, base_url, api_key_encrypted,
-                default_model, extra_headers
-         FROM llm_endpoints WHERE enabled = 1
-         ORDER BY created_at ASC LIMIT 1",
-        [],
-        |row| {
-            Ok(StoredEndpoint {
-                id: row.get(0)?,
-                provider_type: row.get(1)?,
-                base_url: row.get(2)?,
-                api_key: row.get(3)?,
-                default_model: row.get(4)?,
-                extra_headers: row.get(5)?,
-            })
-        },
-    )
-    .ok()
-}
-
-/// Convert a stored endpoint row into an [`EndpointConfig`] + model label.
-fn build_config(stored: &StoredEndpoint) -> Result<EndpointConfig, String> {
-    let pt = match stored.provider_type.as_str() {
-        "ollama" => ProviderType::Ollama,
-        "openai_compatible" => ProviderType::OpenaiCompatible,
-        "openai" => ProviderType::Openai,
-        "anthropic" => ProviderType::Anthropic,
-        "google_gemini" => ProviderType::GoogleGemini,
-        "airllm" => ProviderType::Airllm,
-        other => return Err(format!("Unknown provider type: {}", other)),
-    };
-    let extra_headers = stored
-        .extra_headers
-        .as_ref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-    Ok(EndpointConfig {
-        provider_type: pt,
-        base_url: stored.base_url.clone(),
-        api_key: stored.api_key.clone(),
-        default_model: stored.default_model.clone().unwrap_or_default(),
-        extra_headers,
-    })
-}
-
 /// Stable handle that other modules (e.g. `health_timeline`) hold onto.
 pub type EndpointHandle = EndpointConfig;
 
@@ -574,19 +479,12 @@ pub async fn llm_call_for_feature(
 /// True if a default extraction endpoint exists and passes a health check.
 /// Used by the ingestion loop to decide whether to auto-classify.
 pub async fn is_extract_endpoint_healthy(state: &AppStateHandle) -> bool {
-    let stored = {
-        let st = state.read().await;
-        match st.db.get() {
-            Ok(conn) => get_extract_endpoint(&conn, "health_extract"),
-            Err(_) => None,
-        }
-    };
-    let Some(stored) = stored else { return false };
-    let Ok(cfg) = build_config(&stored) else {
-        return false;
+    let cfg = match crate::llm_router::resolve(state, "health_extract").await {
+        Ok(Some(c)) => c,
+        _ => return false,
     };
     let provider = create_provider(cfg);
-    provider.health_check().await.unwrap_or(false)
+    provider.health_check().await.is_ok()
 }
 
 // =====================================================================
@@ -605,14 +503,10 @@ pub async fn process_document(
 ) -> Result<(), String> {
     let feature = feature.unwrap_or("health_extract");
 
-    // 1. Resolve endpoint + build provider.
-    let stored = {
-        let st = state.read().await;
-        let conn = st.db.get().map_err(|e| e.to_string())?;
-        get_extract_endpoint(&conn, feature)
-            .ok_or_else(|| "no LLM endpoint configured".to_string())?
-    };
-    let cfg = build_config(&stored)?;
+    // 1. Resolve endpoint + build provider via the central router.
+    let cfg = crate::llm_router::resolve(state, feature)
+        .await?
+        .ok_or_else(|| "no LLM endpoint configured".to_string())?;
     let model_label = cfg.default_model.clone();
     let provider = create_provider(cfg);
 

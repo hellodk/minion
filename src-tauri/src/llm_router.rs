@@ -43,16 +43,19 @@ struct StoredEndpoint {
     extra_headers: Option<String>,
 }
 
-fn query_endpoint(conn: &rusqlite::Connection, feature: &str) -> Option<StoredEndpoint> {
-    // Step 1: check per-feature binding.
-    let bound_id: Option<String> = conn
+/// Returns the endpoint row and the optional model override from the binding.
+fn query_endpoint(
+    conn: &rusqlite::Connection,
+    feature: &str,
+) -> Option<(StoredEndpoint, Option<String>)> {
+    // Step 1: check per-feature binding (also fetches model_override).
+    let bound: Option<(String, Option<String>)> = conn
         .query_row(
-            "SELECT endpoint_id FROM llm_feature_bindings WHERE feature = ?1",
+            "SELECT endpoint_id, model_override FROM llm_feature_bindings WHERE feature = ?1",
             rusqlite::params![feature],
-            |row| row.get(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
-        .ok()
-        .flatten();
+        .ok();
 
     let row_to_stored = |row: &rusqlite::Row<'_>| -> rusqlite::Result<StoredEndpoint> {
         Ok(StoredEndpoint {
@@ -64,7 +67,7 @@ fn query_endpoint(conn: &rusqlite::Connection, feature: &str) -> Option<StoredEn
         })
     };
 
-    if let Some(id) = bound_id {
+    if let Some((id, model_override)) = bound {
         let hit = conn.query_row(
             "SELECT provider_type, base_url, api_key_encrypted, default_model, extra_headers
              FROM llm_endpoints WHERE id = ?1 AND enabled = 1",
@@ -72,7 +75,7 @@ fn query_endpoint(conn: &rusqlite::Connection, feature: &str) -> Option<StoredEn
             row_to_stored,
         );
         if let Ok(ep) = hit {
-            return Some(ep);
+            return Some((ep, model_override));
         }
     }
 
@@ -84,9 +87,10 @@ fn query_endpoint(conn: &rusqlite::Connection, feature: &str) -> Option<StoredEn
         row_to_stored,
     )
     .ok()
+    .map(|ep| (ep, None))
 }
 
-fn to_config(ep: StoredEndpoint) -> Result<EndpointConfig, String> {
+fn to_config(ep: StoredEndpoint, model_override: Option<String>) -> Result<EndpointConfig, String> {
     let pt = match ep.provider_type.as_str() {
         "ollama"           => ProviderType::Ollama,
         "openai_compatible" => ProviderType::OpenaiCompatible,
@@ -100,11 +104,16 @@ fn to_config(ep: StoredEndpoint) -> Result<EndpointConfig, String> {
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
+    // model_override from the binding takes precedence over the endpoint's default_model.
+    let default_model = model_override
+        .filter(|m| !m.is_empty())
+        .or(ep.default_model)
+        .unwrap_or_default();
     Ok(EndpointConfig {
         provider_type: pt,
         base_url: ep.base_url,
         api_key: ep.api_key,
-        default_model: ep.default_model.unwrap_or_default(),
+        default_model,
         extra_headers,
     })
 }
@@ -124,7 +133,41 @@ pub async fn resolve(
         let conn = st.db.get().map_err(|e| e.to_string())?;
         query_endpoint(&conn, feature)
     };
-    stored.map(to_config).transpose()
+    stored.map(|(ep, model_override)| to_config(ep, model_override)).transpose()
+}
+
+// -------------------------------------------------------------------------
+// Internal chat implementation shared by `call` and `call_with`
+// -------------------------------------------------------------------------
+
+async fn call_impl(
+    state: &AppStateHandle,
+    feature: &str,
+    system: &str,
+    user: &str,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+) -> Result<String, String> {
+    use minion_llm::types::{ChatMessage, ChatRequest};
+    let cfg = resolve(state, feature).await?.ok_or_else(|| {
+        "No enabled LLM endpoint. Add one in Settings → LLM Endpoints.".to_string()
+    })?;
+    let provider = create_provider(cfg);
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user(user.to_string())],
+        system: Some(system.to_string()),
+        model: None,
+        temperature,
+        max_tokens,
+        json_mode: false,
+    };
+    // CR6: 60-second timeout to prevent indefinite hangs
+    use tokio::time::{timeout, Duration};
+    let resp = timeout(Duration::from_secs(60), provider.chat(req))
+        .await
+        .map_err(|_| "LLM request timed out after 60 seconds".to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(resp.content)
 }
 
 /// Issue a single-turn chat request routed through the smart router.
@@ -138,23 +181,7 @@ pub async fn call(
     system: &str,
     user: &str,
 ) -> Result<String, String> {
-    use minion_llm::types::{ChatMessage, ChatRequest};
-
-    let cfg = resolve(state, feature).await?.ok_or_else(|| {
-        "No enabled LLM endpoint. Add one in Settings → LLM Endpoints.".to_string()
-    })?;
-
-    let provider = create_provider(cfg);
-    let req = ChatRequest {
-        messages: vec![ChatMessage::user(user.to_string())],
-        system: Some(system.to_string()),
-        model: None,
-        temperature: None,
-        max_tokens: None,
-        json_mode: false,
-    };
-    let resp = provider.chat(req).await.map_err(|e| e.to_string())?;
-    Ok(resp.content)
+    call_impl(state, feature, system, user, None, None).await
 }
 
 /// Like `call` but with explicit temperature and max_tokens.
@@ -166,21 +193,5 @@ pub async fn call_with(
     temperature: f32,
     max_tokens: u32,
 ) -> Result<String, String> {
-    use minion_llm::types::{ChatMessage, ChatRequest};
-
-    let cfg = resolve(state, feature).await?.ok_or_else(|| {
-        "No enabled LLM endpoint. Add one in Settings → LLM Endpoints.".to_string()
-    })?;
-
-    let provider = create_provider(cfg);
-    let req = ChatRequest {
-        messages: vec![ChatMessage::user(user.to_string())],
-        system: Some(system.to_string()),
-        model: None,
-        temperature: Some(temperature),
-        max_tokens: Some(max_tokens),
-        json_mode: false,
-    };
-    let resp = provider.chat(req).await.map_err(|e| e.to_string())?;
-    Ok(resp.content)
+    call_impl(state, feature, system, user, Some(temperature), Some(max_tokens)).await
 }

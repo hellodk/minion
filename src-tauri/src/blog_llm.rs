@@ -169,7 +169,13 @@ pub async fn blog_llm_conclusion(
         &content[content.len().saturating_sub(1000)..]
     );
 
-    Ok(crate::llm_router::call(&state, "blog_llm", system, &user).await.ok())
+    Ok(crate::llm_router::call(&state, "blog_llm_conclusion", system, &user)
+        .await
+        .map_err(|e| {
+            tracing::warn!("blog_llm_conclusion LLM failed: {e}");
+            e
+        })
+        .ok())
 }
 
 #[tauri::command]

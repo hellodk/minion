@@ -3,6 +3,8 @@ import {
   Component, createSignal, createEffect, createMemo, For, Show, onMount, onCleanup,
   Switch, Match,
 } from 'solid-js';
+import { diffLines } from 'diff';
+import type { Change } from 'diff';
 import { createStore, produce } from 'solid-js/store';
 import { invoke } from '@tauri-apps/api/core';
 import DOMPurify from 'dompurify';
@@ -148,19 +150,21 @@ const Explorer: Component = () => {
   const [failedDirs, setFailedDirs] = createSignal<Set<string>>(new Set());
   const [aiError, setAiError] = createSignal<string | null>(null);
 
-  // Feature 2: Sidebar toggle
   const [sidebarOpen, setSidebarOpen] = createSignal(true);
 
-  // Feature 4: Resizable sidebar
-  const [sidebarWidth, setSidebarWidth] = createSignal(256);
+  // CR17: Persist sidebar width across sessions
+  const [sidebarWidth, setSidebarWidth] = createSignal(
+    parseInt(localStorage.getItem('explorer-sidebar-width') ?? '256', 10)
+  );
+  createEffect(() => {
+    localStorage.setItem('explorer-sidebar-width', String(sidebarWidth()));
+  });
 
-  // Feature 5: Git status
   const [gitStatus, setGitStatus] = createStore<Record<string, string>>({});
 
-  // Feature 6: Context menu
   const [contextMenu, setContextMenu] = createSignal<ContextMenuTarget>(null);
 
-  // Feature 7: Tab eviction toast
+  // Tab eviction toast
   const [evictedTab, setEvictedTab] = createSignal<string | null>(null);
   let evictToastTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -171,11 +175,17 @@ const Explorer: Component = () => {
       try { setExpandedDirs(new Set(JSON.parse(saved) as string[])); } catch { /* ignore */ }
     }
   }
+  // CR13: Debounce localStorage writes for expandedDirs
+  let _saveTimer: ReturnType<typeof setTimeout> | undefined;
   createEffect(() => {
-    localStorage.setItem('explorer-expanded', JSON.stringify([...expandedDirs()]));
+    const dirs = [...expandedDirs()]; // access signal to track it
+    clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(() => {
+      localStorage.setItem('explorer-expanded', JSON.stringify(dirs));
+    }, 400);
   });
 
-  // Feature 3: File search
+  // File search
   const [searchQuery, setSearchQuery] = createSignal('');
   const [searchActive, setSearchActive] = createSignal(false);
 
@@ -196,11 +206,11 @@ const Explorer: Component = () => {
   // Image cache: path → base64 data URI (loaded on demand via fv_read_image_base64)
   const [imageCache, setImageCache] = createStore<Record<string, string | null>>({});
 
-  // Feature 4: AI Format MD
+  // AI Format MD
   const [aiWorking, setAiWorking] = createSignal(false);
   const [aiOriginals, setAiOriginals] = createStore<Record<string, string>>({});
 
-  // Feature 5: Git status refresh
+  // Git status refresh
   async function refreshGitStatus(wsPath: string) {
     try {
       const status = await invoke<Record<string, string>>('fv_git_status', { workspacePath: wsPath });
@@ -232,7 +242,7 @@ const Explorer: Component = () => {
         const ts = tabs();
         if (ts.length < 2) return;
         const idx = ts.findIndex(t => t.path === activeTabPath());
-        setActiveTabPath(ts[(idx + (e.shiftKey ? -1 + ts.length : 1)) % ts.length].path);
+        setActiveTabPath(ts[(idx + (e.shiftKey ? -1 : 1) + ts.length) % ts.length].path);
       } else if (e.ctrlKey && (e.key === 'f' || e.key === 'p')) {
         e.preventDefault();
         setSearchActive(true);
@@ -243,15 +253,11 @@ const Explorer: Component = () => {
     onCleanup(() => window.removeEventListener('keydown', handler));
   }
 
-  // Feature 6: Context menu dismiss
+  // Context menu dismiss
   {
     const dismiss = () => setContextMenu(null);
     window.addEventListener('click', dismiss);
-    window.addEventListener('contextmenu', dismiss);
-    onCleanup(() => {
-      window.removeEventListener('click', dismiss);
-      window.removeEventListener('contextmenu', dismiss);
-    });
+    onCleanup(() => window.removeEventListener('click', dismiss));
   }
 
   // Reset view mode to 'source' when switching to a non-previewable file
@@ -357,7 +363,12 @@ const Explorer: Component = () => {
   }
 
   async function removeWorkspace(wsPath: string) {
-    await invoke('fv_remove_workspace', { path: wsPath });
+    try {
+      await invoke('fv_remove_workspace', { path: wsPath });
+    } catch (e) {
+      console.error('Failed to remove workspace from DB:', e);
+      // Continue with UI cleanup regardless
+    }
     setWorkspaces(prev => prev.filter(w => w.path !== wsPath));
 
     // Close tabs for files under this workspace
@@ -412,7 +423,7 @@ const Explorer: Component = () => {
 
     const newTab: ExplorerTab = { path: entry.path, name: entry.name };
 
-    // Feature 7: Tab eviction toast
+    // Tab eviction toast
     setTabs(prev => {
       const without = prev.filter(t => t.path !== entry.path);
       if (without.length >= MAX_TABS) {
@@ -426,7 +437,7 @@ const Explorer: Component = () => {
     });
     setActiveTabPath(entry.path);
 
-    // Feature 3: PDF extraction via backend
+    // PDF: extract text via backend
     if (entry.extension === 'pdf') {
       setFileCache(entry.path, null);
       invoke<FvFileContent>('fv_extract_pdf', { path: entry.path })
@@ -486,9 +497,10 @@ const Explorer: Component = () => {
     const idx = current.findIndex(t => t.path === path);
     const next = current.filter(t => t.path !== path);
     setTabs(next);
-    if (previewCache[path]) {
-      setPreviewCache(produce(d => { delete d[path]; }));
-    }
+    // Clean up per-tab state
+    if (previewCache[path]) setPreviewCache(produce(d => { delete d[path]; }));
+    if (tabViewModes[path]) setTabViewModes(produce(d => { delete d[path]; }));
+    if (aiOriginals[path]) setAiOriginals(produce(d => { delete d[path]; }));
     if (activeTabPath() === path) {
       const newActive = next[Math.min(idx, next.length - 1)]?.path ?? null;
       setActiveTabPath(newActive);
@@ -505,18 +517,22 @@ const Explorer: Component = () => {
     const baseDir = mdFilePath.includes('/') || mdFilePath.includes('\\')
       ? mdFilePath.substring(0, Math.max(mdFilePath.lastIndexOf('/'), mdFilePath.lastIndexOf('\\')))
       : '';
-    const imgSrcRe = /src="([^"]+)"/g;
-    const matches: Array<{ full: string; src: string }> = [];
+
+    // Only match src attributes inside <img> tags
+    const imgTagRe = /(<img\b[^>]*?\bsrc=")([^"]+)(")/gi;
+    const matches: Array<{ full: string; prefix: string; src: string; suffix: string }> = [];
     let m: RegExpExecArray | null;
-    while ((m = imgSrcRe.exec(html)) !== null) matches.push({ full: m[0], src: m[1] });
+    while ((m = imgTagRe.exec(html)) !== null) {
+      matches.push({ full: m[0], prefix: m[1], src: m[2], suffix: m[3] });
+    }
 
     let result = html;
-    for (const { full, src } of matches) {
+    for (const { full, prefix, src, suffix } of matches) {
       if (src.startsWith('data:') || src.startsWith('http://') || src.startsWith('https://')) continue;
       const absPath = src.startsWith('/') ? src : `${baseDir}/${src}`;
       try {
         const uri = await invoke<string>('fv_read_image_base64', { path: absPath });
-        result = result.replace(full, `src="${uri}"`);
+        result = result.replace(full, `${prefix}${uri}${suffix}`);
       } catch { /* skip unresolvable paths */ }
     }
     return result;
@@ -535,10 +551,10 @@ const Explorer: Component = () => {
       if (ext === 'md' || ext === 'markdown' || ext === 'mdx') {
         const rawHtml = await invoke<string>('blog_render_preview', { markdown: text });
         const html = await resolveImagesInHtml(rawHtml, path);
-        setPreviewCache(path, DOMPurify.sanitize(html, DOMPURIFY_CONFIG) as unknown as string);
+        setPreviewCache(path, DOMPurify.sanitize(html, DOMPURIFY_CONFIG));
       } else if (ext === 'html' || ext === 'htm') {
         const html = await resolveImagesInHtml(text, path);
-        setPreviewCache(path, DOMPurify.sanitize(html, DOMPURIFY_CONFIG) as unknown as string);
+        setPreviewCache(path, DOMPurify.sanitize(html, DOMPURIFY_CONFIG));
       }
     } catch {
       setPreviewCache(path, '<p>Preview failed.</p>');
@@ -574,13 +590,14 @@ const Explorer: Component = () => {
         onClick={() => void openFile(p.entry)}
         onContextMenu={(e: MouseEvent) => {
           e.preventDefault();
+          e.stopPropagation();
           setContextMenu({ entry: p.entry, x: e.clientX, y: e.clientY });
         }}
         title={p.entry.path}
       >
         <IconFile ext={p.entry.extension} />
         <span class="text-xs truncate">{p.entry.name}</span>
-        {/* Feature 5: Git status badge */}
+        {/* Git status badge */}
         <Show when={gitStatus[p.entry.path]}>
           <span
             class={`text-[9px] font-bold ml-auto shrink-0 ${
@@ -661,7 +678,7 @@ const Explorer: Component = () => {
   }
 
   // ---------------------------------------------------------------------------
-  // Feature 1: Source view with syntax highlighting + line number gutter
+  // Source view with syntax highlighting + line number gutter
   // ---------------------------------------------------------------------------
 
   function SourcePane(p: { path: string; content: FvFileContent }) {
@@ -700,7 +717,7 @@ const Explorer: Component = () => {
         </div>
         <div class="flex flex-1 overflow-auto">
           {/* Line numbers */}
-          <div class="select-none text-right text-gray-400 dark:text-gray-600 font-mono text-[13px] leading-relaxed py-4 px-2 bg-gray-50 dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800 shrink-0 min-w-[2.5rem]">
+          <div class="select-none text-right text-gray-400 dark:text-gray-600 font-mono text-[13px] leading-relaxed py-4 px-2 bg-gray-50 dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800 shrink-0 min-w-[2.5rem] sticky left-0 z-10">
             <For each={Array.from({length: p.content.line_count || 1}, (_, i) => i + 1)}>
               {(n) => <div class="leading-relaxed">{n}</div>}
             </For>
@@ -738,7 +755,7 @@ const Explorer: Component = () => {
       });
     });
 
-    // Feature 2: Mermaid diagrams
+    // Mermaid diagram rendering
     createEffect(() => {
       const el = previewEl();
       const h = html();
@@ -748,7 +765,7 @@ const Explorer: Component = () => {
         if (mermaidBlocks.length === 0) return;
         try {
           const mermaid = (await import('mermaid')).default;
-          mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' });
+          mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' });
           mermaidBlocks.forEach((block, i) => {
             const pre = block.parentElement;
             if (!pre) return;
@@ -804,20 +821,19 @@ const Explorer: Component = () => {
   }
 
   // ---------------------------------------------------------------------------
-  // Feature 8: Diff pane for AI-modified files
+  // Diff pane for AI-modified files
   // ---------------------------------------------------------------------------
 
   function DiffPane(p: { path: string }) {
     const original = () => aiOriginals[p.path] ?? '';
     const current = () => (fileCache[p.path] as FvFileContent)?.text ?? '';
 
-    const [diffResult, setDiffResult] = createSignal<import('diff').Change[]>([]);
+    const [diffResult, setDiffResult] = createSignal<Change[]>([]);
 
-    createEffect(async () => {
+    createEffect(() => {
       const orig = original();
       const cur = current();
       if (!orig && !cur) return;
-      const { diffLines } = await import('diff');
       setDiffResult(diffLines(orig, cur));
     });
 
@@ -931,7 +947,7 @@ const Explorer: Component = () => {
                   </div>
                 </div>
               </Match>
-              {/* Feature 8: Diff view */}
+              {/* Diff view */}
               <Match when={viewMode() === 'diff'}>
                 <DiffPane path={p.path} />
               </Match>
@@ -959,17 +975,17 @@ const Explorer: Component = () => {
           </button>
         </div>
       }>
-        {/* Feature 4: Resizable sidebar — width driven by sidebarWidth signal */}
+        {/* Resizable sidebar — width driven by sidebarWidth signal */}
         <div
           class="flex-none flex flex-col bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700 overflow-hidden"
           style={{ width: `${sidebarWidth()}px` }}
         >
           {/* Sidebar header */}
-          <div class="flex-none flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-gray-700">
-            <span class="text-[10px] font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">
+          <div class="flex-none flex items-center gap-1 px-3 py-2 border-b border-gray-200 dark:border-gray-700 overflow-hidden">
+            <span class="text-[10px] font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400 truncate min-w-0 flex-1">
               Explorer
             </span>
-            <div class="flex items-center gap-0.5">
+            <div class="flex-none flex items-center gap-0.5">
               {/* Show hidden files toggle */}
               <button
                 onClick={() => {
@@ -1071,7 +1087,7 @@ const Explorer: Component = () => {
                     </div>
                   )}
                 </For>
-                <Show when={searchActive()}>
+                <Show when={searchResults().length === 0 && workspaces().length > 0}>
                   <div class="px-3 py-1 text-[10px] text-gray-400 italic border-t border-gray-100 dark:border-gray-800 mt-1">
                     Tip: Expand folders to include their files in search
                   </div>
@@ -1153,7 +1169,7 @@ const Explorer: Component = () => {
         </div>
       </Show>
 
-      {/* Feature 4: Resize handle between sidebar and content */}
+      {/* Resize handle between sidebar and content */}
       <Show when={sidebarOpen()}>
         <div
           class="w-1 flex-none cursor-col-resize bg-gray-200 dark:bg-gray-700 hover:bg-sky-400 dark:hover:bg-sky-600 transition-colors"
@@ -1217,9 +1233,27 @@ const Explorer: Component = () => {
           </Show>
         </div>
 
-        {/* File path bar */}
+        {/* Path bar + Reload button — always visible when a tab is open */}
         <Show when={activeTabPath()}>
           <div class="flex-none flex items-center gap-2 px-3 py-0.5 bg-white dark:bg-gray-900 border-b border-gray-100 dark:border-gray-800 min-h-[20px]">
+            {/* Reload button — always visible when a tab is open */}
+            <button
+              onClick={() => {
+                const p = activeTabPath();
+                if (!p) return;
+                setFileCache(p, null);
+                if (previewCache[p]) setPreviewCache(produce(d => { delete d[p]; }));
+                invoke<FvFileContent>('fv_read_file', { path: p })
+                  .then(r => setFileCache(p, r))
+                  .catch(e => setFileCache(p, { text: `⚠ Could not load file\n\n${e}`, size: 0, is_binary: false, language: 'plaintext', line_count: 0 }));
+              }}
+              title="Reload from disk"
+              class="shrink-0 p-0.5 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            >
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </button>
             <span class="text-[10px] text-gray-400 font-mono truncate select-all flex-1" title={activeTabPath()!}>
               {activeTabPath()}
             </span>
@@ -1239,26 +1273,8 @@ const Explorer: Component = () => {
         {/* View-mode toggle bar + AI button — only when a file with content is active */}
         <Show when={activeTabPath() && !!fileCache[activeTabPath()!]}>
           <div class="flex-none flex items-center justify-between px-3 py-1.5 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
-            {/* Reload from disk + View mode buttons */}
+            {/* View mode buttons */}
             <div class="flex items-center gap-1">
-              {/* Reload from disk button */}
-              <button
-                onClick={() => {
-                  const p = activeTabPath();
-                  if (!p) return;
-                  setFileCache(p, null);
-                  if (previewCache[p]) setPreviewCache(produce(d => { delete d[p]; }));
-                  invoke<FvFileContent>('fv_read_file', { path: p })
-                    .then(r => setFileCache(p, r))
-                    .catch(e => setFileCache(p, { text: `⚠ Could not load file\n\n${e}`, size: 0, is_binary: false, language: 'plaintext', line_count: 0 }));
-                }}
-                title="Reload from disk"
-                class="p-0.5 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-              >
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-              </button>
               {/* View mode buttons — only for previewable files */}
               <Show when={isPreviewable(activeTabPath()!)}>
                 <span class="text-[10px] text-gray-400 mr-1 ml-1">View:</span>
@@ -1275,7 +1291,7 @@ const Explorer: Component = () => {
                   </button>
                 ))}
               </Show>
-              {/* Feature 8: Diff button — only when file has AI modifications */}
+              {/* Diff button — only when file has AI modifications */}
               <Show when={activeTabPath() && aiOriginals[activeTabPath()!]}>
                 <button
                   onClick={() => setViewMode('diff')}
@@ -1365,14 +1381,14 @@ const Explorer: Component = () => {
         </div>
       </div>
 
-      {/* Feature 7: Tab eviction toast */}
+      {/* Tab eviction toast */}
       <Show when={evictedTab()}>
         <div class="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 bg-gray-800 text-white text-xs px-4 py-2 rounded shadow-lg">
           Tab "{evictedTab()}" closed (max {MAX_TABS} tabs)
         </div>
       </Show>
 
-      {/* Feature 6: Context menu */}
+      {/* Context menu */}
       <Show when={contextMenu()}>
         <div
           class="fixed z-[100] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded shadow-xl py-1 min-w-[160px] text-xs"

@@ -287,8 +287,16 @@ pub async fn fv_extract_pdf(path: String) -> Result<FvFileContent, String> {
         return Err(format!("PDF too large ({:.1} MB). Limit is 50 MB.", size as f64 / 1_048_576.0));
     }
     tokio::task::spawn_blocking(move || {
-        let text = pdf_extract::extract_text(&path)
-            .map_err(|e| format!("PDF text extraction failed: {e}"))?;
+        let result = std::panic::catch_unwind(|| pdf_extract::extract_text(&path));
+        let text = match result {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => return Err(format!("PDF extraction failed: {e}")),
+            Err(_) => {
+                return Err(
+                    "PDF extraction panicked — file may be corrupt or unsupported".to_string(),
+                )
+            }
+        };
         let line_count = text.lines().count();
         Ok(FvFileContent { text, size, is_binary: false, language: "plaintext".to_owned(), line_count })
     })
@@ -304,7 +312,7 @@ pub async fn fv_extract_pdf(path: String) -> Result<FvFileContent, String> {
 pub async fn fv_git_status(workspace_path: String) -> Result<std::collections::HashMap<String, String>, String> {
     tokio::task::spawn_blocking(move || {
         let output = std::process::Command::new("git")
-            .args(["status", "--porcelain", "-u"])
+            .args(["status", "--porcelain"])
             .current_dir(&workspace_path)
             .output();
         let output = match output {
