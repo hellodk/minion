@@ -4,7 +4,6 @@ import {
 } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { invoke } from '@tauri-apps/api/core';
-import { convertFileSrc } from '@tauri-apps/api/core';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -153,6 +152,9 @@ const Explorer: Component = () => {
     }
     return results.slice(0, 80);
   });
+
+  // Image cache: path → base64 data URI (loaded on demand via fv_read_image_base64)
+  const [imageCache, setImageCache] = createStore<Record<string, string | null>>({});
 
   // Feature 4: AI Format MD
   const [aiWorking, setAiWorking] = createSignal(false);
@@ -315,7 +317,16 @@ const Explorer: Component = () => {
     });
     setActiveTabPath(entry.path);
 
-    if (isImage(entry.extension)) { return;}
+    // Images are loaded as base64 data URIs to avoid asset-protocol scope issues.
+    if (isImage(entry.extension)) {
+      if (!imageCache[entry.path]) {
+        setImageCache(entry.path, null); // null = loading
+        invoke<string>('fv_read_image_base64', { path: entry.path })
+          .then(uri => setImageCache(entry.path, uri))
+          .catch(() => setImageCache(entry.path, ''));
+      }
+      return;
+    }
 
     setFileCache(entry.path, null);
 
@@ -362,16 +373,41 @@ const Explorer: Component = () => {
   // Preview actions
   // ---------------------------------------------------------------------------
 
+  // Resolve all relative/absolute local img src values in rendered HTML to
+  // base64 data URIs so images display correctly in the WebView preview.
+  async function resolveImagesInHtml(html: string, mdFilePath: string): Promise<string> {
+    const baseDir = mdFilePath.includes('/') || mdFilePath.includes('\\')
+      ? mdFilePath.substring(0, Math.max(mdFilePath.lastIndexOf('/'), mdFilePath.lastIndexOf('\\')))
+      : '';
+    const imgSrcRe = /src="([^"]+)"/g;
+    const matches: Array<{ full: string; src: string }> = [];
+    let m: RegExpExecArray | null;
+    while ((m = imgSrcRe.exec(html)) !== null) matches.push({ full: m[0], src: m[1] });
+
+    let result = html;
+    for (const { full, src } of matches) {
+      if (src.startsWith('data:') || src.startsWith('http://') || src.startsWith('https://')) continue;
+      const absPath = src.startsWith('/') ? src : `${baseDir}/${src}`;
+      try {
+        const uri = await invoke<string>('fv_read_image_base64', { path: absPath });
+        result = result.replace(full, `src="${uri}"`);
+      } catch { /* skip unresolvable paths */ }
+    }
+    return result;
+  }
+
   async function renderPreview(path: string, text: string) {
     if (previewCache[path] || previewInFlight().has(path)) return;
     setPreviewInFlight(s => new Set([...s, path]));
     const ext = fileExt(path);
     try {
       if (ext === 'md' || ext === 'markdown' || ext === 'mdx') {
-        const html = await invoke<string>('blog_render_preview', { markdown: text });
+        const rawHtml = await invoke<string>('blog_render_preview', { markdown: text });
+        const html = await resolveImagesInHtml(rawHtml, path);
         setPreviewCache(path, html);
       } else if (ext === 'html' || ext === 'htm') {
-        setPreviewCache(path, text);
+        const html = await resolveImagesInHtml(text, path);
+        setPreviewCache(path, html);
       }
     } catch {
       setPreviewCache(path, '<p>Preview failed.</p>');
@@ -567,11 +603,18 @@ const Explorer: Component = () => {
 
   function ContentView(p: { path: string }) {
     const cacheEntry = () => fileCache[p.path];
-    const isLoading = () => cacheEntry() === null || cacheEntry() === undefined;
+    // Image files use imageCache (base64 data URI); null = still loading, '' = failed
+    const imageCacheEntry = () => imageCache[p.path];
+    const ext = () => fileExt(p.path);
+    const isImg = () => isImage(ext());
+    // For images: loading while imageCache entry is null (undefined = not yet requested,
+    // which won't happen because openFile always seeds it; null = fetch in flight)
+    const isLoading = () => isImg()
+      ? (imageCacheEntry() === null || imageCacheEntry() === undefined)
+      : (cacheEntry() === null || cacheEntry() === undefined);
     // Use ?? undefined to convert null sentinel to undefined, making the type FvFileContent | undefined
     const content = () => cacheEntry() ?? undefined;
-    const ext = () => fileExt(p.path);
-    const imgSrc = () => isImage(ext()) ? convertFileSrc(p.path) : null;
+    const imgSrc = () => isImg() ? (imageCacheEntry() || null) : null;
 
     return (
       <div class="h-full overflow-hidden">
@@ -586,9 +629,6 @@ const Explorer: Component = () => {
           <Match when={isLoading()}>
             <div class="flex flex-col items-center justify-center h-full gap-3">
               <div class="text-sm text-gray-400 animate-pulse">Loading {fileName(p.path)}…</div>
-              <div class="text-[10px] text-gray-300 dark:text-gray-600 font-mono">
-                cache={cacheEntry() === undefined ? 'undefined' : cacheEntry() === null ? 'null(loading)' : 'has-data'}
-              </div>
               <button
                 class="text-xs text-sky-500 underline mt-1"
                 onClick={async () => {

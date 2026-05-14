@@ -5,6 +5,7 @@
 //! when the user expands a node in the frontend.
 
 use crate::state::AppState;
+use base64::Engine as _;
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::State;
@@ -234,6 +235,42 @@ pub async fn fv_read_dir(path: String) -> Result<Vec<FvEntry>, String> {
     .await
     .map_err(|e| format!("Task join error: {e}"))
     .and_then(|r| r)
+}
+
+/// Read an image file and return it as a base64 data URI.
+/// Works for PNG, JPEG, GIF, WebP, SVG, ICO, BMP, AVIF.
+/// Files larger than 10 MB are rejected.
+#[tauri::command]
+pub async fn fv_read_image_base64(path: String) -> Result<String, String> {
+    const MAX: u64 = 10 * 1024 * 1024;
+    let size = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| format!("Cannot access '{}': {}", path, e))?
+        .len();
+    if size > MAX {
+        return Err(format!("Image too large ({:.1} MB)", size as f64 / 1_048_576.0));
+    }
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|e| format!("Cannot read '{}': {}", path, e))?;
+    let ext = std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let mime = match ext.as_str() {
+        "svg"          => "image/svg+xml",
+        "png"          => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif"          => "image/gif",
+        "webp"         => "image/webp",
+        "ico"          => "image/x-icon",
+        "bmp"          => "image/bmp",
+        "avif"         => "image/avif",
+        _              => "application/octet-stream",
+    };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    Ok(format!("data:{mime};base64,{b64}"))
 }
 
 /// Format / fix a Markdown document using the first enabled LLM endpoint.
