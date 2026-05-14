@@ -12,7 +12,7 @@ use std::sync::Arc;
 use minion_rag::{RagPipeline, SearchHit};
 
 pub struct ContextManager {
-    rag: Arc<RagPipeline>,
+    rag: Option<Arc<RagPipeline>>,
     max_context_tokens: usize,
     used_tokens: usize,
 }
@@ -22,10 +22,15 @@ impl ContextManager {
 
     pub fn new(rag: Arc<RagPipeline>) -> Self {
         Self {
-            rag,
+            rag: Some(rag),
             max_context_tokens: Self::DEFAULT_MAX_TOKENS,
             used_tokens: 0,
         }
+    }
+
+    #[cfg(test)]
+    pub fn new_for_testing() -> Self {
+        Self { rag: None, max_context_tokens: Self::DEFAULT_MAX_TOKENS, used_tokens: 0 }
     }
 
     /// Rough estimate: 1 token ≈ 4 characters (the standard heuristic).
@@ -35,8 +40,8 @@ impl ContextManager {
 
     /// Index a document so it can later be used for compression queries.
     pub async fn index_document(&self, doc_id: &str, content: &str) -> anyhow::Result<()> {
-        self.rag
-            .index(doc_id, None, None, content)
+        let rag = self.rag.as_ref().ok_or_else(|| anyhow::anyhow!("no RAG pipeline"))?;
+        rag.index(doc_id, None, None, content)
             .await
             .map(|_| ())
             .map_err(anyhow::Error::from)
@@ -54,8 +59,11 @@ impl ContextManager {
         if Self::estimate_tokens(full_text) <= budget_tokens {
             return Ok(full_text.to_string());
         }
+        let rag = self.rag.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("ContextManager has no RAG pipeline (new_for_testing was used)")
+        })?;
         let hits: Vec<SearchHit> =
-            self.rag.search(query, 10, None).await.map_err(anyhow::Error::from)?;
+            rag.search(query, 10, None).await.map_err(anyhow::Error::from)?;
         let joined = hits.into_iter().map(|h| h.chunk.text).collect::<Vec<_>>().join("\n\n");
         let char_budget = budget_tokens * 4;
         Ok(joined.chars().take(char_budget).collect())
