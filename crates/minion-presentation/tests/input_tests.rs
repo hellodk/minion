@@ -155,3 +155,58 @@ async fn url_rejects_localhost() {
     let result = minion_presentation::input::url::process_url("http://localhost/").await;
     assert!(result.is_err());
 }
+
+// ── process_all smoke tests ───────────────────────────────────────────────────
+
+use minion_presentation::input::{process_all, InputSource};
+
+struct NoopLlm;
+
+#[async_trait::async_trait]
+impl minion_llm::LlmProvider for NoopLlm {
+    fn name(&self) -> &str { "noop-llm" }
+    async fn chat(&self, _req: minion_llm::ChatRequest) -> minion_llm::LlmResult<minion_llm::ChatResponse> {
+        Ok(minion_llm::ChatResponse { content: "(noop)".into(), model: "noop".into(), usage: None })
+    }
+    async fn health_check(&self) -> minion_llm::LlmResult<bool> { Ok(true) }
+    async fn list_models(&self) -> minion_llm::LlmResult<Vec<minion_llm::ModelInfo>> { Ok(vec![]) }
+}
+
+#[tokio::test]
+async fn process_all_text_and_markdown_sources() {
+    use std::io::Write;
+    let mut md_file = tempfile::NamedTempFile::with_suffix(".md").unwrap();
+    writeln!(md_file, "# Test Slide\n\nThis is the slide content.").unwrap();
+    md_file.flush().unwrap();
+    let md_path = md_file.path().to_str().unwrap().to_string();
+    let sources = vec![
+        InputSource::Text { content: "Hello from text input".into() },
+        InputSource::FilePath { content: md_path },
+    ];
+    let result = process_all(sources, &NoopLlm).await;
+    assert!(result.is_ok(), "process_all failed: {:?}", result);
+    let corpus = result.unwrap();
+    assert!(corpus.contains("Hello from text input"), "text source missing: {corpus}");
+    assert!(corpus.contains("Test Slide"), "markdown missing: {corpus}");
+    assert!(corpus.contains("---"), "separator missing: {corpus}");
+}
+
+#[tokio::test]
+async fn process_all_empty_sources_returns_empty_string() {
+    let result = process_all(vec![], &NoopLlm).await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "");
+}
+
+#[tokio::test]
+async fn process_all_failing_source_does_not_abort_others() {
+    let sources = vec![
+        InputSource::Text { content: "good text".into() },
+        InputSource::Url { content: "http://192.168.1.1/bad".into() },
+    ];
+    let result = process_all(sources, &NoopLlm).await;
+    assert!(result.is_ok(), "should not abort on partial failure");
+    let corpus = result.unwrap();
+    assert!(corpus.contains("good text"), "successful source missing: {corpus}");
+    assert!(corpus.contains("could not be processed") || corpus.contains("Input source"), "error placeholder missing: {corpus}");
+}
