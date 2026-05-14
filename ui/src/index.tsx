@@ -14,6 +14,7 @@ import Blog from './pages/Blog';
 import Sysmon from './pages/Sysmon';
 import Settings from './pages/Settings';
 import Explorer from './pages/Explorer';
+import Presentation from './pages/Presentation';
 import './styles/index.css';
 
 const root = document.getElementById('root');
@@ -36,6 +37,7 @@ render(
       <Route path="/blog" component={Blog} />
       <Route path="/explorer" component={Explorer} />
       <Route path="/sysmon" component={Sysmon} />
+      <Route path="/presentation" component={Presentation} />
       <Route path="/settings" component={Settings} />
     </Router>
   ),
