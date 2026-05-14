@@ -63,10 +63,8 @@ fn serialize_node(node: roxmltree::Node, out: &mut String) -> Result<(), String>
                 if name.starts_with("on") {
                     continue;
                 }
-                if (name == "href" || name == "xlink:href") && tag == "use" {
-                    if !href_re().is_match(value) {
-                        return Err(format!("invalid use href: {value}"));
-                    }
+                if (name == "href" || name == "xlink:href") && tag == "use" && !href_re().is_match(value) {
+                    return Err(format!("invalid use href: {value}"));
                 }
                 if tag == "feGaussianBlur" && name == "stdDeviation" {
                     let v: f64 = value.parse().unwrap_or(0.0);

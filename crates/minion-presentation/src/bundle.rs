@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 
 use crate::schema::types::{Deck, DeckPatch};
+use crate::schema::validate::validate_play_order;
 
 const ENTRY: &str = "schema.json";
 
@@ -85,5 +86,11 @@ pub fn apply_patch(deck: &mut Deck, patch: DeckPatch) {
                 }
             }
         }
+    }
+}
+
+pub fn validate_and_repair_play_order(deck: &mut Deck) {
+    if validate_play_order(deck).is_err() {
+        deck.play_order = deck.all_slides().map(|s| s.id.clone()).collect();
     }
 }

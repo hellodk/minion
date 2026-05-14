@@ -6,6 +6,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 pub struct VisualAgent {
+    #[allow(dead_code)]
     provider: Option<Arc<dyn minion_llm::LlmProvider>>,
 }
 

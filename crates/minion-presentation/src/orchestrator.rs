@@ -86,6 +86,7 @@ impl Orchestrator {
         for patch in DesignCriticAgent::new().review(&deck) {
             bundle::apply_patch(&mut deck, patch);
         }
+        bundle::validate_and_repair_play_order(&mut deck);
 
         // Persist
         let deck_id = DeckId::new();

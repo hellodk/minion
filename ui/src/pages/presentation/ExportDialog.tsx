@@ -33,27 +33,71 @@ export default function ExportDialog(props: Props) {
 
   function exportToHtml(deck: Deck, basename: string): void {
     const slides = allSlides(deck);
-    const body = slides.map((slide, i) => {
+    const n = slides.length;
+
+    const slideDivs = slides.map((slide, i) => {
+      const W = slide.width || 1920;
+      const H = slide.height || 1080;
+
       const bg = slide.background.kind === "solid"
         ? colorToCss(slide.background.color)
         : slide.background.kind === "gradient"
         ? `linear-gradient(${slide.background.angle_deg}deg,${colorToCss(slide.background.from)},${colorToCss(slide.background.to)})`
-        : "#1a1a2e";
-      const W = slide.width || 1280;
-      const H = slide.height || 720;
+        : "#0f0f14";
+
+      const fontFamily = [
+        deck.theme.typography.body.family,
+        ...deck.theme.font_fallback_stack,
+      ].join(",");
+
       const els = slide.elements
         .filter(el => el.content.kind === "text")
         .sort((a, b) => a.z_index - b.z_index)
         .map(el => {
           const md = (el.content as { kind: "text"; markdown: string }).markdown;
-          const escaped = md.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-          return `<div style="position:absolute;left:${(el.x/W*100).toFixed(2)}%;top:${(el.y/H*100).toFixed(2)}%;width:${(el.width/W*100).toFixed(2)}%;height:${(el.height/H*100).toFixed(2)}%;color:#fff;overflow:hidden;white-space:pre-wrap;font-size:2.5vw">${escaped}</div>`;
+          const escaped = md.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\n/g,"<br>");
+          const basePx = deck.theme.typography.body.size_scale_base_px || 18;
+          const relSize = (el.height / H) * basePx * 1.8;
+          const textColor = colorToCss(deck.theme.color_roles.body_text);
+          return `<div style="position:absolute;left:${(el.x/W*100).toFixed(2)}%;top:${(el.y/H*100).toFixed(2)}%;width:${(el.width/W*100).toFixed(2)}%;height:${(el.height/H*100).toFixed(2)}%;color:${textColor};overflow:hidden;white-space:pre-wrap;font-size:${relSize.toFixed(1)}px;line-height:${deck.theme.typography.body.line_height}">${escaped}</div>`;
         }).join("");
-      return `<div style="background:${bg};position:relative;width:100%;aspect-ratio:16/9;overflow:hidden;page-break-after:always">${els}<span style="position:absolute;bottom:6px;right:10px;color:rgba(255,255,255,.3);font-size:1vw">${i+1}/${slides.length}</span></div>`;
+
+      const display = i === 0 ? "flex" : "none";
+      return `<div class="slide" data-index="${i}" style="display:${display};position:fixed;inset:0;background:${bg};font-family:${fontFamily};align-items:center;justify-content:center;cursor:pointer"><div style="position:relative;width:min(100vw,177.78vh);height:min(56.25vw,100vh)">${els}</div><div style="position:fixed;top:12px;right:16px;color:rgba(255,255,255,.45);font-size:13px;font-family:sans-serif;pointer-events:none">${i+1} / ${n}</div></div>`;
     }).join("\n");
+
     const title = deck.meta.title.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title><style>*{margin:0;box-sizing:border-box}body{background:#000;font-family:sans-serif}@page{size:16in 9in;margin:0}</style></head><body>${body}</body></html>`;
-    const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(new Blob([html],{type:"text/html"})), download: `${basename}.html` });
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#000;overflow:hidden}.slide{user-select:none}</style>
+</head>
+<body>
+${slideDivs}
+<script>
+(function(){
+  var idx=0,slides=document.querySelectorAll('.slide');
+  var n=slides.length;
+  function show(i){slides[idx].style.display='none';idx=(i+n)%n;slides[idx].style.display='flex';}
+  document.addEventListener('click',function(e){show(e.clientX/window.innerWidth<0.25?idx-1:idx+1);});
+  document.addEventListener('keydown',function(e){
+    if(e.key==='ArrowRight'||e.key===' ')show(idx+1);
+    else if(e.key==='ArrowLeft')show(idx-1);
+    else if(e.key==='Escape')show(0);
+  });
+})();
+</script>
+</body>
+</html>`;
+
+    const a = Object.assign(document.createElement("a"), {
+      href: URL.createObjectURL(new Blob([html],{type:"text/html"})),
+      download: `${basename}.html`,
+    });
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
   }
 
