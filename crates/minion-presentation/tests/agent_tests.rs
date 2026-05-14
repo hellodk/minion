@@ -264,3 +264,168 @@ mod storyteller_tests {
         assert_eq!(progress, 3);
     }
 }
+
+mod slide_planner_tests {
+    use std::sync::{Arc, Mutex, atomic::AtomicU32};
+
+    use async_trait::async_trait;
+    use minion_llm::{ChatRequest, ChatResponse, LlmProvider, LlmResult, ModelInfo};
+    use minion_presentation::{
+        agents::{AgentEvent, slide_planner::SlidePlannerAgent, storyteller::StorytellerOutput},
+        agents::storyteller::StorySection,
+        schema::types::{ElementContent, LayoutKind},
+    };
+
+    struct MockSlidePlanner {
+        responses: Vec<String>,
+        count: Mutex<usize>,
+    }
+
+    impl MockSlidePlanner {
+        fn new(r: Vec<String>) -> Self {
+            Self { responses: r, count: Mutex::new(0) }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for MockSlidePlanner {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        async fn chat(&self, _: ChatRequest) -> LlmResult<ChatResponse> {
+            let i = {
+                let mut c = self.count.lock().unwrap();
+                let i = *c % self.responses.len();
+                *c += 1;
+                i
+            };
+            Ok(ChatResponse {
+                content: self.responses[i].clone(),
+                model: "mock".into(),
+                usage: None,
+            })
+        }
+
+        async fn health_check(&self) -> LlmResult<bool> {
+            Ok(true)
+        }
+
+        async fn list_models(&self) -> LlmResult<Vec<ModelInfo>> {
+            Ok(vec![])
+        }
+    }
+
+    fn story_2_sections() -> StorytellerOutput {
+        StorytellerOutput {
+            title: "Test Deck".into(),
+            hook: "H".into(),
+            sections: vec![
+                StorySection {
+                    title: "S1".into(),
+                    slide_count: 2,
+                    purpose: "intro".into(),
+                    pacing: "slow".into(),
+                },
+                StorySection {
+                    title: "S2".into(),
+                    slide_count: 3,
+                    purpose: "detail".into(),
+                    pacing: "medium".into(),
+                },
+            ],
+            closing_cta: "go".into(),
+            camera_narrative: "zoom".into(),
+        }
+    }
+
+    fn sec_json_2() -> String {
+        r#"{"slides":[{"layout":"title","headline":"Big Idea","body":"Here","visual_spec":null,"talking_points":["p1"]},{"layout":"kpi","headline":"99.9%","body":"SLA","visual_spec":"bar chart uptime","talking_points":["reliable"]}]}"#.into()
+    }
+
+    fn sec_json_3() -> String {
+        r#"{"slides":[{"layout":"storytelling","headline":"Journey","body":"From zero","visual_spec":null,"talking_points":["narrative"]},{"layout":"comparison","headline":"Before vs After","body":"Delta","visual_spec":"comparison table","talking_points":["contrast"]},{"layout":"process","headline":"How It Works","body":"Steps","visual_spec":null,"talking_points":["process"]}]}"#.into()
+    }
+
+    #[tokio::test]
+    async fn builds_correct_slide_count() {
+        let (tx, _rx) = tokio::sync::broadcast::channel::<AgentEvent>(128);
+        let counter = AtomicU32::new(0);
+        let agent = SlidePlannerAgent::new_with_provider(Arc::new(MockSlidePlanner::new(vec![
+            sec_json_2(),
+            sec_json_3(),
+        ])));
+        let deck = agent.run(&story_2_sections(), &tx, &counter).await.expect("run");
+        assert_eq!(deck.slide_count(), 5);
+        assert_eq!(deck.sections.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn correct_canvas_positions() {
+        let (tx, _rx) = tokio::sync::broadcast::channel::<AgentEvent>(128);
+        let counter = AtomicU32::new(0);
+        let agent = SlidePlannerAgent::new_with_provider(Arc::new(MockSlidePlanner::new(vec![
+            sec_json_2(),
+            sec_json_3(),
+        ])));
+        let deck = agent.run(&story_2_sections(), &tx, &counter).await.expect("run");
+        assert_eq!(deck.sections[0].slides[0].canvas_x, 0.0);
+        assert_eq!(deck.sections[0].slides[0].canvas_y, 0.0);
+        assert_eq!(deck.sections[0].slides[1].canvas_x, 2100.0);
+        assert_eq!(deck.sections[1].slides[0].canvas_y, 1280.0);
+        assert_eq!(deck.sections[1].slides[2].canvas_x, 4200.0);
+    }
+
+    #[tokio::test]
+    async fn correct_layout_kinds() {
+        let (tx, _rx) = tokio::sync::broadcast::channel::<AgentEvent>(128);
+        let counter = AtomicU32::new(0);
+        let agent = SlidePlannerAgent::new_with_provider(Arc::new(MockSlidePlanner::new(vec![
+            sec_json_2(),
+            sec_json_3(),
+        ])));
+        let deck = agent.run(&story_2_sections(), &tx, &counter).await.expect("run");
+        assert_eq!(deck.sections[0].slides[0].layout, LayoutKind::Title);
+        assert_eq!(deck.sections[0].slides[1].layout, LayoutKind::Kpi);
+        assert_eq!(deck.sections[1].slides[1].layout, LayoutKind::Comparison);
+    }
+
+    #[tokio::test]
+    async fn inserts_visual_placeholder() {
+        let (tx, _rx) = tokio::sync::broadcast::channel::<AgentEvent>(128);
+        let counter = AtomicU32::new(0);
+        let agent = SlidePlannerAgent::new_with_provider(Arc::new(MockSlidePlanner::new(vec![
+            sec_json_2(),
+            sec_json_3(),
+        ])));
+        let deck = agent.run(&story_2_sections(), &tx, &counter).await.expect("run");
+        let slide_with = &deck.sections[0].slides[1]; // has visual_spec
+        let has = slide_with.elements.iter().any(|e| {
+            matches!(&e.content, ElementContent::Text { markdown } if markdown.starts_with("[[VISUAL_PLACEHOLDER:"))
+        });
+        assert!(has, "should have placeholder");
+        let slide_without = &deck.sections[0].slides[0]; // no visual_spec
+        let has_not = !slide_without.elements.iter().any(|e| {
+            matches!(&e.content, ElementContent::Text { markdown } if markdown.starts_with("[[VISUAL_PLACEHOLDER:"))
+        });
+        assert!(has_not, "should not have placeholder");
+    }
+
+    #[tokio::test]
+    async fn emits_slide_ready_events() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<AgentEvent>(128);
+        let counter = AtomicU32::new(0);
+        let agent = SlidePlannerAgent::new_with_provider(Arc::new(MockSlidePlanner::new(vec![
+            sec_json_2(),
+            sec_json_3(),
+        ])));
+        agent.run(&story_2_sections(), &tx, &counter).await.expect("run");
+        let mut count = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, AgentEvent::SlideReady { .. }) {
+                count += 1;
+            }
+        }
+        assert_eq!(count, 5);
+    }
+}
