@@ -3,12 +3,14 @@ import { getDeck, saveDeckPatch } from "../../lib/presentation-api";
 import type { DeckPatch } from "../../lib/deck-patch";
 import { createDeckStore } from "../../store/deck-store";
 import { slideById } from "../../lib/deck-schema";
+import type { Element as DeckElement } from "../../lib/deck-schema";
 import SpatialCanvas from "./SpatialCanvas";
 import SlideEditor from "./SlideEditor";
 import AgentSidebar from "./AgentSidebar";
 import PresentationPlayer from "./PresentationPlayer";
 import ExportDialog from "./ExportDialog";
 import SlideTray from "./SlideTray";
+import AnimationPanel from "./AnimationPanel";
 
 interface Props { deckId: string; onBack: () => void; initialSessionId?: string }
 
@@ -21,6 +23,8 @@ export default function DeckWorkspace(props: Props) {
   const [sessionId] = createSignal<string | null>(props.initialSessionId ?? null);
   const [pan, setPan] = createSignal<{ x: number; y: number }>({ x: 40, y: 40 });
   const [zoom, setZoom] = createSignal(0.3);
+  // setSelectedElement will be wired to SlideEditor once it exposes element-selection events
+  const [selectedElement, _setSelectedElement] = createSignal<DeckElement | null>(null);
 
   onMount(async () => {
     if (!props.deckId) return;
@@ -67,27 +71,30 @@ export default function DeckWorkspace(props: Props) {
         <Show when={store.deck}>
           {(deck) => (
             <>
-              <div class="flex-1 overflow-hidden relative">
-                <SpatialCanvas
-                  deck={deck()}
-                  selectedSlideId={selected()}
-                  onSelectSlide={setSelected}
-                  pan={pan()}
-                  zoom={zoom()}
-                  onPanChange={setPan}
-                  onZoomChange={setZoom}
-                />
-                <Show when={selected() !== null && slideById(deck(), selected()!)}>
-                  {(slide) => (
-                    <SlideEditor
-                      slide={slide()}
-                      zoom={zoom()}
-                      slideScreenX={slide().canvas_x * zoom() + pan().x}
-                      slideScreenY={slide().canvas_y * zoom() + pan().y}
-                      onPatch={handlePatch}
-                    />
-                  )}
-                </Show>
+              <div class="flex flex-col flex-1 overflow-hidden">
+                <div class="flex-1 overflow-hidden relative">
+                  <SpatialCanvas
+                    deck={deck()}
+                    selectedSlideId={selected()}
+                    onSelectSlide={setSelected}
+                    pan={pan()}
+                    zoom={zoom()}
+                    onPanChange={setPan}
+                    onZoomChange={setZoom}
+                  />
+                  <Show when={selected() !== null && slideById(deck(), selected()!)}>
+                    {(slide) => (
+                      <SlideEditor
+                        slide={slide()}
+                        zoom={zoom()}
+                        slideScreenX={slide().canvas_x * zoom() + pan().x}
+                        slideScreenY={slide().canvas_y * zoom() + pan().y}
+                        onPatch={handlePatch}
+                      />
+                    )}
+                  </Show>
+                </div>
+                <AnimationPanel element={selectedElement()} />
               </div>
               <AgentSidebar sessionId={sessionId()} onPatch={handlePatch} />
             </>
