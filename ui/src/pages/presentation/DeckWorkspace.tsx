@@ -6,6 +6,7 @@ import SpatialCanvas from "./SpatialCanvas";
 import AgentSidebar from "./AgentSidebar";
 import PresentationPlayer from "./PresentationPlayer";
 import ExportDialog from "./ExportDialog";
+import SlideTray from "./SlideTray";
 
 interface Props { deckId: string; onBack: () => void; initialSessionId?: string }
 
@@ -26,6 +27,10 @@ export default function DeckWorkspace(props: Props) {
   const handlePatch = (p: DeckPatch) => {
     actions.applyPatch(p);
     saveDeckPatch(props.deckId, [p]).catch(e => console.error("[DeckWorkspace]", e));
+  };
+
+  const handleAddSlide = () => {
+    console.log("[DeckWorkspace] onAddSlide — not yet implemented");
   };
 
   return (
@@ -66,6 +71,18 @@ export default function DeckWorkspace(props: Props) {
           )}
         </Show>
       </div>
+
+      {/* Slide tray */}
+      <Show when={store.deck}>
+        {(deck) => (
+          <SlideTray
+            deck={deck()}
+            selectedSlideId={selected()}
+            onSelectSlide={setSelected}
+            onAddSlide={handleAddSlide}
+          />
+        )}
+      </Show>
 
       {/* Player overlay */}
       <Show when={playerOpen() && store.deck}>
