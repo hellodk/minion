@@ -5,6 +5,7 @@ import { createDeckStore } from "../../store/deck-store";
 import SpatialCanvas from "./SpatialCanvas";
 import AgentSidebar from "./AgentSidebar";
 import PresentationPlayer from "./PresentationPlayer";
+import ExportDialog from "./ExportDialog";
 
 interface Props { deckId: string; onBack: () => void; initialSessionId?: string }
 
@@ -12,6 +13,7 @@ export default function DeckWorkspace(props: Props) {
   const [store, actions] = createDeckStore();
   const [selected, setSelected] = createSignal<string | null>(null);
   const [playerOpen, setPlayerOpen] = createSignal(false);
+  const [exportOpen, setExportOpen] = createSignal(false);
   const [loadErr, setLoadErr] = createSignal<string | null>(null);
   const [sessionId] = createSignal<string | null>(props.initialSessionId ?? null);
 
@@ -37,7 +39,7 @@ export default function DeckWorkspace(props: Props) {
           class="px-2 py-1 text-xs text-gray-400 hover:text-white disabled:opacity-30" title="Undo">&#8617;</button>
         <button onClick={actions.redo} disabled={!actions.canRedo()}
           class="px-2 py-1 text-xs text-gray-400 hover:text-white disabled:opacity-30" title="Redo">&#8618;</button>
-        <button onClick={() => console.log("export stub")}
+        <button onClick={() => setExportOpen(true)}
           class="px-3 py-1.5 text-xs text-gray-400 border border-[#2a2a36] hover:border-gray-500 rounded-lg">Export</button>
         <button onClick={() => setPlayerOpen(true)} disabled={!store.deck}
           class="px-3 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 rounded-lg font-medium">
@@ -68,6 +70,9 @@ export default function DeckWorkspace(props: Props) {
       {/* Player overlay */}
       <Show when={playerOpen() && store.deck}>
         <PresentationPlayer deck={store.deck!} onClose={() => setPlayerOpen(false)} />
+      </Show>
+      <Show when={exportOpen() && store.deck}>
+        <ExportDialog deck={store.deck!} deckId={props.deckId} onClose={() => setExportOpen(false)} />
       </Show>
     </div>
   );
