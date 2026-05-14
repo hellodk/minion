@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.11.82"
+version = "1.11.83"
 authors = ["Deepak Gupta <hello.dk@outlook.com>"]
 edition = "2021"
 rust-version = "1.75"

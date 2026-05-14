@@ -2,6 +2,7 @@
 
 use minion_core::{Config, EventBus, TaskScheduler};
 use minion_db::Database;
+use minion_presentation::db::PresentationDb;
 use minion_files::{DuplicateGroup, FileInfo};
 use rand::RngCore;
 use std::collections::HashMap;
@@ -91,6 +92,9 @@ pub struct AppState {
     /// AES-256-GCM key for encrypting blog platform API keys at rest.
     /// Loaded from (or generated into) `data_dir/blog.key` on first run.
     pub blog_enc_key: [u8; 32],
+
+    /// Presentation database handle.
+    pub presentation_db: PresentationDb,
 }
 
 impl AppState {
@@ -116,6 +120,13 @@ impl AppState {
         let task_scheduler = TaskScheduler::new(config.workers.background_workers);
 
         let data_dir = config.data_dir.clone();
+
+        // Run presentation migrations and set up PresentationDb.
+        {
+            let conn = db.get().map_err(|e| e.to_string())?;
+            minion_presentation::migrations::run(&conn).map_err(|e| e.to_string())?;
+        }
+        let presentation_db = PresentationDb::new(db.clone());
 
         // Load or generate the blog API-key encryption key.
         let blog_enc_key = {
@@ -147,6 +158,7 @@ impl AppState {
             scan_cache: None,
             gfit_sync_running: Arc::new(AtomicBool::new(false)),
             blog_enc_key,
+            presentation_db,
         })
     }
 }

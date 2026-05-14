@@ -1,6 +1,6 @@
 [package]
 name = "minion-tauri"
-version = "1.11.82"
+version = "1.11.83"
 edition = "2021"
 description = "MINION - Unified Personal Intelligence Platform"
 license = "MIT"
@@ -33,6 +33,7 @@ minion-finance = { path = "../crates/minion-finance" }
 minion-media = { path = "../crates/minion-media" }
 minion-blog = { path = "../crates/minion-blog" }
 minion-llm = { path = "../crates/minion-llm" }
+minion-presentation = { path = "../crates/minion-presentation" }
 
 # SQLite (re-exported for direct use in commands)
 rusqlite = { version = "0.31", features = ["bundled"] }

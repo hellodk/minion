@@ -24,6 +24,7 @@ mod health_intelligence;
 mod health_timeline;
 mod llm_commands;
 pub(crate) mod llm_router;
+mod presentation_commands;
 mod state;
 mod sysmon_analysis;
 mod sysmon_collect;
@@ -428,6 +429,13 @@ pub fn run() {
             file_viewer::fv_extract_pdf,
             file_viewer::fv_git_status,
             file_viewer::fv_format_md,
+            // Presentation commands
+            presentation_commands::start_presentation_generation,
+            presentation_commands::interrupt_generation,
+            presentation_commands::get_deck,
+            presentation_commands::save_deck_patch,
+            presentation_commands::list_presentations,
+            presentation_commands::export_presentation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
