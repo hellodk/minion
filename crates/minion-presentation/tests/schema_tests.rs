@@ -119,3 +119,39 @@ fn asset_size_within_limit_passes() {
     let result = validate_asset_size(24 * 1024 * 1024);
     assert!(result.is_ok());
 }
+
+use minion_db::Database;
+use minion_presentation::db::PresentationDb;
+use tempfile::tempdir;
+
+fn test_db() -> (Database, tempfile::TempDir) {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let db = Database::new(&db_path, 2).unwrap();
+    {
+        let conn = db.get().unwrap();
+        minion_presentation::migrations::run(&conn).unwrap();
+    }
+    (db, dir)
+}
+
+#[test]
+fn insert_and_list_presentation() {
+    let (db, _dir) = test_db();
+    let pdb = PresentationDb::new(db);
+    let id = DeckId::new();
+    pdb.insert_presentation(&id, "My Deck", "/tmp/test.minion-deck", None).unwrap();
+    let list = pdb.list_presentations().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].title, "My Deck");
+}
+
+#[test]
+fn delete_presentation_removes_it() {
+    let (db, _dir) = test_db();
+    let pdb = PresentationDb::new(db);
+    let id = DeckId::new();
+    pdb.insert_presentation(&id, "Temp", "/tmp/x.minion-deck", None).unwrap();
+    pdb.delete_presentation(&id).unwrap();
+    assert!(pdb.list_presentations().unwrap().is_empty());
+}
