@@ -77,3 +77,45 @@ fn quaternion_to_css_transform_identity() {
     let css = quaternion_to_css_rotate3d(&q);
     assert!(css.contains("0deg") || css.contains("rotate3d(0,0,1,0"), "got: {css}");
 }
+
+use minion_presentation::schema::validate::*;
+use minion_presentation::schema::types::{CameraEasing, CameraStep, CameraStepId, CameraTarget, SlideId};
+
+#[test]
+fn valid_camera_spring_passes() {
+    let step = CameraStep {
+        id: CameraStepId::new(),
+        target: CameraTarget::Slide { slide_id: SlideId::new() },
+        zoom: 1.0,
+        duration_ms: 600,
+        hold_ms: 200,
+        easing: CameraEasing::Spring { stiffness: 300.0, damping: 20.0 },
+    };
+    assert!(validate_camera_step(&step).is_ok());
+}
+
+#[test]
+fn invalid_spring_stiffness_fails() {
+    let step = CameraStep {
+        id: CameraStepId::new(),
+        target: CameraTarget::Slide { slide_id: SlideId::new() },
+        zoom: 1.0,
+        duration_ms: 600,
+        hold_ms: 0,
+        easing: CameraEasing::Spring { stiffness: 0.0, damping: 20.0 },
+    };
+    let err = validate_camera_step(&step).unwrap_err();
+    assert!(err.contains("stiffness"), "got: {err}");
+}
+
+#[test]
+fn asset_size_limit_enforced() {
+    let result = validate_asset_size(26 * 1024 * 1024);
+    assert!(result.is_err());
+}
+
+#[test]
+fn asset_size_within_limit_passes() {
+    let result = validate_asset_size(24 * 1024 * 1024);
+    assert!(result.is_ok());
+}
