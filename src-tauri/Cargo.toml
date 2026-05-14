@@ -1,6 +1,6 @@
 [package]
 name = "minion-tauri"
-version = "1.11.85"
+version = "1.11.87"
 edition = "2021"
 description = "MINION - Unified Personal Intelligence Platform"
 license = "MIT"
@@ -44,7 +44,8 @@ html-escape = "0.2"
 epub = "2.1"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 tauri-plugin-dialog = "2.6.0"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
 url = "2.5"
 urlencoding = "2.1"
 base64ct = "=1.6.0"

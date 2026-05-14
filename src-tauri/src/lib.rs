@@ -429,6 +429,8 @@ pub fn run() {
             file_viewer::fv_extract_pdf,
             file_viewer::fv_git_status,
             file_viewer::fv_format_md,
+            file_viewer::fv_llm_status,
+            file_viewer::fv_stream_format_md,
             // Presentation commands
             presentation_commands::start_presentation_generation,
             presentation_commands::interrupt_generation,

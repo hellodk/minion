@@ -7,6 +7,7 @@ import { diffLines } from 'diff';
 import type { Change } from 'diff';
 import { createStore, produce } from 'solid-js/store';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import DOMPurify from 'dompurify';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 
@@ -25,6 +26,16 @@ interface FvFileContent {
 }
 interface ExplorerTab { path: string; name: string; }
 type ViewMode = 'source' | 'split' | 'preview' | 'diff';
+
+interface LlmStreamEvent {
+  call_id: string;
+  stage: 'connecting' | 'generating' | 'chunk' | 'done' | 'error' | 'warning';
+  chunk?: string;
+  content?: string;
+  model?: string;
+  elapsed_ms: number;
+  error?: string;
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -206,9 +217,14 @@ const Explorer: Component = () => {
   // Image cache: path → base64 data URI (loaded on demand via fv_read_image_base64)
   const [imageCache, setImageCache] = createStore<Record<string, string | null>>({});
 
-  // AI Format MD
+  // AI Format MD — richer streaming state
   const [aiWorking, setAiWorking] = createSignal(false);
+  const [aiStage, setAiStage] = createSignal('');         // "Connecting…" / "Generating…" / etc.
+  const [aiElapsed, setAiElapsed] = createSignal(0);      // seconds elapsed
+  const [aiStatus, setAiStatus] = createSignal<{ label: string; model: string } | null>(null); // pre-click status
   const [aiOriginals, setAiOriginals] = createStore<Record<string, string>>({});
+  let aiElapsedTimer: ReturnType<typeof setInterval> | undefined;
+  let aiUnlisten: (() => void) | undefined;
 
   // Git status refresh
   async function refreshGitStatus(wsPath: string) {
@@ -266,6 +282,26 @@ const Explorer: Component = () => {
     if (p && !isPreviewable(p) && viewMode() !== 'source' && viewMode() !== 'diff') {
       setViewMode('source');
     }
+  });
+
+  // Pre-click: load which LLM model will be used when an MD file is active
+  createEffect(async () => {
+    const p = activeTabPath();
+    const ext = p ? fileExt(p) : '';
+    if (!p || !['md', 'markdown', 'mdx'].includes(ext)) {
+      setAiStatus(null);
+      return;
+    }
+    try {
+      const status = await invoke<{ endpoint_name: string; model: string } | null>(
+        'fv_llm_status', { feature: 'explorer_format_md' }
+      );
+      if (status) {
+        setAiStatus({ label: status.endpoint_name, model: status.model });
+      } else {
+        setAiStatus(null);
+      }
+    } catch { setAiStatus(null); }
   });
 
   // ---------------------------------------------------------------------------
@@ -493,6 +529,12 @@ const Explorer: Component = () => {
 
   function closeTab(path: string, e?: MouseEvent) {
     e?.stopPropagation();
+    // Warn before closing a tab with unsaved AI-generated changes
+    if (aiOriginals[path]) {
+      if (!confirm(`"${fileName(path)}" has AI-generated changes that haven't been saved to disk. Close anyway?`)) {
+        return;
+      }
+    }
     const current = tabs();
     const idx = current.findIndex(t => t.path === path);
     const next = current.filter(t => t.path !== path);
@@ -572,6 +614,96 @@ const Explorer: Component = () => {
       void renderPreview(path, content.text);
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // AI streaming functions
+  // ---------------------------------------------------------------------------
+
+  async function startAiFix() {
+    const p = activeTabPath();
+    if (!p) return;
+    const cur = fileCache[p] as FvFileContent | null;
+    if (!cur || cur.is_binary) return;
+
+    // Save original for revert
+    if (!aiOriginals[p]) setAiOriginals(p, cur.text);
+
+    const callId = `ai-fix-${Date.now()}`;
+    setAiWorking(true);
+    setAiStage('Connecting…');
+    setAiElapsed(0);
+    setAiError(null);
+
+    // Start elapsed timer
+    clearInterval(aiElapsedTimer);
+    aiElapsedTimer = setInterval(() => setAiElapsed(s => s + 1), 1000);
+
+    // Accumulated content for streaming
+    let accumulated = '';
+
+    // Subscribe to stream events
+    if (aiUnlisten) aiUnlisten();
+    aiUnlisten = await listen<LlmStreamEvent>('llm-stream', (event) => {
+      const ev = event.payload;
+      if (ev.call_id !== callId) return;
+
+      if (ev.stage === 'warning') {
+        setAiStage(ev.error ?? 'Processing large document…');
+      } else if (ev.stage === 'connecting') {
+        setAiStage('Connecting…');
+      } else if (ev.stage === 'generating') {
+        setAiStage(`Generating${ev.model ? ` (${ev.model})` : ''}…`);
+      } else if (ev.stage === 'chunk') {
+        accumulated += ev.chunk ?? '';
+        setAiStage('Receiving…');
+        // Live-update the file cache so content updates as tokens arrive
+        setFileCache(p, { ...cur, text: accumulated, line_count: accumulated.split('\n').length });
+      } else if (ev.stage === 'done') {
+        clearInterval(aiElapsedTimer);
+        const finalText = ev.content ?? accumulated;
+        setFileCache(p, { ...cur, text: finalText, line_count: finalText.split('\n').length });
+        if (previewCache[p]) setPreviewCache(produce(d => { delete d[p]; }));
+        setAiWorking(false);
+        setAiStage('');
+        setAiElapsed(0);
+        if (aiUnlisten) { aiUnlisten(); aiUnlisten = undefined; }
+      } else if (ev.stage === 'error') {
+        clearInterval(aiElapsedTimer);
+        setAiError(ev.error ?? 'Unknown error');
+        setAiWorking(false);
+        setAiStage('');
+        // Restore original on error
+        const orig = aiOriginals[p];
+        if (orig) setFileCache(p, { ...cur, text: orig, line_count: orig.split('\n').length });
+        if (aiUnlisten) { aiUnlisten(); aiUnlisten = undefined; }
+      }
+    });
+
+    try {
+      await invoke('fv_stream_format_md', { callId, markdown: cur.text });
+    } catch (e) {
+      clearInterval(aiElapsedTimer);
+      setAiError(`Failed to start: ${e}`);
+      setAiWorking(false);
+      setAiStage('');
+      if (aiUnlisten) { aiUnlisten(); aiUnlisten = undefined; }
+    }
+  }
+
+  function cancelAiFix() {
+    clearInterval(aiElapsedTimer);
+    if (aiUnlisten) { aiUnlisten(); aiUnlisten = undefined; }
+    const p = activeTabPath();
+    if (p) {
+      const orig = aiOriginals[p];
+      const cur = fileCache[p] as FvFileContent | null;
+      if (orig && cur) setFileCache(p, { ...cur, text: orig, line_count: orig.split('\n').length });
+    }
+    setAiWorking(false);
+    setAiStage('');
+    setAiElapsed(0);
+    setAiError('Cancelled');
+  }
 
   // ---------------------------------------------------------------------------
   // Sub-components (inner functions — hoisted, share outer state)
@@ -1304,53 +1436,64 @@ const Explorer: Component = () => {
               </Show>
             </div>
 
-            {/* AI Fix button — only for MD files */}
+            {/* AI Fix section — only for MD files */}
             <Show when={activeTabPath() && !!fileCache[activeTabPath()!] && (fileExt(activeTabPath()!) === 'md' || fileExt(activeTabPath()!) === 'markdown' || fileExt(activeTabPath()!) === 'mdx')}>
-              <div class="flex items-center gap-1">
+              <div class="flex items-center gap-2 flex-wrap">
+
+                {/* Error with retry */}
                 <Show when={aiError()}>
-                  <span class="text-xs text-red-500 ml-1">{aiError()}</span>
+                  <div class="flex items-center gap-2 text-xs text-red-500">
+                    <span>{aiError()}</span>
+                    <button onClick={startAiFix} class="underline text-sky-500">Retry</button>
+                  </div>
                 </Show>
-                <Show when={aiOriginals[activeTabPath()!]}>
-                  <button
-                    onClick={() => {
-                      const p = activeTabPath()!;
-                      const orig = aiOriginals[p];
-                      if (orig) {
-                        const cur = fileCache[p];
-                        if (cur) setFileCache(p, { ...cur, text: orig });
-                        setAiOriginals(produce(d => { delete d[p]; }));
-                      }
-                    }}
-                    class="px-2 py-0.5 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
-                  >↩ Revert</button>
+
+                {/* AI working state */}
+                <Show when={aiWorking()}>
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs text-purple-500 animate-pulse">{aiStage() || 'Working…'}</span>
+                    <span class="text-[10px] text-gray-400 tabular-nums">{aiElapsed()}s</span>
+                    <button
+                      onClick={cancelAiFix}
+                      class="text-[10px] text-red-400 hover:text-red-600 underline"
+                    >Cancel</button>
+                  </div>
                 </Show>
-                <button
-                  disabled={aiWorking()}
-                  onClick={async () => {
-                    const p = activeTabPath();
-                    if (!p) return;
-                    const cur = fileCache[p];
-                    if (!cur || cur.is_binary) return;
-                    setAiError(null);
-                    setAiWorking(true);
-                    try {
-                      const fixed = await invoke<string>('fv_format_md', { markdown: cur.text });
-                      if (!aiOriginals[p]) setAiOriginals(p, cur.text);
-                      const lines = fixed.split('\n').length;
-                      setFileCache(p, { ...cur, text: fixed, line_count: lines });
-                      if (previewCache[p]) setPreviewCache(produce(d => { delete d[p]; }));
-                    } catch (e) {
-                      setAiError(`AI fix failed: ${e}`);
-                    } finally {
-                      setAiWorking(false);
-                    }
-                  }}
-                  class="flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-800 disabled:opacity-50 transition-colors"
-                >
-                  <Show when={aiWorking()} fallback={<span>✨ AI Fix</span>}>
-                    <span class="animate-pulse">⏳ Fixing…</span>
-                  </Show>
-                </button>
+
+                {/* AI Fix button (hidden while working) */}
+                <Show when={!aiWorking()}>
+                  <div class="ml-auto flex items-center gap-1">
+                    {/* Pre-click model indicator */}
+                    <Show when={aiStatus()}>
+                      <span class="text-[10px] text-gray-400 mr-1">
+                        {aiStatus()!.model} · {aiStatus()!.label}
+                      </span>
+                    </Show>
+                    <Show when={activeTabPath() && !!aiOriginals[activeTabPath()!]}>
+                      <button
+                        onClick={() => {
+                          const p = activeTabPath()!;
+                          const orig = aiOriginals[p];
+                          if (orig) {
+                            const cur = fileCache[p];
+                            if (cur) setFileCache(p, { ...cur, text: orig, line_count: orig.split('\n').length });
+                            setAiOriginals(produce(d => { delete d[p]; }));
+                          }
+                        }}
+                        class="px-2 py-0.5 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
+                      >↩ Revert</button>
+                    </Show>
+                    <button
+                      onClick={startAiFix}
+                      disabled={!aiStatus()}
+                      title={aiStatus() ? `Fix with AI (${aiStatus()!.model})` : 'No LLM configured — go to Settings'}
+                      class="flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-800 disabled:opacity-40 transition-colors"
+                    >
+                      ✨ AI Fix
+                    </button>
+                  </div>
+                </Show>
+
               </div>
             </Show>
           </div>

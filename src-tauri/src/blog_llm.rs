@@ -80,7 +80,7 @@ pub async fn blog_llm_titles(
                   Styles: seo, curiosity, direct, question, listicle";
     let user = format!("Current title: {}\n\nContent excerpt:\n{}", title, excerpt);
 
-    let raw = match crate::llm_router::call(&state, "blog_llm", system, &user).await {
+    let raw = match crate::llm_router::call(&state, "blog_llm_titles", system, &user).await {
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
@@ -131,7 +131,7 @@ pub async fn blog_llm_hook(
                   Styles: 1) Direct/declarative, 2) Story/anecdote, 3) Question-led.";
     let user = format!("Post title: {}\n\nCurrent opening:\n{}", title, first_para);
 
-    let raw = match crate::llm_router::call(&state, "blog_llm", system, &user).await {
+    let raw = match crate::llm_router::call(&state, "blog_llm_hook", system, &user).await {
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
@@ -196,7 +196,7 @@ pub async fn blog_llm_grammar(
                   Return at most 15 issues. Return only the issue lines — no preamble or summary.";
     let user = format!("Blog content:\n{}", excerpt);
 
-    let raw = match crate::llm_router::call(&state, "blog_llm", system, &user).await {
+    let raw = match crate::llm_router::call(&state, "blog_llm_grammar", system, &user).await {
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
@@ -233,7 +233,7 @@ pub async fn blog_llm_meta_description(
                   Return only the description text — no quotes, no preamble.";
     let user = format!("Post title: {}\n\nContent:\n{}", title, excerpt);
 
-    let desc = match crate::llm_router::call(&state, "blog_llm", system, &user).await {
+    let desc = match crate::llm_router::call(&state, "blog_llm_meta", system, &user).await {
         Ok(d) => d.trim().to_string(),
         Err(_) => return Ok(None),
     };
@@ -285,7 +285,7 @@ pub async fn blog_llm_tags(
         excerpt
     );
 
-    let raw = match crate::llm_router::call(&state, "blog_llm", system, &user).await {
+    let raw = match crate::llm_router::call(&state, "blog_llm_tags", system, &user).await {
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
@@ -321,7 +321,7 @@ pub async fn blog_llm_snippets(
                   Do not include any other text.";
     let user = format!("Post title: {}\n\nContent:\n{}", title, excerpt);
 
-    let raw = match crate::llm_router::call(&state, "blog_llm", system, &user).await {
+    let raw = match crate::llm_router::call(&state, "blog_llm_snippets", system, &user).await {
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
@@ -403,7 +403,7 @@ pub async fn blog_llm_adapt(
     );
     let user = format!("Title: {}\n\n{}", title, input);
 
-    let adapted = match crate::llm_router::call(&state, "blog_llm", &system, &user).await {
+    let adapted = match crate::llm_router::call(&state, "blog_llm_adapt", &system, &user).await {
         Ok(a) => a,
         Err(_) => return Ok(None),
     };
@@ -463,7 +463,7 @@ pub async fn blog_llm_tone(
     );
     let user = format!("Title: {}\n\n{}", title, input);
 
-    let rewritten = match crate::llm_router::call(&state, "blog_llm", &system, &user).await {
+    let rewritten = match crate::llm_router::call(&state, "blog_llm_tone", &system, &user).await {
         Ok(r) => r,
         Err(_) => return Ok(None),
     };

@@ -362,6 +362,59 @@ pub async fn fv_format_md(
     Ok(result)
 }
 
+/// Returns info about which LLM endpoint/model would handle a given feature.
+/// Used by the frontend to show "Will use: llama3 on Ollama" before clicking AI.
+#[tauri::command]
+pub async fn fv_llm_status(
+    state: State<'_, crate::llm_router::AppStateHandle>,
+    feature: String,
+) -> Result<Option<crate::llm_router::LlmFeatureStatus>, String> {
+    crate::llm_router::get_feature_status(&state, &feature).await
+}
+
+/// Streaming version of `fv_format_md`. Emits `llm-stream` Tauri events for
+/// each stage and token chunk. Returns immediately; work happens in a spawned task.
+#[tauri::command]
+pub async fn fv_stream_format_md(
+    app: tauri::AppHandle,
+    state: State<'_, crate::llm_router::AppStateHandle>,
+    call_id: String,
+    markdown: String,
+) -> Result<(), String> {
+    use tauri::Emitter;
+
+    // Warn if content is large (>2000 words)
+    let word_count = markdown.split_whitespace().count();
+    if word_count > 2000 {
+        let _ = app.emit("llm-stream", crate::llm_router::LlmStreamEvent {
+            call_id: call_id.clone(),
+            stage: "warning".to_string(),
+            chunk: None,
+            content: None,
+            model: None,
+            elapsed_ms: 0,
+            error: Some(format!(
+                "Large document ({word_count} words). This may take 60–120 seconds."
+            )),
+        });
+    }
+
+    crate::llm_router::stream_call(
+        app,
+        &state,
+        "explorer_format_md".to_string(),
+        call_id,
+        "You are a Markdown expert. Fix and improve the formatting of the provided Markdown \
+         document. Return ONLY the corrected Markdown — no explanations, no surrounding code fences."
+            .to_string(),
+        format!("Fix and improve this Markdown:\n\n{markdown}"),
+        Some(0.2),
+        Some(8192),
+        String::new(),
+    )
+    .await
+}
+
 /// Read a text file and return its content with metadata.
 /// Files larger than 5 MB are rejected.
 /// Binary files are detected and flagged — `text` will be empty.
