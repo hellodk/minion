@@ -69,3 +69,4 @@ ocr = ["leptess"]
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 tempfile = "3.8"
+async-trait = { workspace = true }

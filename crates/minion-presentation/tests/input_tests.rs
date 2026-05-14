@@ -104,3 +104,54 @@ fn pdf_rejects_non_pdf_file() {
     let result = minion_presentation::input::document::process_pdf(tmp.path().to_str().unwrap());
     assert!(result.is_err(), "expected error for non-PDF content");
 }
+
+// ── Image processor ───────────────────────────────────────────────────────────
+
+#[test]
+fn image_rejects_oversized_file() {
+    use std::io::Write;
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".png").unwrap();
+    tmp.write_all(&vec![0u8; 26 * 1024 * 1024]).unwrap();
+    tmp.flush().unwrap();
+
+    struct PanicLlm;
+    #[async_trait::async_trait]
+    impl minion_llm::LlmProvider for PanicLlm {
+        fn name(&self) -> &str { "panic-llm" }
+        async fn chat(&self, _: minion_llm::ChatRequest) -> minion_llm::LlmResult<minion_llm::ChatResponse> {
+            panic!("LLM should not be called for oversized image")
+        }
+        async fn health_check(&self) -> minion_llm::LlmResult<bool> { Ok(true) }
+        async fn list_models(&self) -> minion_llm::LlmResult<Vec<minion_llm::ModelInfo>> { Ok(vec![]) }
+    }
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(
+        minion_presentation::input::image::process_image(tmp.path().to_str().unwrap(), &PanicLlm)
+    );
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("25 MB") || msg.contains("size"), "error: {msg}");
+}
+
+// ── URL processor ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn url_rejects_private_ip() {
+    let result = minion_presentation::input::url::process_url("http://192.168.0.1/secret").await;
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("SSRF") || msg.contains("private") || msg.contains("blocked"), "error: {msg}");
+}
+
+#[tokio::test]
+async fn url_rejects_file_scheme() {
+    let result = minion_presentation::input::url::process_url("file:///etc/passwd").await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn url_rejects_localhost() {
+    let result = minion_presentation::input::url::process_url("http://localhost/").await;
+    assert!(result.is_err());
+}
