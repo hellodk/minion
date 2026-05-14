@@ -176,19 +176,20 @@ pub async fn fv_remove_workspace(
 }
 
 /// List the immediate children of a directory.
-/// Hidden entries (starting with `.`) are excluded.
+/// Hidden entries (starting with `.`) are excluded unless `show_hidden` is true.
 /// Result is sorted: directories first (a-z), then files (a-z).
 ///
 /// Uses spawn_blocking so std::fs::read_dir does not block the tokio executor.
 #[tauri::command]
-pub async fn fv_read_dir(path: String) -> Result<Vec<FvEntry>, String> {
+pub async fn fv_read_dir(path: String, show_hidden: Option<bool>) -> Result<Vec<FvEntry>, String> {
+    let show_hidden = show_hidden.unwrap_or(false);
     tokio::task::spawn_blocking(move || {
         let mut entries: Vec<FvEntry> = std::fs::read_dir(&path)
             .map_err(|e| format!("Cannot read directory: {e}"))?
             .filter_map(|e| e.ok())
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') {
+                if !show_hidden && name.starts_with('.') {
                     return None;
                 }
                 let meta = e.metadata().ok()?;

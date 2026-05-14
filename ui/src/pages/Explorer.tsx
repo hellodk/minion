@@ -1,9 +1,12 @@
 import 'highlight.js/styles/github.css';
 import {
-  Component, createSignal, createEffect, createMemo, For, Show, onMount, Switch, Match,
+  Component, createSignal, createEffect, createMemo, For, Show, onMount, onCleanup,
+  Switch, Match,
 } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { invoke } from '@tauri-apps/api/core';
+import DOMPurify from 'dompurify';
+import { open as shellOpen } from '@tauri-apps/plugin-shell';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -56,8 +59,7 @@ function isImage(ext: string | null): boolean {
   return ext ? IMAGE_EXTS.has(ext) : false;
 }
 function isPreviewable(path: string): boolean {
-  const ext = path.split('.').pop()?.toLowerCase() ?? '';
-  return PREVIEW_EXTS.has(ext);
+  return PREVIEW_EXTS.has(fileExt(path));
 }
 function fileExt(path: string): string {
   const base = path.split(/[/\\]/).pop() ?? '';
@@ -123,7 +125,12 @@ const Explorer: Component = () => {
   const [workspaces, setWorkspaces] = createSignal<FvWorkspace[]>([]);
   const [tabs, setTabs] = createSignal<ExplorerTab[]>([]);
   const [activeTabPath, setActiveTabPath] = createSignal<string | null>(null);
-  const [viewMode, setViewMode] = createSignal<ViewMode>('source');
+
+  // Per-tab view mode store (replaces global viewMode signal)
+  const [tabViewModes, setTabViewModes] = createStore<Record<string, ViewMode>>({});
+  const viewMode = () => activeTabPath() ? (tabViewModes[activeTabPath()!] ?? 'source') : 'source';
+  const setViewMode = (m: ViewMode) => { const p = activeTabPath(); if (p) setTabViewModes(p, m); };
+
   const [expandedDirs, setExpandedDirs] = createSignal<Set<string>>(new Set());
   const [loadingDirs, setLoadingDirs] = createSignal<Set<string>>(new Set());
   const [dirContents, setDirContents] = createStore<Record<string, FvEntry[]>>({});
@@ -131,9 +138,23 @@ const Explorer: Component = () => {
   const [previewCache, setPreviewCache] = createStore<Record<string, string>>({});
   const [previewInFlight, setPreviewInFlight] = createSignal<Set<string>>(new Set());
   const [addingFolder, setAddingFolder] = createSignal(false);
+  const [showHidden, setShowHidden] = createSignal(false);
+  const [failedDirs, setFailedDirs] = createSignal<Set<string>>(new Set());
+  const [aiError, setAiError] = createSignal<string | null>(null);
 
   // Feature 2: Sidebar toggle
   const [sidebarOpen, setSidebarOpen] = createSignal(true);
+
+  // Restore expanded dirs from previous session
+  {
+    const saved = localStorage.getItem('explorer-expanded');
+    if (saved) {
+      try { setExpandedDirs(new Set(JSON.parse(saved) as string[])); } catch { /* ignore */ }
+    }
+  }
+  createEffect(() => {
+    localStorage.setItem('explorer-expanded', JSON.stringify([...expandedDirs()]));
+  });
 
   // Feature 3: File search
   const [searchQuery, setSearchQuery] = createSignal('');
@@ -164,11 +185,35 @@ const Explorer: Component = () => {
     try {
       const ws = await invoke<FvWorkspace[]>('fv_list_workspaces');
       setWorkspaces(ws);
+      // Auto-expand all workspaces on mount
+      setExpandedDirs(s => { const n = new Set(s); ws.forEach(w => n.add(w.path)); return n; });
       for (const w of ws) {
         void loadDir(w.path);
       }
     } catch { /* DB not ready yet — ignore */ }
   });
+
+  // Keyboard shortcuts
+  {
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key === 'w') {
+        const p = activeTabPath();
+        if (p) { e.preventDefault(); closeTab(p); }
+      } else if (e.ctrlKey && e.key === 'Tab') {
+        e.preventDefault();
+        const ts = tabs();
+        if (ts.length < 2) return;
+        const idx = ts.findIndex(t => t.path === activeTabPath());
+        setActiveTabPath(ts[(idx + (e.shiftKey ? -1 + ts.length : 1)) % ts.length].path);
+      } else if (e.ctrlKey && (e.key === 'f' || e.key === 'p')) {
+        e.preventDefault();
+        setSearchActive(true);
+        setSidebarOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    onCleanup(() => window.removeEventListener('keydown', handler));
+  }
 
   // Reset view mode to 'source' when switching to a non-previewable file
   createEffect(() => {
@@ -183,16 +228,26 @@ const Explorer: Component = () => {
   // ---------------------------------------------------------------------------
 
   async function loadDir(path: string) {
-    if (dirContents[path] !== undefined || loadingDirs().has(path)) return;
+    // Allow reload if previously failed; skip if already loading or successfully cached
+    const alreadyLoaded = dirContents[path] !== undefined && !failedDirs().has(path);
+    if (alreadyLoaded || loadingDirs().has(path)) return;
     setLoadingDirs(s => new Set([...s, path]));
+    setFailedDirs(s => { const n = new Set(s); n.delete(path); return n; });
     try {
-      const entries = await invoke<FvEntry[]>('fv_read_dir', { path });
+      const entries = await invoke<FvEntry[]>('fv_read_dir', { path, showHidden: showHidden() });
       setDirContents(path, entries);
     } catch {
       setDirContents(path, []);
+      setFailedDirs(s => new Set([...s, path]));
     } finally {
       setLoadingDirs(s => { const n = new Set(s); n.delete(path); return n; });
     }
+  }
+
+  function reloadDir(path: string) {
+    setDirContents(produce(d => { delete d[path]; }));
+    setFailedDirs(s => { const n = new Set(s); n.delete(path); return n; });
+    void loadDir(path);
   }
 
   function toggleDir(path: string) {
@@ -253,6 +308,7 @@ const Explorer: Component = () => {
       const ws = await invoke<FvWorkspace>('fv_add_workspace', { path });
       setWorkspaces(prev => prev.some(w => w.path === ws.path) ? prev : [...prev, ws]);
       void loadDir(ws.path);
+      setExpandedDirs(s => new Set([...s, ws.path]));
     } catch (e) {
       console.error('Add folder failed:', e);
     } finally {
@@ -295,6 +351,11 @@ const Explorer: Component = () => {
         if (key === wsPath || key.startsWith(wsPath + '/')) delete d[key];
       }
     }));
+    setImageCache(produce(d => {
+      for (const key of Object.keys(d)) {
+        if (key === wsPath || key.startsWith(wsPath + '/')) delete d[key];
+      }
+    }));
   }
 
   // ---------------------------------------------------------------------------
@@ -321,8 +382,13 @@ const Explorer: Component = () => {
     if (isImage(entry.extension)) {
       if (!imageCache[entry.path]) {
         setImageCache(entry.path, null); // null = loading
-        invoke<string>('fv_read_image_base64', { path: entry.path })
-          .then(uri => setImageCache(entry.path, uri))
+        const imgTimeout = new Promise<never>((_, r) =>
+          setTimeout(() => r(new Error('timeout')), 15_000));
+        Promise.race([
+          invoke<string>('fv_read_image_base64', { path: entry.path }),
+          imgTimeout,
+        ])
+          .then(uri => setImageCache(entry.path, uri as string))
           .catch(() => setImageCache(entry.path, ''));
       }
       return;
@@ -396,6 +462,11 @@ const Explorer: Component = () => {
     return result;
   }
 
+  const DOMPURIFY_CONFIG = {
+    ADD_TAGS: ['svg', 'use', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'g', 'defs', 'clipPath', 'text', 'tspan'],
+    ADD_ATTR: ['viewBox', 'fill', 'stroke', 'stroke-width', 'd', 'cx', 'cy', 'r', 'x', 'y', 'width', 'height', 'transform', 'xmlns'],
+  };
+
   async function renderPreview(path: string, text: string) {
     if (previewCache[path] || previewInFlight().has(path)) return;
     setPreviewInFlight(s => new Set([...s, path]));
@@ -404,10 +475,10 @@ const Explorer: Component = () => {
       if (ext === 'md' || ext === 'markdown' || ext === 'mdx') {
         const rawHtml = await invoke<string>('blog_render_preview', { markdown: text });
         const html = await resolveImagesInHtml(rawHtml, path);
-        setPreviewCache(path, html);
+        setPreviewCache(path, DOMPurify.sanitize(html, DOMPURIFY_CONFIG) as unknown as string);
       } else if (ext === 'html' || ext === 'htm') {
         const html = await resolveImagesInHtml(text, path);
-        setPreviewCache(path, html);
+        setPreviewCache(path, DOMPurify.sanitize(html, DOMPURIFY_CONFIG) as unknown as string);
       }
     } catch {
       setPreviewCache(path, '<p>Preview failed.</p>');
@@ -467,6 +538,14 @@ const Explorer: Component = () => {
           <Show when={isLoading()}>
             <span class="ml-1 text-[10px] text-gray-400 animate-pulse">…</span>
           </Show>
+          <Show when={failedDirs().has(p.entry.path)}>
+            <span class="ml-1 text-[10px] text-red-400" title="Failed to load — click to retry">⚠</span>
+            <button
+              onClick={(e) => { e.stopPropagation(); reloadDir(p.entry.path); }}
+              class="text-[10px] text-gray-400 hover:text-gray-600 ml-0.5"
+              title="Reload directory"
+            >↻</button>
+          </Show>
         </div>
         <Show when={isExpanded()}>
           <TreeLevel parentPath={p.entry.path} depth={p.depth + 1} />
@@ -510,25 +589,20 @@ const Explorer: Component = () => {
 
   function SourcePane(p: { path: string; content: FvFileContent }) {
     // Signal-based ref so the createEffect can track when the element mounts.
-    // A plain `let` ref would be undefined on the effect's first synchronous
-    // run (before the DOM element exists), causing a silent early return with
-    // no reactive dep to trigger a re-run. Bug #2 fix.
     const [codeEl, setCodeEl] = createSignal<HTMLElement | undefined>(undefined);
 
     createEffect(() => {
-      const el = codeEl();          // tracked: re-runs when element mounts
-      const text = p.content.text;  // tracked: re-runs when content changes
+      const el = codeEl();
+      const text = p.content.text;
       const lang = p.content.language;
       if (!el || p.content.is_binary) return;
 
-      el.textContent = text;        // set plain text immediately (no flash)
+      el.textContent = text;
 
       if (lang === 'plaintext') return;
 
-      // Bug #3 fix: capture `el` before the async gap; verify it's still
-      // the current element after highlight.js loads.
       import('highlight.js').then((hljs) => {
-        if (codeEl() !== el) return; // stale — element was replaced
+        if (codeEl() !== el) return;
         try {
           const safe = hljs.default.getLanguage(lang) ? lang : 'plaintext';
           if (safe !== 'plaintext') {
@@ -545,6 +619,13 @@ const Explorer: Component = () => {
           <span>{p.content.language}</span>
           <span>{p.content.line_count} lines</span>
           <span>{humanSize(p.content.size)}</span>
+          <button
+            onClick={() => navigator.clipboard.writeText(p.content.text)}
+            title="Copy to clipboard"
+            class="ml-auto px-1.5 py-0.5 rounded text-[10px] text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-200 transition-colors"
+          >
+            Copy
+          </button>
         </div>
         <pre class="m-0 p-4 text-[13px] leading-relaxed font-mono overflow-auto hljs"
           style={{ 'tab-size': '2', 'white-space': 'pre', 'min-height': 'calc(100% - 28px)' }}>
@@ -560,10 +641,23 @@ const Explorer: Component = () => {
 
   function PreviewPane(p: { path: string }) {
     const html = () => previewCache[p.path];
-    // Bug 2 fix: isMd must be reactive — same root cause as ContentView.ext.
-    // PreviewPane is kept alive across path changes; a static `isMd` is stale
-    // when switching between MD and HTML files in preview/split mode.
     const isMd = () => { const e = fileExt(p.path); return e === 'md' || e === 'markdown' || e === 'mdx'; };
+    const [previewEl, setPreviewEl] = createSignal<HTMLDivElement>();
+
+    createEffect(() => {
+      const el = previewEl();
+      const h = html();
+      if (!el || !h || !isMd()) return;
+      queueMicrotask(() => {
+        import('highlight.js').then(hljs => {
+          el.querySelectorAll('pre code[class*="language-"]').forEach(block => {
+            if (!(block as HTMLElement).dataset['highlighted']) {
+              hljs.default.highlightElement(block as HTMLElement);
+            }
+          });
+        }).catch(() => {});
+      });
+    });
 
     return (
       <div class="h-full overflow-auto bg-white dark:bg-gray-900">
@@ -584,6 +678,7 @@ const Explorer: Component = () => {
           >
             {/* MD: inline rendered HTML using same preview styles as Blog */}
             <div
+              ref={setPreviewEl}
               class="prose prose-slate dark:prose-invert max-w-none p-6
                      prose-headings:font-bold prose-code:bg-gray-100 dark:prose-code:bg-gray-800
                      prose-code:px-1 prose-code:rounded prose-pre:bg-gray-900
@@ -656,6 +751,12 @@ const Explorer: Component = () => {
               </svg>
               <p class="text-sm font-medium">Binary file — cannot preview</p>
               <p class="text-xs">{humanSize(content()?.size ?? 0)}</p>
+              <button
+                onClick={() => shellOpen(p.path).catch(() => {})}
+                class="text-xs text-sky-500 hover:underline"
+              >
+                Open with system app
+              </button>
             </div>
           </Match>
 
@@ -708,6 +809,27 @@ const Explorer: Component = () => {
               Explorer
             </span>
             <div class="flex items-center gap-0.5">
+              {/* Show hidden files toggle */}
+              <button
+                onClick={() => {
+                  const newVal = !showHidden();
+                  setShowHidden(newVal);
+                  // Clear all dir caches so they reload with new hidden setting
+                  setDirContents(produce(d => { Object.keys(d).forEach(k => { delete d[k]; }); }));
+                  setFailedDirs(new Set<string>());
+                  for (const p of expandedDirs()) void loadDir(p);
+                }}
+                title={showHidden() ? 'Hide hidden files' : 'Show hidden files (. files)'}
+                class={`p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors ${showHidden() ? 'text-sky-500 dark:text-sky-400' : 'text-gray-500 dark:text-gray-400'}`}
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d={showHidden()
+                      ? "M15 12a3 3 0 11-6 0 3 3 0 016 0zM2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                      : "M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.542 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"}
+                  />
+                </svg>
+              </button>
               {/* Search toggle button */}
               <button
                 onClick={() => { setSearchActive(s => !s); if (searchActive()) setSearchQuery(''); }}
@@ -788,6 +910,11 @@ const Explorer: Component = () => {
                     </div>
                   )}
                 </For>
+                <Show when={searchActive()}>
+                  <div class="px-3 py-1 text-[10px] text-gray-400 italic border-t border-gray-100 dark:border-gray-800 mt-1">
+                    Tip: Expand folders to include their files in search
+                  </div>
+                </Show>
               </div>
             </Show>
 
@@ -822,12 +949,12 @@ const Explorer: Component = () => {
                         title={ws.path}>
                         {ws.label}
                       </span>
-                      {/* Expand / Collapse all — visible on hover */}
+                      {/* Expand / Collapse all */}
                       <Show when={expandedDirs().has(ws.path)}>
                         <button
                           onClick={(e) => { e.stopPropagation(); void expandAll(ws.path); }}
                           title="Expand all (up to 4 levels)"
-                          class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 transition-all"
+                          class="p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 transition-all"
                         >
                           <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -837,7 +964,7 @@ const Explorer: Component = () => {
                         <button
                           onClick={(e) => { e.stopPropagation(); collapseAll(ws.path); }}
                           title="Collapse all"
-                          class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 transition-all"
+                          class="p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 transition-all"
                         >
                           <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -886,6 +1013,10 @@ const Explorer: Component = () => {
                 </Show>
                 <IconFile ext={fileExt(tab.path) || null} />
                 <span class="truncate">{tab.name}</span>
+                {/* Modified dot indicator */}
+                <Show when={aiOriginals[tab.path]}>
+                  <span class="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" title="Modified by AI (unsaved)" />
+                </Show>
                 <span
                   role="button"
                   onClick={(e) => closeTab(tab.path, e as unknown as MouseEvent)}
@@ -906,13 +1037,51 @@ const Explorer: Component = () => {
           </Show>
         </div>
 
+        {/* File path bar */}
+        <Show when={activeTabPath()}>
+          <div class="flex-none flex items-center gap-2 px-3 py-0.5 bg-white dark:bg-gray-900 border-b border-gray-100 dark:border-gray-800 min-h-[20px]">
+            <span class="text-[10px] text-gray-400 font-mono truncate select-all flex-1" title={activeTabPath()!}>
+              {activeTabPath()}
+            </span>
+            <button
+              onClick={() => {
+                const p = activeTabPath();
+                if (p) navigator.clipboard.writeText(p);
+              }}
+              title="Copy path"
+              class="shrink-0 text-[10px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+            >
+              ⎘
+            </button>
+          </div>
+        </Show>
+
         {/* View-mode toggle bar + AI button — only when a file with content is active */}
         <Show when={activeTabPath() && !!fileCache[activeTabPath()!]}>
           <div class="flex-none flex items-center justify-between px-3 py-1.5 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
-            {/* View mode buttons — only for previewable files */}
+            {/* Reload from disk + View mode buttons */}
             <div class="flex items-center gap-1">
+              {/* Reload from disk button */}
+              <button
+                onClick={() => {
+                  const p = activeTabPath();
+                  if (!p) return;
+                  setFileCache(p, null);
+                  if (previewCache[p]) setPreviewCache(produce(d => { delete d[p]; }));
+                  invoke<FvFileContent>('fv_read_file', { path: p })
+                    .then(r => setFileCache(p, r))
+                    .catch(e => setFileCache(p, { text: `⚠ Could not load file\n\n${e}`, size: 0, is_binary: false, language: 'plaintext', line_count: 0 }));
+                }}
+                title="Reload from disk"
+                class="p-0.5 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+              >
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+              {/* View mode buttons — only for previewable files */}
               <Show when={isPreviewable(activeTabPath()!)}>
-                <span class="text-[10px] text-gray-400 mr-1">View:</span>
+                <span class="text-[10px] text-gray-400 mr-1 ml-1">View:</span>
                 {(['source', 'split', 'preview'] as ViewMode[]).map((m) => (
                   <button
                     onClick={() => setViewMode(m)}
@@ -931,6 +1100,9 @@ const Explorer: Component = () => {
             {/* AI Fix button — only for MD files */}
             <Show when={activeTabPath() && !!fileCache[activeTabPath()!] && (fileExt(activeTabPath()!) === 'md' || fileExt(activeTabPath()!) === 'markdown' || fileExt(activeTabPath()!) === 'mdx')}>
               <div class="flex items-center gap-1">
+                <Show when={aiError()}>
+                  <span class="text-xs text-red-500 ml-1">{aiError()}</span>
+                </Show>
                 <Show when={aiOriginals[activeTabPath()!]}>
                   <button
                     onClick={() => {
@@ -952,6 +1124,7 @@ const Explorer: Component = () => {
                     if (!p) return;
                     const cur = fileCache[p];
                     if (!cur || cur.is_binary) return;
+                    setAiError(null);
                     setAiWorking(true);
                     try {
                       const fixed = await invoke<string>('fv_format_md', { markdown: cur.text });
@@ -960,7 +1133,7 @@ const Explorer: Component = () => {
                       setFileCache(p, { ...cur, text: fixed, line_count: lines });
                       if (previewCache[p]) setPreviewCache(produce(d => { delete d[p]; }));
                     } catch (e) {
-                      alert(`AI fix failed: ${e}`);
+                      setAiError(`AI fix failed: ${e}`);
                     } finally {
                       setAiWorking(false);
                     }
