@@ -23,8 +23,7 @@ export default function DeckWorkspace(props: Props) {
   const [sessionId] = createSignal<string | null>(props.initialSessionId ?? null);
   const [pan, setPan] = createSignal<{ x: number; y: number }>({ x: 40, y: 40 });
   const [zoom, setZoom] = createSignal(0.3);
-  // setSelectedElement will be wired to SlideEditor once it exposes element-selection events
-  const [selectedElement, _setSelectedElement] = createSignal<DeckElement | null>(null);
+  const [selectedElement, setSelectedElement] = createSignal<DeckElement | null>(null);
 
   onMount(async () => {
     if (!props.deckId) return;
@@ -90,6 +89,7 @@ export default function DeckWorkspace(props: Props) {
                         slideScreenX={slide().canvas_x * zoom() + pan().x}
                         slideScreenY={slide().canvas_y * zoom() + pan().y}
                         onPatch={handlePatch}
+                        onElementSelect={setSelectedElement}
                       />
                     )}
                   </Show>

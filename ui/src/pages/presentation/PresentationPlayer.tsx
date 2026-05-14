@@ -77,6 +77,9 @@ export default function PresentationPlayer(props: Props) {
   const [displayIdx, setDisplayIdx] = createSignal(0);
   const [prevIdx, setPrevIdx] = createSignal<number | null>(null);
   const [transitioning, setTransitioning] = createSignal(false);
+  // Timer handle for the transition clearance — managed manually so it can be
+  // cancelled on rapid slide changes without calling onCleanup outside reactive scope.
+  let transitionTimer: ReturnType<typeof setTimeout> | undefined;
 
   function slideAt(i: number): Slide | undefined {
     const sid = order()[i];
@@ -144,11 +147,12 @@ export default function PresentationPlayer(props: Props) {
     setIdx(next);
     setDisplayIdx(next);
     const dur = slideAt(cur)?.transition.duration_ms ?? 300;
-    const timer = setTimeout(() => {
+    // Cancel any in-flight transition before starting a new one.
+    clearTimeout(transitionTimer);
+    transitionTimer = setTimeout(() => {
       setPrevIdx(null);
       setTransitioning(false);
     }, dur + 16);
-    onCleanup(() => clearTimeout(timer));
   }
 
   const notes = createMemo(() => slide()?.speaker_notes.talking_points ?? []);
@@ -159,7 +163,10 @@ export default function PresentationPlayer(props: Props) {
     else if (e.key === "Escape") props.onClose();
   };
   onMount(() => window.addEventListener("keydown", onKey));
-  onCleanup(() => window.removeEventListener("keydown", onKey));
+  onCleanup(() => {
+    window.removeEventListener("keydown", onKey);
+    clearTimeout(transitionTimer);
+  });
 
   return (
     <div
@@ -173,76 +180,92 @@ export default function PresentationPlayer(props: Props) {
         &#x2715;
       </button>
 
-      <div class="flex-1 relative overflow-hidden">
+      {/* Scale canvas: slides are in 1920×1080 logical units. We render them inside a
+          container sized to maintain 16:9 and then scale the inner 1920×1080 space down
+          to fit via CSS transform, so elements always appear at the right proportional
+          position regardless of screen size. */}
+      <div class="flex-1 relative overflow-hidden flex items-center justify-center">
         <Show
           when={slide()}
           fallback={
-            <p class="absolute inset-0 flex items-center justify-center text-white/40 text-xl">
-              No slides in play order
-            </p>
+            <p class="text-white/40 text-xl">No slides in play order</p>
           }
         >
-          {/* Outgoing layer */}
-          <Show when={transitioning() && prevSlide()}>
-            <div
-              class="absolute inset-0 pointer-events-none"
-              style={{
-                background: bgStyle(prevSlide()!),
-                animation: txStyles().exiting,
-                "z-index": 1,
-              }}
-            >
-              <Index each={[...(prevSlide()!.elements)].sort((a, b) => a.z_index - b.z_index)}>
-                {(el) => (
+          {/* Viewport box: 16:9, fills available area */}
+          <div class="relative w-full h-full"
+            style={{ "aspect-ratio": "16/9", "max-width": "177.78vh", "max-height": "56.25vw" }}>
+            {/* Coordinate-space scaler: maps 1920×1080 → 100% × 100% */}
+            <div class="absolute inset-0" style={{ "overflow": "hidden" }}>
+              <div class="absolute top-0 left-0 origin-top-left"
+                style={{
+                  width: `${slide()!.width || 1920}px`,
+                  height: `${slide()!.height || 1080}px`,
+                  transform: `scale(calc(min(100vw, 177.78vh) / ${slide()!.width || 1920}))`,
+                }}>
+                {/* Outgoing layer */}
+                <Show when={transitioning() && prevSlide()}>
                   <div
-                    class="absolute"
+                    class="absolute inset-0 pointer-events-none"
                     style={{
-                      left: `${el().x}px`,
-                      top: `${el().y}px`,
-                      width: `${el().width}px`,
-                      height: `${el().height}px`,
-                      "z-index": el().z_index,
-                      opacity: el().style.opacity,
-                      "border-radius": `${el().style.border_radius}px`,
+                      background: bgStyle(prevSlide()!),
+                      animation: txStyles().exiting,
+                      "z-index": 1,
                     }}
                   >
-                    <ElementRenderer el={el()} />
+                    <Index each={[...(prevSlide()!.elements)].sort((a, b) => a.z_index - b.z_index)}>
+                      {(el) => (
+                        <div
+                          class="absolute"
+                          style={{
+                            left: `${el().x}px`,
+                            top: `${el().y}px`,
+                            width: `${el().width}px`,
+                            height: `${el().height}px`,
+                            "z-index": el().z_index,
+                            opacity: el().style.opacity,
+                            "border-radius": `${el().style.border_radius}px`,
+                          }}
+                        >
+                          <ElementRenderer el={el()} />
+                        </div>
+                      )}
+                    </Index>
                   </div>
-                )}
-              </Index>
-            </div>
-          </Show>
+                </Show>
 
-          {/* Incoming layer */}
-          <div
-            class="absolute inset-0"
-            style={{
-              animation: transitioning() ? txStyles().entering : undefined,
-              "z-index": 2,
-            }}
-          >
-            <Index each={sortedEls()}>
-              {(el) => (
+                {/* Incoming layer */}
                 <div
-                  class="absolute"
+                  class="absolute inset-0"
                   style={{
-                    left: `${el().x}px`,
-                    top: `${el().y}px`,
-                    width: `${el().width}px`,
-                    height: `${el().height}px`,
-                    "z-index": el().z_index,
-                    opacity: visibleIds().has(el().id) ? el().style.opacity : 0,
-                    animation: visibleIds().has(el().id)
-                      ? animationStyle(el().animation.entrance)
-                      : "none",
-                    "border-radius": `${el().style.border_radius}px`,
-                    "box-shadow": el().style.box_shadow ?? undefined,
+                    animation: transitioning() ? txStyles().entering : undefined,
+                    "z-index": 2,
                   }}
                 >
-                  <ElementRenderer el={el()} />
+                  <Index each={sortedEls()}>
+                    {(el) => (
+                      <div
+                        class="absolute"
+                        style={{
+                          left: `${el().x}px`,
+                          top: `${el().y}px`,
+                          width: `${el().width}px`,
+                          height: `${el().height}px`,
+                          "z-index": el().z_index,
+                          opacity: visibleIds().has(el().id) ? el().style.opacity : 0,
+                          animation: visibleIds().has(el().id)
+                            ? animationStyle(el().animation.entrance)
+                            : "none",
+                          "border-radius": `${el().style.border_radius}px`,
+                          "box-shadow": el().style.box_shadow ?? undefined,
+                        }}
+                      >
+                        <ElementRenderer el={el()} />
+                      </div>
+                    )}
+                  </Index>
                 </div>
-              )}
-            </Index>
+              </div>
+            </div>
           </div>
         </Show>
       </div>

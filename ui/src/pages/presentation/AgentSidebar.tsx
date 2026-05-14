@@ -26,7 +26,11 @@ export default function AgentSidebar(props: Props) {
     const sid = props.sessionId;
     if (!sid) return;
     setComplete(false); setStreamErr(null);
+
+    // Track whether cleanup ran before the promise resolved (race condition guard).
+    let cancelled = false;
     let unlisten: UnlistenFn | null = null;
+
     listenToAgentEvents(sid, (ev: AgentEvent) => {
       if ("agent" in ev) {
         const n = ev.agent;
@@ -44,8 +48,15 @@ export default function AgentSidebar(props: Props) {
       } else if (ev.kind === "stream_error") {
         setStreamErr(ev.message);
       }
-    }).then(fn => { unlisten = fn; });
-    onCleanup(() => { unlisten?.(); });
+    }).then(fn => {
+      // If cleanup already ran before the promise resolved, unlisten immediately.
+      if (cancelled) { fn(); } else { unlisten = fn; }
+    });
+
+    onCleanup(() => {
+      cancelled = true;
+      unlisten?.();
+    });
   });
 
   const entries = () => Object.entries(agents) as [AgentName, AgentState][];

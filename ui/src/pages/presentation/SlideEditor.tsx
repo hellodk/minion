@@ -8,6 +8,7 @@ interface Props {
   slideScreenX: number;
   slideScreenY: number;
   onPatch: (p: DeckPatch) => void;
+  onElementSelect?: (el: Element | null) => void;
 }
 
 function elementBg(el: Element): string {
@@ -23,6 +24,11 @@ interface DragState {
 
 export default function SlideEditor(props: Props) {
   const [selectedId, setSelectedId] = createSignal<string | null>(null);
+
+  function selectElement(el: Element | null) {
+    setSelectedId(el?.id ?? null);
+    props.onElementSelect?.(el);
+  }
   const [editingId, setEditingId] = createSignal<string | null>(null);
   const [dragState, setDragState] = createSignal<DragState | null>(null);
   const [dragOffset, setDragOffset] = createSignal<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
@@ -93,16 +99,16 @@ export default function SlideEditor(props: Props) {
                 opacity: String(el.style.opacity ?? 1),
                 cursor: el.locked ? "not-allowed" : isDragging() ? "grabbing" : isEditing() ? "text" : "pointer",
               }}
-              onClick={(e) => { e.stopPropagation(); if (!el.locked) setSelectedId(el.id); }}
+              onClick={(e) => { e.stopPropagation(); if (!el.locked) selectElement(el); }}
               onDblClick={(e) => {
                 e.stopPropagation();
                 if (el.locked || el.content.kind !== "text") return;
-                setSelectedId(el.id); setEditingId(el.id);
+                selectElement(el); setEditingId(el.id);
               }}
               onMouseDown={(e) => {
                 if (el.locked || isEditing()) return;
                 e.stopPropagation();
-                setSelectedId(el.id);
+                selectElement(el);
                 setDragState({
                   elId: el.id,
                   startMouseX: e.clientX, startMouseY: e.clientY,
@@ -161,7 +167,7 @@ export default function SlideEditor(props: Props) {
                   </button>
                   <button class="px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-red-400/10 rounded"
                     onClick={(e) => {
-                      e.stopPropagation(); setSelectedId(null);
+                      e.stopPropagation(); selectElement(null);
                       props.onPatch({ op: "delete_element", slide_id: props.slide.id,
                         element_id: el.id });
                     }}>
@@ -175,7 +181,7 @@ export default function SlideEditor(props: Props) {
       </For>
       {/* Click-away deselect */}
       <div class="absolute inset-0 pointer-events-auto -z-10"
-        onClick={() => { setSelectedId(null); setEditingId(null); }} />
+        onClick={() => { selectElement(null); setEditingId(null); }} />
     </div>
   );
 }
