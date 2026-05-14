@@ -35,6 +35,7 @@ jsonschema = "0.18"
 
 # SVG parsing (allowlist sanitizer)
 roxmltree = "0.20"
+regex = "1"
 
 # ZIP for .minion-deck bundle
 zip = "2.1"
