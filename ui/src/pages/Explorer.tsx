@@ -131,19 +131,15 @@ const Explorer: Component = () => {
   const [previewCache, setPreviewCache] = createStore<Record<string, string>>({});
   const [previewInFlight, setPreviewInFlight] = createSignal<Set<string>>(new Set());
   const [addingFolder, setAddingFolder] = createSignal(false);
-  const [dbgLog, setDbgLog] = createSignal<string[]>([]);
-  const dbg = (msg: string) => setDbgLog(l => [...l.slice(-11), `${new Date().toLocaleTimeString()}: ${msg}`]);
 
   onMount(async () => {
-    dbg('onMount: invoking fv_list_workspaces');
     try {
       const ws = await invoke<FvWorkspace[]>('fv_list_workspaces');
-      dbg(`onMount: got ${ws.length} workspace(s)`);
       setWorkspaces(ws);
       for (const w of ws) {
         void loadDir(w.path);
       }
-    } catch (e) { dbg(`onMount ERROR: ${e}`); }
+    } catch { /* DB not ready yet — ignore */ }
   });
 
   // Reset view mode to 'source' when switching to a non-previewable file
@@ -278,39 +274,24 @@ const Explorer: Component = () => {
   // ---------------------------------------------------------------------------
 
   async function openFile(entry: FvEntry) {
-    dbg(`click: ${entry.name} is_dir=${entry.is_dir}`);
-    try {
-      if (entry.is_dir) { toggleDir(entry.path); return; }
+    if (entry.is_dir) { toggleDir(entry.path); return; }
 
-      dbg(`A: path=${entry.path}`);
-      const alreadyOpen = tabs().some(t => t.path === entry.path);
-      dbg(`B: alreadyOpen=${alreadyOpen}`);
-      if (alreadyOpen) {
-        dbg(`already open: ${entry.name}`);
-        setActiveTabPath(entry.path);
-        return;
-      }
-
-      const newTab: ExplorerTab = { path: entry.path, name: entry.name };
-      dbg('C: calling setTabs');
-      setTabs(prev => {
-        const without = prev.filter(t => t.path !== entry.path);
-        const trimmed = without.length >= MAX_TABS ? without.slice(1) : without;
-        return [...trimmed, newTab];
-      });
-      dbg(`D: tabs.length=${tabs().length}`);
+    if (tabs().some(t => t.path === entry.path)) {
       setActiveTabPath(entry.path);
-      dbg(`E: active=${activeTabPath()}`);
-    } catch (err) {
-      dbg(`EXCEPTION in openFile: ${err}`);
       return;
     }
-    dbg(`tab added: ${entry.name}`);
 
-    if (isImage(entry.extension)) { dbg('image — no IPC needed'); return; }
+    const newTab: ExplorerTab = { path: entry.path, name: entry.name };
+    setTabs(prev => {
+      const without = prev.filter(t => t.path !== entry.path);
+      const trimmed = without.length >= MAX_TABS ? without.slice(1) : without;
+      return [...trimmed, newTab];
+    });
+    setActiveTabPath(entry.path);
+
+    if (isImage(entry.extension)) { return;}
 
     setFileCache(entry.path, null);
-    dbg(`invoking fv_read_file: ${entry.name}`);
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const failSafe = new Promise<never>((_, reject) => {
@@ -326,11 +307,9 @@ const Explorer: Component = () => {
         failSafe,
       ]);
       clearTimeout(timeoutId);
-      dbg(`loaded OK: ${entry.name} (${content.line_count} lines)`);
       setFileCache(entry.path, content);
     } catch (e) {
       clearTimeout(timeoutId);
-      dbg(`FAILED: ${entry.name} — ${e}`);
       setFileCache(entry.path, {
         text: `⚠ Could not load file\n\n${e}`,
         size: 0, is_binary: false, language: 'plaintext', line_count: 0,
@@ -756,14 +735,14 @@ const Explorer: Component = () => {
                 </Show>
                 <IconFile ext={fileExt(tab.path) || null} />
                 <span class="truncate">{tab.name}</span>
-                <button
-                  type="button"
-                  onClick={(e) => closeTab(tab.path, e)}
+                <span
+                  role="button"
+                  onClick={(e) => closeTab(tab.path, e as unknown as MouseEvent)}
                   class="shrink-0 opacity-0 group-hover:opacity-100 hover:bg-gray-200 dark:hover:bg-gray-700 rounded p-0.5 transition-all leading-none"
                   title="Close tab"
                 >
                   <IconX size={3} />
-                </button>
+                </span>
               </button>
             )}
           </For>
@@ -820,13 +799,6 @@ const Explorer: Component = () => {
         </div>
       </div>
 
-      {/* ── Debug overlay — remove once bug is found ── */}
-      <div class="fixed bottom-2 right-2 z-50 max-w-sm bg-gray-900 text-green-400 text-[10px] font-mono rounded shadow-lg p-2 space-y-0.5 opacity-95">
-        <div class="text-yellow-300 border-b border-gray-700 pb-1 mb-1">
-          tabs={tabs().length} | active="{activeTabPath() ?? 'NULL'}" | cache={activeTabPath() ? (fileCache[activeTabPath()!] === null ? 'loading' : fileCache[activeTabPath()!] === undefined ? 'undef' : 'ok') : '-'}
-        </div>
-        <For each={dbgLog()}>{(line) => <div>{line}</div>}</For>
-      </div>
 
     </div>
   );
