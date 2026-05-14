@@ -340,17 +340,49 @@ pub async fn fv_format_md(
     use minion_llm::{create_provider, EndpointConfig, ProviderType};
     use minion_llm::types::{ChatMessage, ChatRequest};
 
-    let (pt_str, base_url, api_key, model): (String, String, Option<String>, String) = {
+    let (pt_str, base_url, api_key, model_opt): (String, String, Option<String>, Option<String>) = {
         let st = state.read().await;
         let conn = st.db.get().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT provider_type, base_url, api_key_encrypted, \
-             COALESCE(default_model, 'llama3') FROM llm_endpoints \
-             WHERE enabled = 1 ORDER BY created_at DESC LIMIT 1",
+            "SELECT provider_type, base_url, api_key_encrypted, default_model \
+             FROM llm_endpoints WHERE enabled = 1 ORDER BY created_at DESC LIMIT 1",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .map_err(|_| "No enabled LLM endpoint. Add one in Settings → LLM Endpoints.".to_string())?
+    };
+
+    // If no default model is configured, auto-detect the first available one.
+    let model = match model_opt.filter(|m| !m.trim().is_empty()) {
+        Some(m) => m,
+        None => {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let base = base_url.trim_end_matches('/');
+            let first = match pt_str.as_str() {
+                "ollama" => {
+                    let r = client.get(format!("{base}/api/tags")).send().await
+                        .map_err(|e| format!("Cannot reach endpoint: {e}"))?;
+                    let j: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
+                    j["models"].as_array().and_then(|a| a.first())
+                        .and_then(|m| m["name"].as_str()).map(|s| s.to_string())
+                }
+                _ => {
+                    let mut req = client.get(format!("{base}/v1/models"));
+                    if let Some(k) = &api_key { if !k.is_empty() { req = req.bearer_auth(k); } }
+                    let r = req.send().await.map_err(|e| format!("Cannot reach endpoint: {e}"))?;
+                    let j: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
+                    j["data"].as_array().and_then(|a| a.first())
+                        .and_then(|m| m["id"].as_str()).map(|s| s.to_string())
+                }
+            };
+            first.ok_or_else(|| {
+                "Could not detect a model automatically. \
+                 Set a default model in Settings → LLM Endpoints.".to_string()
+            })?
+        }
     };
 
     let pt = match pt_str.as_str() {
