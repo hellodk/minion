@@ -274,6 +274,63 @@ pub async fn fv_read_image_base64(path: String) -> Result<String, String> {
     Ok(format!("data:{mime};base64,{b64}"))
 }
 
+/// Extract readable text from a PDF file (up to 50 MB).
+/// Returns FvFileContent with `language: "plaintext"`.
+#[tauri::command]
+pub async fn fv_extract_pdf(path: String) -> Result<FvFileContent, String> {
+    const MAX: u64 = 50 * 1024 * 1024;
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| format!("Cannot access '{}': {}", path, e))?;
+    let size = meta.len();
+    if size > MAX {
+        return Err(format!("PDF too large ({:.1} MB). Limit is 50 MB.", size as f64 / 1_048_576.0));
+    }
+    tokio::task::spawn_blocking(move || {
+        let text = pdf_extract::extract_text(&path)
+            .map_err(|e| format!("PDF text extraction failed: {e}"))?;
+        let line_count = text.lines().count();
+        Ok(FvFileContent { text, size, is_binary: false, language: "plaintext".to_owned(), line_count })
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))
+    .and_then(|r| r)
+}
+
+/// Return git status for all tracked files under `workspace_path`.
+/// Result is a map of absolute file path → 2-character status code ("M ", "A ", " M", "??", …).
+/// Returns an empty map if git is not available or the path is not a repo.
+#[tauri::command]
+pub async fn fv_git_status(workspace_path: String) -> Result<std::collections::HashMap<String, String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new("git")
+            .args(["status", "--porcelain", "-u"])
+            .current_dir(&workspace_path)
+            .output();
+        let output = match output {
+            Ok(o) => o,
+            Err(_) => return Ok(std::collections::HashMap::new()), // git not installed
+        };
+        if !output.status.success() {
+            return Ok(std::collections::HashMap::new()); // not a repo
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut map = std::collections::HashMap::new();
+        for line in text.lines() {
+            if line.len() < 4 { continue; }
+            let code = line[..2].to_owned();
+            let rel = line[3..].trim().trim_start_matches('"').trim_end_matches('"');
+            // git porcelain uses forward slashes on all platforms
+            let abs = format!("{}/{}", workspace_path.trim_end_matches('/'), rel);
+            map.insert(abs, code);
+        }
+        Ok(map)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))
+    .and_then(|r| r)
+}
+
 /// Format / fix a Markdown document using the first enabled LLM endpoint.
 #[tauri::command]
 pub async fn fv_format_md(

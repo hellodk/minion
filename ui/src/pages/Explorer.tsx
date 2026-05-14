@@ -22,7 +22,7 @@ interface FvFileContent {
   language: string; line_count: number;
 }
 interface ExplorerTab { path: string; name: string; }
-type ViewMode = 'source' | 'split' | 'preview';
+type ViewMode = 'source' | 'split' | 'preview' | 'diff';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -118,6 +118,12 @@ const IconX = ({ size = 3 }: { size?: number }) => (
 );
 
 // ---------------------------------------------------------------------------
+// Context menu type
+// ---------------------------------------------------------------------------
+
+type ContextMenuTarget = { entry: FvEntry; x: number; y: number } | null;
+
+// ---------------------------------------------------------------------------
 // Explorer component
 // ---------------------------------------------------------------------------
 
@@ -144,6 +150,19 @@ const Explorer: Component = () => {
 
   // Feature 2: Sidebar toggle
   const [sidebarOpen, setSidebarOpen] = createSignal(true);
+
+  // Feature 4: Resizable sidebar
+  const [sidebarWidth, setSidebarWidth] = createSignal(256);
+
+  // Feature 5: Git status
+  const [gitStatus, setGitStatus] = createStore<Record<string, string>>({});
+
+  // Feature 6: Context menu
+  const [contextMenu, setContextMenu] = createSignal<ContextMenuTarget>(null);
+
+  // Feature 7: Tab eviction toast
+  const [evictedTab, setEvictedTab] = createSignal<string | null>(null);
+  let evictToastTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Restore expanded dirs from previous session
   {
@@ -181,6 +200,14 @@ const Explorer: Component = () => {
   const [aiWorking, setAiWorking] = createSignal(false);
   const [aiOriginals, setAiOriginals] = createStore<Record<string, string>>({});
 
+  // Feature 5: Git status refresh
+  async function refreshGitStatus(wsPath: string) {
+    try {
+      const status = await invoke<Record<string, string>>('fv_git_status', { workspacePath: wsPath });
+      setGitStatus(produce(d => { Object.assign(d, status); }));
+    } catch { /* git not available */ }
+  }
+
   onMount(async () => {
     try {
       const ws = await invoke<FvWorkspace[]>('fv_list_workspaces');
@@ -189,6 +216,7 @@ const Explorer: Component = () => {
       setExpandedDirs(s => { const n = new Set(s); ws.forEach(w => n.add(w.path)); return n; });
       for (const w of ws) {
         void loadDir(w.path);
+        void refreshGitStatus(w.path);
       }
     } catch { /* DB not ready yet — ignore */ }
   });
@@ -215,10 +243,21 @@ const Explorer: Component = () => {
     onCleanup(() => window.removeEventListener('keydown', handler));
   }
 
+  // Feature 6: Context menu dismiss
+  {
+    const dismiss = () => setContextMenu(null);
+    window.addEventListener('click', dismiss);
+    window.addEventListener('contextmenu', dismiss);
+    onCleanup(() => {
+      window.removeEventListener('click', dismiss);
+      window.removeEventListener('contextmenu', dismiss);
+    });
+  }
+
   // Reset view mode to 'source' when switching to a non-previewable file
   createEffect(() => {
     const p = activeTabPath();
-    if (p && !isPreviewable(p) && viewMode() !== 'source') {
+    if (p && !isPreviewable(p) && viewMode() !== 'source' && viewMode() !== 'diff') {
       setViewMode('source');
     }
   });
@@ -308,6 +347,7 @@ const Explorer: Component = () => {
       const ws = await invoke<FvWorkspace>('fv_add_workspace', { path });
       setWorkspaces(prev => prev.some(w => w.path === ws.path) ? prev : [...prev, ws]);
       void loadDir(ws.path);
+      void refreshGitStatus(ws.path);
       setExpandedDirs(s => new Set([...s, ws.path]));
     } catch (e) {
       console.error('Add folder failed:', e);
@@ -371,12 +411,32 @@ const Explorer: Component = () => {
     }
 
     const newTab: ExplorerTab = { path: entry.path, name: entry.name };
+
+    // Feature 7: Tab eviction toast
     setTabs(prev => {
       const without = prev.filter(t => t.path !== entry.path);
-      const trimmed = without.length >= MAX_TABS ? without.slice(1) : without;
-      return [...trimmed, newTab];
+      if (without.length >= MAX_TABS) {
+        const evicted = without[0];
+        clearTimeout(evictToastTimer);
+        setEvictedTab(evicted.name);
+        evictToastTimer = setTimeout(() => setEvictedTab(null), 3000);
+        return [...without.slice(1), newTab];
+      }
+      return [...without, newTab];
     });
     setActiveTabPath(entry.path);
+
+    // Feature 3: PDF extraction via backend
+    if (entry.extension === 'pdf') {
+      setFileCache(entry.path, null);
+      invoke<FvFileContent>('fv_extract_pdf', { path: entry.path })
+        .then(r => setFileCache(entry.path, r))
+        .catch(e => setFileCache(entry.path, {
+          text: `⚠ PDF extraction failed\n\n${e}`,
+          size: 0, is_binary: false, language: 'plaintext', line_count: 0,
+        }));
+      return;
+    }
 
     // Images are loaded as base64 data URIs to avoid asset-protocol scope issues.
     if (isImage(entry.extension)) {
@@ -512,10 +572,27 @@ const Explorer: Component = () => {
         }}
         style={{ 'padding-left': `${p.depth * 12 + 20}px`, 'padding-right': '8px' }}
         onClick={() => void openFile(p.entry)}
+        onContextMenu={(e: MouseEvent) => {
+          e.preventDefault();
+          setContextMenu({ entry: p.entry, x: e.clientX, y: e.clientY });
+        }}
         title={p.entry.path}
       >
         <IconFile ext={p.entry.extension} />
         <span class="text-xs truncate">{p.entry.name}</span>
+        {/* Feature 5: Git status badge */}
+        <Show when={gitStatus[p.entry.path]}>
+          <span
+            class={`text-[9px] font-bold ml-auto shrink-0 ${
+              gitStatus[p.entry.path]?.includes('?') ? 'text-green-500' :
+              gitStatus[p.entry.path]?.trim() === 'A' ? 'text-green-400' :
+              'text-amber-400'
+            }`}
+            title={`Git: ${gitStatus[p.entry.path]}`}
+          >
+            {gitStatus[p.entry.path]?.includes('?') ? 'U' : gitStatus[p.entry.path]?.trim()[0]}
+          </span>
+        </Show>
       </div>
     );
   }
@@ -584,7 +661,7 @@ const Explorer: Component = () => {
   }
 
   // ---------------------------------------------------------------------------
-  // Source view with syntax highlighting
+  // Feature 1: Source view with syntax highlighting + line number gutter
   // ---------------------------------------------------------------------------
 
   function SourcePane(p: { path: string; content: FvFileContent }) {
@@ -613,24 +690,26 @@ const Explorer: Component = () => {
     });
 
     return (
-      <div class="h-full overflow-auto">
+      <div class="h-full overflow-hidden flex flex-col">
         {/* Status bar */}
-        <div class="sticky top-0 flex gap-4 px-4 py-1 text-[10px] text-gray-400 bg-gray-100 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 font-mono select-none z-10">
+        <div class="flex-none sticky top-0 flex gap-4 px-4 py-1 text-[10px] text-gray-400 bg-gray-100 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 font-mono select-none z-10">
           <span>{p.content.language}</span>
           <span>{p.content.line_count} lines</span>
           <span>{humanSize(p.content.size)}</span>
-          <button
-            onClick={() => navigator.clipboard.writeText(p.content.text)}
-            title="Copy to clipboard"
-            class="ml-auto px-1.5 py-0.5 rounded text-[10px] text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-200 transition-colors"
-          >
-            Copy
-          </button>
+          <button onClick={() => navigator.clipboard.writeText(p.content.text)} title="Copy to clipboard" class="ml-auto px-1.5 py-0.5 rounded text-[10px] text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-200 transition-colors">Copy</button>
         </div>
-        <pre class="m-0 p-4 text-[13px] leading-relaxed font-mono overflow-auto hljs"
-          style={{ 'tab-size': '2', 'white-space': 'pre', 'min-height': 'calc(100% - 28px)' }}>
-          <code ref={setCodeEl} class={`language-${p.content.language}`} />
-        </pre>
+        <div class="flex flex-1 overflow-auto">
+          {/* Line numbers */}
+          <div class="select-none text-right text-gray-400 dark:text-gray-600 font-mono text-[13px] leading-relaxed py-4 px-2 bg-gray-50 dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800 shrink-0 min-w-[2.5rem]">
+            <For each={Array.from({length: p.content.line_count || 1}, (_, i) => i + 1)}>
+              {(n) => <div class="leading-relaxed">{n}</div>}
+            </For>
+          </div>
+          {/* Code */}
+          <pre class="m-0 p-4 text-[13px] leading-relaxed font-mono flex-1 min-w-0" style={{ 'tab-size': '2', 'white-space': 'pre' }}>
+            <code ref={setCodeEl} class={`language-${p.content.language}`} />
+          </pre>
+        </div>
       </div>
     );
   }
@@ -656,6 +735,38 @@ const Explorer: Component = () => {
             }
           });
         }).catch(() => {});
+      });
+    });
+
+    // Feature 2: Mermaid diagrams
+    createEffect(() => {
+      const el = previewEl();
+      const h = html();
+      if (!el || !h || !isMd()) return;
+      queueMicrotask(async () => {
+        const mermaidBlocks = el.querySelectorAll('pre code.language-mermaid, pre code[class*="language-mermaid"]');
+        if (mermaidBlocks.length === 0) return;
+        try {
+          const mermaid = (await import('mermaid')).default;
+          mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' });
+          mermaidBlocks.forEach((block, i) => {
+            const pre = block.parentElement;
+            if (!pre) return;
+            const container = document.createElement('div');
+            container.className = 'mermaid-diagram';
+            container.id = `mermaid-${Date.now()}-${i}`;
+            container.setAttribute('data-mermaid', block.textContent || '');
+            pre.replaceWith(container);
+          });
+          for (const container of el.querySelectorAll('.mermaid-diagram')) {
+            const code = container.getAttribute('data-mermaid') || '';
+            if (!code.trim()) continue;
+            try {
+              const { svg } = await mermaid.render(container.id + '-svg', code);
+              container.innerHTML = svg;
+            } catch { container.innerHTML = '<p style="color:red;font-size:12px">Mermaid render error</p>'; }
+          }
+        } catch { /* mermaid not available */ }
       });
     });
 
@@ -688,6 +799,48 @@ const Explorer: Component = () => {
             />
           </Show>
         </Show>
+      </div>
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Feature 8: Diff pane for AI-modified files
+  // ---------------------------------------------------------------------------
+
+  function DiffPane(p: { path: string }) {
+    const original = () => aiOriginals[p.path] ?? '';
+    const current = () => (fileCache[p.path] as FvFileContent)?.text ?? '';
+
+    const [diffResult, setDiffResult] = createSignal<import('diff').Change[]>([]);
+
+    createEffect(async () => {
+      const orig = original();
+      const cur = current();
+      if (!orig && !cur) return;
+      const { diffLines } = await import('diff');
+      setDiffResult(diffLines(orig, cur));
+    });
+
+    return (
+      <div class="h-full overflow-auto font-mono text-[12px] p-4 bg-gray-50 dark:bg-gray-950">
+        <For each={diffResult()}>
+          {(part) => (
+            <For each={(part.value ?? '').split('\n').slice(0, part.value?.endsWith('\n') ? -1 : undefined)}>
+              {(line) => (
+                <div class={`px-2 leading-relaxed ${
+                  part.added ? 'bg-green-50 dark:bg-green-900/30 text-green-800 dark:text-green-200' :
+                  part.removed ? 'bg-red-50 dark:bg-red-900/30 text-red-800 dark:text-red-200' :
+                  'text-gray-700 dark:text-gray-300'
+                }`}>
+                  <span class="select-none text-gray-400 w-4 inline-block">
+                    {part.added ? '+' : part.removed ? '-' : ' '}
+                  </span>
+                  {line}
+                </div>
+              )}
+            </For>
+          )}
+        </For>
       </div>
     );
   }
@@ -778,6 +931,10 @@ const Explorer: Component = () => {
                   </div>
                 </div>
               </Match>
+              {/* Feature 8: Diff view */}
+              <Match when={viewMode() === 'diff'}>
+                <DiffPane path={p.path} />
+              </Match>
             </Switch>
           </Match>
         </Switch>
@@ -802,7 +959,11 @@ const Explorer: Component = () => {
           </button>
         </div>
       }>
-        <div class="w-64 flex-none flex flex-col bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700 overflow-hidden">
+        {/* Feature 4: Resizable sidebar — width driven by sidebarWidth signal */}
+        <div
+          class="flex-none flex flex-col bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700 overflow-hidden"
+          style={{ width: `${sidebarWidth()}px` }}
+        >
           {/* Sidebar header */}
           <div class="flex-none flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-gray-700">
             <span class="text-[10px] font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">
@@ -992,6 +1153,25 @@ const Explorer: Component = () => {
         </div>
       </Show>
 
+      {/* Feature 4: Resize handle between sidebar and content */}
+      <Show when={sidebarOpen()}>
+        <div
+          class="w-1 flex-none cursor-col-resize bg-gray-200 dark:bg-gray-700 hover:bg-sky-400 dark:hover:bg-sky-600 transition-colors"
+          onMouseDown={(startE: MouseEvent) => {
+            startE.preventDefault();
+            const startX = startE.clientX;
+            const startW = sidebarWidth();
+            const onMove = (e: MouseEvent) => setSidebarWidth(Math.max(160, Math.min(600, startW + e.clientX - startX)));
+            const onUp = () => {
+              window.removeEventListener('mousemove', onMove);
+              window.removeEventListener('mouseup', onUp);
+            };
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+          }}
+        />
+      </Show>
+
       {/* ── Right content area ── */}
       <div class="flex-1 flex flex-col overflow-hidden">
 
@@ -1095,6 +1275,17 @@ const Explorer: Component = () => {
                   </button>
                 ))}
               </Show>
+              {/* Feature 8: Diff button — only when file has AI modifications */}
+              <Show when={activeTabPath() && aiOriginals[activeTabPath()!]}>
+                <button
+                  onClick={() => setViewMode('diff')}
+                  class="px-2.5 py-0.5 rounded text-xs font-medium transition-colors"
+                  classList={{
+                    'bg-sky-500 text-white': viewMode() === 'diff',
+                    'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800': viewMode() !== 'diff',
+                  }}
+                >⊕ Diff</button>
+              </Show>
             </div>
 
             {/* AI Fix button — only for MD files */}
@@ -1174,6 +1365,56 @@ const Explorer: Component = () => {
         </div>
       </div>
 
+      {/* Feature 7: Tab eviction toast */}
+      <Show when={evictedTab()}>
+        <div class="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 bg-gray-800 text-white text-xs px-4 py-2 rounded shadow-lg">
+          Tab "{evictedTab()}" closed (max {MAX_TABS} tabs)
+        </div>
+      </Show>
+
+      {/* Feature 6: Context menu */}
+      <Show when={contextMenu()}>
+        <div
+          class="fixed z-[100] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded shadow-xl py-1 min-w-[160px] text-xs"
+          style={{ left: `${contextMenu()!.x}px`, top: `${contextMenu()!.y}px` }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button class="w-full text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-700"
+            onClick={() => { void openFile(contextMenu()!.entry); setContextMenu(null); }}>
+            Open
+          </button>
+          <button class="w-full text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-700"
+            onClick={() => { navigator.clipboard.writeText(contextMenu()!.entry.path); setContextMenu(null); }}>
+            Copy Path
+          </button>
+          <button class="w-full text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-700"
+            onClick={() => {
+              const entryPath = contextMenu()!.entry.path;
+              const ws = workspaces().find(w => entryPath.startsWith(w.path));
+              const rel = ws ? entryPath.slice(ws.path.length + 1) : entryPath;
+              navigator.clipboard.writeText(rel);
+              setContextMenu(null);
+            }}>
+            Copy Relative Path
+          </button>
+          <div class="border-t border-gray-200 dark:border-gray-700 my-1" />
+          <button class="w-full text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-700"
+            onClick={() => {
+              const entry = contextMenu()!.entry;
+              const dir = entry.is_dir ? entry.path : entry.path.substring(0, entry.path.lastIndexOf('/'));
+              shellOpen(dir).catch(() => {});
+              setContextMenu(null);
+            }}>
+            Reveal in File Manager
+          </button>
+          <Show when={!contextMenu()!.entry.is_dir}>
+            <button class="w-full text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-700"
+              onClick={() => { shellOpen(contextMenu()!.entry.path).catch(() => {}); setContextMenu(null); }}>
+              Open with System App
+            </button>
+          </Show>
+        </div>
+      </Show>
 
     </div>
   );
