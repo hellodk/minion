@@ -3,6 +3,7 @@ use minion_presentation::visual::svg_templates::template_for;
 use minion_presentation::visual::chart_gen::generate_chart_spec;
 use minion_presentation::visual::diagram_gen::generate_mermaid_dsl;
 use minion_presentation::agents::visual::VisualAgent;
+use minion_presentation::agents::design_critic::DesignCriticAgent;
 use minion_presentation::schema::types::*;
 use std::sync::atomic::AtomicU32;
 use chrono::Utc;
@@ -164,4 +165,84 @@ async fn visual_agent_fills_placeholder_slides() {
             }
         }
     }
+}
+
+// DesignCriticAgent tests
+fn wordy_slide(sid: SectionId, words: usize) -> Slide {
+    let mut sl = Slide::new(sid, 0.0, 0.0, LayoutKind::Blank);
+    sl.elements.push(Element {
+        id: ElementId::new(),
+        content: ElementContent::Text {
+            markdown: "word ".repeat(words),
+        },
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 400.0,
+        z_index: 1,
+        style: ElementStyle::default(),
+        animation: ElementAnimation {
+            entrance: None,
+            exit: None,
+            emphasis: None,
+            trigger: AnimTrigger::OnSlideEnter,
+        },
+        user_asset_id: None,
+        locked: false,
+    });
+    sl
+}
+
+fn anim_slide(sid: SectionId, n: usize) -> Slide {
+    let mut sl = Slide::new(sid, 0.0, 0.0, LayoutKind::Blank);
+    for _ in 0..n {
+        sl.elements.push(Element {
+            id: ElementId::new(),
+            content: ElementContent::Text {
+                markdown: "x".into(),
+            },
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 40.0,
+            z_index: 1,
+            style: ElementStyle::default(),
+            animation: ElementAnimation {
+                entrance: Some(AnimPhase {
+                    effect: AnimEffect::Fade,
+                    delay_ms: 0,
+                    duration_ms: 400,
+                    spring: None,
+                }),
+                exit: None,
+                emphasis: None,
+                trigger: AnimTrigger::OnSlideEnter,
+            },
+            user_asset_id: None,
+            locked: false,
+        });
+    }
+    sl
+}
+
+#[test]
+fn design_critic_detects_wordcount_over_80() {
+    let mut deck = placeholder_deck(0);
+    let section_id = deck.sections[0].id.clone();
+    deck.sections[0].slides.push(wordy_slide(section_id, 90));
+    let patches = DesignCriticAgent::new().review(&deck);
+    assert!(patches
+        .iter()
+        .any(|p| matches!(p, DeckPatch::DeleteSlide { .. })));
+}
+
+#[test]
+fn design_critic_staggers_excess_enter_animations() {
+    let mut deck = placeholder_deck(0);
+    let section_id = deck.sections[0].id.clone();
+    deck.sections[0].slides.push(anim_slide(section_id, 4));
+    let patches = DesignCriticAgent::new().review(&deck);
+    assert!(patches
+        .iter()
+        .any(|p| matches!(p, DeckPatch::UpsertElement { .. })));
 }
