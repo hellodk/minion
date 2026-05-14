@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod bundle;
 pub mod context;
 pub mod db;
 pub mod input;
