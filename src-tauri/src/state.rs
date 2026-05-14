@@ -95,6 +95,13 @@ pub struct AppState {
 
     /// Presentation database handle.
     pub presentation_db: PresentationDb,
+
+    /// Per-session cancel senders; insert on start, remove on interrupt/complete.
+    pub cancel_senders:
+        tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>,
+
+    /// Presentation generation orchestrator (shared across commands).
+    pub orchestrator: Arc<minion_presentation::orchestrator::Orchestrator>,
 }
 
 impl AppState {
@@ -128,6 +135,20 @@ impl AppState {
         }
         let presentation_db = PresentationDb::new(db.clone());
 
+        // Orchestrator for AI-driven presentation generation.
+        let presentations_dir = data_dir.join("presentations");
+        let orchestrator = {
+            use minion_presentation::{
+                orchestrator::Orchestrator,
+                router::{PresentationRouter, RouterConfig},
+            };
+            Arc::new(Orchestrator::new(
+                presentation_db.clone(),
+                PresentationRouter::new(RouterConfig::default()),
+                presentations_dir,
+            ))
+        };
+
         // Load or generate the blog API-key encryption key.
         let blog_enc_key = {
             let key_path = data_dir.join("blog.key");
@@ -159,6 +180,8 @@ impl AppState {
             gfit_sync_running: Arc::new(AtomicBool::new(false)),
             blog_enc_key,
             presentation_db,
+            cancel_senders: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            orchestrator,
         })
     }
 }
