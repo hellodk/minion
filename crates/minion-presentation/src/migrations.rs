@@ -6,6 +6,11 @@ pub fn run(conn: &rusqlite::Connection) -> Result<()> {
 }
 
 const MIGRATIONS: &str = "
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version     INTEGER PRIMARY KEY,
+    applied_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS presentations (
     id             TEXT PRIMARY KEY,
     title          TEXT NOT NULL,
@@ -13,6 +18,7 @@ CREATE TABLE IF NOT EXISTS presentations (
     updated_at     INTEGER NOT NULL,
     bundle_path    TEXT NOT NULL,
     thumbnail      BLOB,
+    slide_count    INTEGER NOT NULL DEFAULT 0,
     schema_version TEXT NOT NULL DEFAULT '1.0'
 );
 

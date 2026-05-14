@@ -30,6 +30,16 @@ export function applyPatch(deck: Deck, patch: DeckPatch): Deck {
       return { ...deck, assets: [...assets, patch.asset] };
     }
     case "upsert_slide": {
+      const targetExists = deck.sections.some(s => s.id === patch.section_id);
+      if (!targetExists) {
+        // Section doesn't exist — create it on the fly so the slide isn't silently dropped.
+        const newSection = {
+          id: patch.section_id,
+          title: "",
+          slides: [patch.slide],
+        };
+        return { ...deck, sections: [...deck.sections, newSection] };
+      }
       const sections = deck.sections.map(sec => {
         if (sec.id !== patch.section_id) return sec;
         const slides = sec.slides.filter(s => s.id !== patch.slide.id);
@@ -74,4 +84,10 @@ export function applyPatch(deck: Deck, patch: DeckPatch): Deck {
 
 export function applyPatches(deck: Deck, patches: DeckPatch[]): Deck {
   return patches.reduce(applyPatch, deck);
+}
+
+// Compile-time exhaustiveness helper. Call this in the default branch of any
+// switch over DeckPatch so TypeScript errors when a new op is added without a case.
+export function assertNeverPatch(x: never): never {
+  throw new Error(`Unhandled DeckPatch op: ${JSON.stringify(x)}`);
 }

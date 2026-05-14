@@ -67,7 +67,9 @@ pub fn quaternion_to_css_rotate3d(q: &Quat) -> String {
     };
 
     let angle_rad = 2.0 * w.clamp(-1.0, 1.0).acos();
-    let sin_half = (1.0 - w * w).sqrt();
+    // Clamp to [0, 1] before sqrt — floating-point rounding can push w*w
+    // slightly above 1.0 after normalization, making the argument negative → NaN.
+    let sin_half = (1.0 - w * w).max(0.0).sqrt();
 
     if sin_half < 1e-6 {
         return "rotate3d(0,0,1,0deg)".into();
