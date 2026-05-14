@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub enum AgentEvent {
     Started        { seq: u32, agent: String },
     Progress       { seq: u32, agent: String, data: String },
-    SlideReady     { seq: u32, agent: String, slide_index: u32, patch: DeckPatch },
+    SlideReady     { seq: u32, agent: String, slide_index: u32, patch: Box<DeckPatch> },
     Completed      { seq: u32, agent: String },
     Error          { seq: u32, agent: String, message: String, recoverable: bool },
     StreamComplete { seq: u32, deck_id: String },

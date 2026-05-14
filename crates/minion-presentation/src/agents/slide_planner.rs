@@ -137,8 +137,11 @@ impl SlidePlannerAgent {
             let mut join_set: JoinSet<anyhow::Result<(usize, LlmSectionResponse)>> =
                 JoinSet::new();
 
-            for idx in chunk_start..chunk_end {
-                let section = sections_data[idx].clone();
+            for (offset, section) in
+                sections_data[chunk_start..chunk_end].iter().enumerate()
+            {
+                let idx = chunk_start + offset;
+                let section = section.clone();
                 let provider = Arc::clone(&self.provider);
                 let section_y = idx as f64 * SECTION_STRIDE_Y;
                 join_set.spawn(async move {
@@ -198,7 +201,7 @@ impl SlidePlannerAgent {
                     seq: next_seq(seq),
                     agent: agent_name::SLIDE_PLANNER.to_string(),
                     slide_index: global_slide_index,
-                    patch,
+                    patch: Box::new(patch),
                 });
                 global_slide_index += 1;
                 slides.push(slide);

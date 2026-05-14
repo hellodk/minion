@@ -57,7 +57,7 @@ fn agent_event_slide_ready_contains_patch() {
     let section_id = SectionId::new();
     let slide = Slide::new(section_id.clone(), 0.0, 0.0, LayoutKind::Title);
     let patch = DeckPatch::UpsertSlide { section_id, slide };
-    let ev = AgentEvent::SlideReady { seq: 7, agent: "slide_planner".to_string(), slide_index: 0, patch };
+    let ev = AgentEvent::SlideReady { seq: 7, agent: "slide_planner".to_string(), slide_index: 0, patch: Box::new(patch) };
     let json = serde_json::to_value(&ev).unwrap();
     assert_eq!(json["kind"], "slide_ready");
     assert_eq!(json["slide_index"], 0);
@@ -262,6 +262,80 @@ mod storyteller_tests {
             }
         }
         assert_eq!(progress, 3);
+    }
+}
+
+mod pipeline_smoke {
+    use minion_presentation::agents::{
+        AgentEvent,
+        research::ResearchAgent,
+        storyteller::StorytellerAgent,
+        slide_planner::SlidePlannerAgent,
+    };
+    use minion_presentation::schema::types::{GenerationConfig, PresentationContext};
+    use minion_llm::{LlmProvider, LlmResult, ChatRequest, ChatResponse, ModelInfo};
+    use std::sync::{Arc, atomic::AtomicU32};
+    use async_trait::async_trait;
+
+    struct MultiStageMock;
+
+    #[async_trait]
+    impl LlmProvider for MultiStageMock {
+        fn name(&self) -> &str { "multi-stage-mock" }
+        async fn chat(&self, req: ChatRequest) -> LlmResult<ChatResponse> {
+            let system = req.system.as_deref().unwrap_or("");
+            let response = if system.contains("research analyst") {
+                r#"{"audience":"developers","tone":"technical","language":"en-US","key_themes":["performance","reliability"],"facts":[{"claim":"5x speedup","source":"bench","confidence":0.9}],"suggested_section_count":2,"target_duration_mins":10}"#
+            } else if system.contains("master storyteller") {
+                r#"{"title":"Speed & Reliability","hook":"What if you could have both?","sections":[{"title":"The Problem","slide_count":2,"purpose":"context","pacing":"slow"},{"title":"The Solution","slide_count":2,"purpose":"answer","pacing":"energetic"}],"closing_cta":"Ship it","camera_narrative":"zoom in"}"#
+            } else {
+                r#"{"slides":[{"layout":"title","headline":"Slide Heading","body":"Supporting detail","visual_spec":null,"talking_points":["key point"]},{"layout":"storytelling","headline":"More Detail","body":"More content","visual_spec":null,"talking_points":["another point"]}]}"#
+            };
+            Ok(ChatResponse { content: response.to_string(), model: "mock".into(), usage: None })
+        }
+        async fn health_check(&self) -> LlmResult<bool> { Ok(true) }
+        async fn list_models(&self) -> LlmResult<Vec<ModelInfo>> { Ok(vec![]) }
+    }
+
+    #[tokio::test]
+    async fn full_pipeline_research_storyteller_slide_planner() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(MultiStageMock);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<AgentEvent>(256);
+        let counter = AtomicU32::new(0);
+        let config = GenerationConfig {
+            theme_name: None,
+            audience: "developers".into(),
+            tone: "technical".into(),
+            language: "en-US".into(),
+            target_duration_mins: Some(10),
+            slide_count_hint: None,
+            presentation_context: PresentationContext::LiveTalk,
+        };
+
+        let research = ResearchAgent::new_with_provider(Arc::clone(&provider));
+        let research_out = research.run("sample corpus".into(), &config, &tx, &counter).await.expect("research");
+        assert_eq!(research_out.audience, "developers");
+        assert_eq!(research_out.suggested_section_count, 2);
+
+        let story = StorytellerAgent::new_with_provider(Arc::clone(&provider));
+        let story_out = story.run(&research_out, &tx, &counter).await.expect("storyteller");
+        assert_eq!(story_out.title, "Speed & Reliability");
+        assert_eq!(story_out.sections.len(), 2);
+
+        let planner = SlidePlannerAgent::new_with_provider(Arc::clone(&provider));
+        let deck = planner.run(&story_out, &tx, &counter).await.expect("planner");
+        assert_eq!(deck.slide_count(), 4);
+        assert_eq!(deck.meta.title, "Speed & Reliability");
+        assert_eq!(deck.play_order.len(), 4);
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() { events.push(ev); }
+        let slide_ready = events.iter().filter(|e| matches!(e, AgentEvent::SlideReady{..})).count();
+        assert_eq!(slide_ready, 4);
+        let started = events.iter().filter(|e| matches!(e, AgentEvent::Started{..})).count();
+        assert_eq!(started, 3);
+        let completed = events.iter().filter(|e| matches!(e, AgentEvent::Completed{..})).count();
+        assert_eq!(completed, 3);
     }
 }
 
