@@ -177,3 +177,90 @@ mod research_tests {
         assert_eq!(progress, 3);
     }
 }
+
+mod storyteller_tests {
+    use std::sync::{Arc, atomic::AtomicU32};
+
+    use async_trait::async_trait;
+    use minion_llm::{ChatRequest, ChatResponse, LlmProvider, LlmResult, ModelInfo};
+    use minion_presentation::{
+        agents::{AgentEvent, storyteller::StorytellerAgent},
+        agents::research::ResearchOutput,
+    };
+
+    struct MockLlm(String);
+
+    #[async_trait]
+    impl LlmProvider for MockLlm {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        async fn chat(&self, _: ChatRequest) -> LlmResult<ChatResponse> {
+            Ok(ChatResponse { content: self.0.clone(), model: "mock".into(), usage: None })
+        }
+
+        async fn health_check(&self) -> LlmResult<bool> {
+            Ok(true)
+        }
+
+        async fn list_models(&self) -> LlmResult<Vec<ModelInfo>> {
+            Ok(vec![])
+        }
+    }
+
+    fn research() -> ResearchOutput {
+        ResearchOutput {
+            audience: "PMs".into(),
+            tone: "inspiring".into(),
+            language: "en-US".into(),
+            key_themes: vec!["growth".into()],
+            facts: vec![],
+            suggested_section_count: 3,
+            target_duration_mins: Some(10),
+        }
+    }
+
+    #[tokio::test]
+    async fn storyteller_parses_output() {
+        let json = r#"{"title":"The Road to 10x Growth","hook":"What if one decision could change everything?","sections":[{"title":"The Problem","slide_count":3,"purpose":"establish pain","pacing":"slow"},{"title":"Our Solution","slide_count":4,"purpose":"reveal answer","pacing":"building"}],"closing_cta":"Join us","camera_narrative":"Start wide"}"#;
+        let (tx, _rx) = tokio::sync::broadcast::channel::<AgentEvent>(64);
+        let counter = AtomicU32::new(0);
+        let agent = StorytellerAgent::new_with_provider(Arc::new(MockLlm(json.into())));
+        let result = agent.run(&research(), &tx, &counter).await.expect("run");
+        assert_eq!(result.title, "The Road to 10x Growth");
+        assert_eq!(result.sections.len(), 2);
+        assert_eq!(result.sections[0].slide_count, 3);
+    }
+
+    #[tokio::test]
+    async fn storyteller_emits_started_and_completed() {
+        let json = r#"{"title":"T","hook":"H","sections":[{"title":"S1","slide_count":2,"purpose":"p","pacing":"m"}],"closing_cta":"go","camera_narrative":"zoom"}"#;
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<AgentEvent>(64);
+        let counter = AtomicU32::new(0);
+        let agent = StorytellerAgent::new_with_provider(Arc::new(MockLlm(json.into())));
+        agent.run(&research(), &tx, &counter).await.expect("run");
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        assert!(matches!(events[0], AgentEvent::Started { .. }));
+        assert!(matches!(events[events.len() - 1], AgentEvent::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn storyteller_emits_progress_per_section() {
+        let json = r#"{"title":"T","hook":"H","sections":[{"title":"A","slide_count":1,"purpose":"p","pacing":"s"},{"title":"B","slide_count":2,"purpose":"p","pacing":"m"},{"title":"C","slide_count":1,"purpose":"p","pacing":"f"}],"closing_cta":"go","camera_narrative":"pan"}"#;
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<AgentEvent>(64);
+        let counter = AtomicU32::new(0);
+        let agent = StorytellerAgent::new_with_provider(Arc::new(MockLlm(json.into())));
+        agent.run(&research(), &tx, &counter).await.expect("run");
+        let mut progress = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, AgentEvent::Progress { .. }) {
+                progress += 1;
+            }
+        }
+        assert_eq!(progress, 3);
+    }
+}

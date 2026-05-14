@@ -1,6 +1,6 @@
 {
   "name": "minion-ui",
-  "version": "1.11.98",
+  "version": "1.11.100",
   "private": true,
   "type": "module",
   "scripts": {
