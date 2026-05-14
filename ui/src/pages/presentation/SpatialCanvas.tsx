@@ -2,7 +2,15 @@ import { createSignal, For } from "solid-js";
 import type { Deck, Slide } from "../../lib/deck-schema";
 import { allSlides, colorToCss } from "../../lib/deck-schema";
 
-interface Props { deck: Deck; selectedSlideId: string | null; onSelectSlide: (id: string) => void }
+interface Props {
+  deck: Deck;
+  selectedSlideId: string | null;
+  onSelectSlide: (id: string) => void;
+  pan: { x: number; y: number };
+  zoom: number;
+  onPanChange: (p: { x: number; y: number }) => void;
+  onZoomChange: (z: number) => void;
+}
 
 function slideBg(slide: Slide): string {
   const bg = slide.background;
@@ -18,8 +26,6 @@ function visible(s: Slide, pan: {x:number;y:number}, z: number, w: number, h: nu
 }
 
 export default function SpatialCanvas(props: Props) {
-  const [pan, setPan] = createSignal({x:40,y:40});
-  const [zoom, setZoom] = createSignal(0.3);
   const [drag, setDrag] = createSignal(false);
   let ref: HTMLDivElement | undefined;
   let last = {x:0,y:0};
@@ -28,19 +34,19 @@ export default function SpatialCanvas(props: Props) {
 
   const onWheel = (e: WheelEvent) => {
     e.preventDefault();
-    setZoom(z => Math.min(20, Math.max(0.05, z*(1-e.deltaY*0.001))));
+    props.onZoomChange(Math.min(20, Math.max(0.05, props.zoom*(1-e.deltaY*0.001))));
   };
   const onDown = (e: MouseEvent) => { setDrag(true); last={x:e.clientX,y:e.clientY}; };
   const onMove = (e: MouseEvent) => {
     if (!drag()) return;
     const dx=e.clientX-last.x, dy=e.clientY-last.y; last={x:e.clientX,y:e.clientY};
-    setPan(p=>({x:p.x+dx,y:p.y+dy}));
+    props.onPanChange({x:props.pan.x+dx,y:props.pan.y+dy});
   };
   const onUp = () => setDrag(false);
 
   const slides = () => {
     const {w,h}=vp();
-    return allSlides(props.deck).filter(s=>visible(s,pan(),zoom(),w,h));
+    return allSlides(props.deck).filter(s=>visible(s,props.pan,props.zoom,w,h));
   };
 
   return (
@@ -51,11 +57,11 @@ export default function SpatialCanvas(props: Props) {
       {/* Dot grid background */}
       <div class="absolute inset-0 pointer-events-none"
         style={{"background-image":"radial-gradient(circle,#2a2a3a 1px,transparent 1px)",
-          "background-size":`${32*zoom()}px ${32*zoom()}px`,
-          "background-position":`${pan().x%(32*zoom())}px ${pan().y%(32*zoom())}px`}} />
+          "background-size":`${32*props.zoom}px ${32*props.zoom}px`,
+          "background-position":`${props.pan.x%(32*props.zoom)}px ${props.pan.y%(32*props.zoom)}px`}} />
       {/* Transform layer */}
       <div class="absolute" style={{"transform-origin":"0 0",
-        transform:`translate(${pan().x}px,${pan().y}px) scale(${zoom()})`}}>
+        transform:`translate(${props.pan.x}px,${props.pan.y}px) scale(${props.zoom})`}}>
         <For each={slides()}>
           {(slide) => (
             <div class="absolute border"
@@ -81,7 +87,7 @@ export default function SpatialCanvas(props: Props) {
         </For>
       </div>
       <div class="absolute bottom-3 right-3 px-2 py-1 bg-black/50 text-gray-400 text-xs rounded font-mono pointer-events-none">
-        {Math.round(zoom()*100)}%
+        {Math.round(props.zoom*100)}%
       </div>
     </div>
   );
