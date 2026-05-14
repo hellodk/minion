@@ -1,4 +1,5 @@
 pub mod db;
+pub mod input;
 pub mod migrations;
 pub mod schema;
 pub mod security;
