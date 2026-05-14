@@ -4,6 +4,7 @@ pub mod context;
 pub mod db;
 pub mod input;
 pub mod migrations;
+pub mod orchestrator;
 pub mod router;
 pub mod schema;
 pub mod security;
