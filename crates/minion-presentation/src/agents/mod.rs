@@ -1,6 +1,8 @@
+pub mod design_critic;
 pub mod research;
 pub mod slide_planner;
 pub mod storyteller;
+pub mod visual;
 
 use crate::schema::types::DeckPatch;
 use std::sync::atomic::{AtomicU32, Ordering};
