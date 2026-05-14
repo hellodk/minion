@@ -423,6 +423,7 @@ pub fn run() {
             file_viewer::fv_remove_workspace,
             file_viewer::fv_read_dir,
             file_viewer::fv_read_file,
+            file_viewer::fv_format_md,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

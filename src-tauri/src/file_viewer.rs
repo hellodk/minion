@@ -236,6 +236,60 @@ pub async fn fv_read_dir(path: String) -> Result<Vec<FvEntry>, String> {
     .and_then(|r| r)
 }
 
+/// Format / fix a Markdown document using the first enabled LLM endpoint.
+#[tauri::command]
+pub async fn fv_format_md(
+    state: State<'_, AppStateHandle>,
+    markdown: String,
+) -> Result<String, String> {
+    use minion_llm::{create_provider, EndpointConfig, ProviderType};
+    use minion_llm::types::{ChatMessage, ChatRequest};
+
+    let (pt_str, base_url, api_key, model): (String, String, Option<String>, String) = {
+        let st = state.read().await;
+        let conn = st.db.get().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT provider_type, base_url, api_key_encrypted, \
+             COALESCE(default_model, 'llama3') FROM llm_endpoints \
+             WHERE enabled = 1 ORDER BY created_at DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .map_err(|_| "No enabled LLM endpoint. Add one in Settings → LLM Endpoints.".to_string())?
+    };
+
+    let pt = match pt_str.as_str() {
+        "ollama"        => ProviderType::Ollama,
+        "anthropic"     => ProviderType::Anthropic,
+        "google_gemini" => ProviderType::GoogleGemini,
+        _               => ProviderType::OpenaiCompatible,
+    };
+    let cfg = EndpointConfig {
+        provider_type: pt, base_url, api_key,
+        default_model: model,
+        extra_headers: Default::default(),
+    };
+
+    let provider = create_provider(cfg);
+    let req = ChatRequest {
+        messages: vec![
+            ChatMessage::user(format!("Fix and improve this Markdown:\n\n{markdown}")),
+        ],
+        system: Some(
+            "You are a Markdown expert. Fix and improve the formatting of the \
+             provided Markdown document. Return ONLY the corrected Markdown — \
+             no explanations, no surrounding code fences.".to_string(),
+        ),
+        model: None,
+        temperature: Some(0.2),
+        max_tokens: Some(8192),
+        json_mode: false,
+    };
+
+    let resp = provider.chat(req).await.map_err(|e| e.to_string())?;
+    Ok(resp.content)
+}
+
 /// Read a text file and return its content with metadata.
 /// Files larger than 5 MB are rejected.
 /// Binary files are detected and flagged — `text` will be empty.

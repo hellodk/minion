@@ -1,5 +1,6 @@
+import 'highlight.js/styles/github.css';
 import {
-  Component, createSignal, createEffect, For, Show, onMount, Switch, Match,
+  Component, createSignal, createEffect, createMemo, For, Show, onMount, Switch, Match,
 } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { invoke } from '@tauri-apps/api/core';
@@ -131,6 +132,31 @@ const Explorer: Component = () => {
   const [previewCache, setPreviewCache] = createStore<Record<string, string>>({});
   const [previewInFlight, setPreviewInFlight] = createSignal<Set<string>>(new Set());
   const [addingFolder, setAddingFolder] = createSignal(false);
+
+  // Feature 2: Sidebar toggle
+  const [sidebarOpen, setSidebarOpen] = createSignal(true);
+
+  // Feature 3: File search
+  const [searchQuery, setSearchQuery] = createSignal('');
+  const [searchActive, setSearchActive] = createSignal(false);
+
+  const searchResults = createMemo(() => {
+    const q = searchQuery().trim().toLowerCase();
+    if (!q) return [];
+    const results: FvEntry[] = [];
+    for (const key of Object.keys(dirContents)) {
+      for (const entry of (dirContents[key] ?? [])) {
+        if (!entry.is_dir && entry.name.toLowerCase().includes(q)) {
+          results.push(entry);
+        }
+      }
+    }
+    return results.slice(0, 80);
+  });
+
+  // Feature 4: AI Format MD
+  const [aiWorking, setAiWorking] = createSignal(false);
+  const [aiOriginals, setAiOriginals] = createStore<Record<string, string>>({});
 
   onMount(async () => {
     try {
@@ -477,7 +503,7 @@ const Explorer: Component = () => {
     });
 
     return (
-      <div class="h-full overflow-auto bg-gray-50 dark:bg-gray-950">
+      <div class="h-full overflow-auto">
         {/* Status bar */}
         <div class="sticky top-0 flex gap-4 px-4 py-1 text-[10px] text-gray-400 bg-gray-100 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 font-mono select-none z-10">
           <span>{p.content.language}</span>
@@ -626,93 +652,178 @@ const Explorer: Component = () => {
     <div class="flex h-full overflow-hidden text-sm bg-white dark:bg-gray-900">
 
       {/* ── Left sidebar ── */}
-      <div class="w-64 flex-none flex flex-col bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700 overflow-hidden">
-        {/* Sidebar header */}
-        <div class="flex-none flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-gray-700">
-          <span class="text-[10px] font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">
-            Explorer
-          </span>
-          <button
-            onClick={addWorkspace}
-            disabled={addingFolder()}
-            title="Add folder to workspace"
-            class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400 disabled:opacity-50 transition-colors"
-          >
-            <IconPlus />
+      <Show when={sidebarOpen()} fallback={
+        <div class="w-8 flex-none flex flex-col bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700">
+          <button onClick={() => setSidebarOpen(true)} class="p-1 m-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-500">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+            </svg>
           </button>
         </div>
-
-        {/* Tree area */}
-        <div class="flex-1 overflow-y-auto py-1">
-          <Show when={workspaces().length === 0}>
-            <div class="px-4 pt-8 text-center">
-              <svg class="w-10 h-10 mx-auto mb-3 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-                  d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-              </svg>
-              <p class="text-xs text-gray-400 dark:text-gray-500">No folders open</p>
+      }>
+        <div class="w-64 flex-none flex flex-col bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700 overflow-hidden">
+          {/* Sidebar header */}
+          <div class="flex-none flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-gray-700">
+            <span class="text-[10px] font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400">
+              Explorer
+            </span>
+            <div class="flex items-center gap-0.5">
+              {/* Search toggle button */}
+              <button
+                onClick={() => { setSearchActive(s => !s); if (searchActive()) setSearchQuery(''); }}
+                title="Search files"
+                class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400 transition-colors"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+              </button>
+              {/* Add folder button */}
               <button
                 onClick={addWorkspace}
-                class="mt-3 text-xs text-sky-600 dark:text-sky-400 hover:underline"
+                disabled={addingFolder()}
+                title="Add folder to workspace"
+                class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400 disabled:opacity-50 transition-colors"
               >
-                Add a folder
+                <IconPlus />
               </button>
+              {/* Sidebar close button */}
+              <button
+                onClick={() => setSidebarOpen(false)}
+                title="Close sidebar"
+                class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400 transition-colors"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          {/* Search input */}
+          <Show when={searchActive()}>
+            <div class="px-2 py-1.5 border-b border-gray-200 dark:border-gray-700">
+              <div class="flex items-center gap-1 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded px-2 py-0.5">
+                <svg class="w-3 h-3 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                <input
+                  type="text"
+                  placeholder="Search files…"
+                  value={searchQuery()}
+                  onInput={(e) => setSearchQuery(e.currentTarget.value)}
+                  class="flex-1 bg-transparent text-xs outline-none text-gray-700 dark:text-gray-200 placeholder-gray-400"
+                  autofocus
+                />
+                <Show when={searchQuery()}>
+                  <button onClick={() => setSearchQuery('')} class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </Show>
+              </div>
             </div>
           </Show>
 
-          <For each={workspaces()}>
-            {(ws) => (
-              <div class="mb-1">
-                {/* Workspace root header */}
-                <div class="group flex items-center gap-1 px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer"
-                  onClick={() => toggleDir(ws.path)}>
-                  <span class="w-3 h-3 flex items-center justify-center shrink-0">
-                    {expandedDirs().has(ws.path) ? <IconChevronDown /> : <IconChevronRight />}
-                  </span>
-                  <span class="flex-1 text-[11px] font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-300 truncate"
-                    title={ws.path}>
-                    {ws.label}
-                  </span>
-                  {/* Expand / Collapse all — visible on hover */}
-                  <Show when={expandedDirs().has(ws.path)}>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); void expandAll(ws.path); }}
-                      title="Expand all (up to 4 levels)"
-                      class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 transition-all"
+          {/* Tree area */}
+          <div class="flex-1 overflow-y-auto py-1">
+            {/* Search results */}
+            <Show when={searchActive()}>
+              <div class="py-1">
+                <Show when={searchQuery().trim() && searchResults().length === 0}>
+                  <p class="px-4 py-3 text-xs text-gray-400 italic">No files found</p>
+                </Show>
+                <Show when={!searchQuery().trim()}>
+                  <p class="px-4 py-3 text-xs text-gray-400 italic">Type to search…</p>
+                </Show>
+                <For each={searchResults()}>
+                  {(entry) => (
+                    <div
+                      class="flex flex-col px-3 py-1.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 group"
+                      onClick={() => { void openFile(entry); }}
                     >
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M19 9l-7 7-7-7" />
-                      </svg>
-                    </button>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); collapseAll(ws.path); }}
-                      title="Collapse all"
-                      class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 transition-all"
-                    >
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M5 15l7-7 7 7" />
-                      </svg>
-                    </button>
-                  </Show>
+                      <span class="text-xs text-gray-800 dark:text-gray-200 truncate">{entry.name}</span>
+                      <span class="text-[10px] text-gray-400 truncate">{entry.path}</span>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+
+            {/* Normal workspace tree */}
+            <Show when={!searchActive()}>
+              <Show when={workspaces().length === 0}>
+                <div class="px-4 pt-8 text-center">
+                  <svg class="w-10 h-10 mx-auto mb-3 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                      d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                  </svg>
+                  <p class="text-xs text-gray-400 dark:text-gray-500">No folders open</p>
                   <button
-                    onClick={(e) => { e.stopPropagation(); void removeWorkspace(ws.path); }}
-                    title="Remove folder from workspace"
-                    class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 transition-all"
+                    onClick={addWorkspace}
+                    class="mt-3 text-xs text-sky-600 dark:text-sky-400 hover:underline"
                   >
-                    <IconX size={3} />
+                    Add a folder
                   </button>
                 </div>
+              </Show>
 
-                <Show when={expandedDirs().has(ws.path)}>
-                  <TreeLevel parentPath={ws.path} depth={0} />
-                </Show>
-              </div>
-            )}
-          </For>
+              <For each={workspaces()}>
+                {(ws) => (
+                  <div class="mb-1">
+                    {/* Workspace root header */}
+                    <div class="group flex items-center gap-1 px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer"
+                      onClick={() => toggleDir(ws.path)}>
+                      <span class="w-3 h-3 flex items-center justify-center shrink-0">
+                        {expandedDirs().has(ws.path) ? <IconChevronDown /> : <IconChevronRight />}
+                      </span>
+                      <span class="flex-1 text-[11px] font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-300 truncate"
+                        title={ws.path}>
+                        {ws.label}
+                      </span>
+                      {/* Expand / Collapse all — visible on hover */}
+                      <Show when={expandedDirs().has(ws.path)}>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); void expandAll(ws.path); }}
+                          title="Expand all (up to 4 levels)"
+                          class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 transition-all"
+                        >
+                          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); collapseAll(ws.path); }}
+                          title="Collapse all"
+                          class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 transition-all"
+                        >
+                          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M5 15l7-7 7 7" />
+                          </svg>
+                        </button>
+                      </Show>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); void removeWorkspace(ws.path); }}
+                        title="Remove folder from workspace"
+                        class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 transition-all"
+                      >
+                        <IconX size={3} />
+                      </button>
+                    </div>
+
+                    <Show when={expandedDirs().has(ws.path)}>
+                      <TreeLevel parentPath={ws.path} depth={0} />
+                    </Show>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </div>
         </div>
-      </div>
+      </Show>
 
       {/* ── Right content area ── */}
       <div class="flex-1 flex flex-col overflow-hidden">
@@ -755,22 +866,73 @@ const Explorer: Component = () => {
           </Show>
         </div>
 
-        {/* View-mode toggle bar — only for MD / HTML */}
-        <Show when={activeTabPath() && !!fileCache[activeTabPath()!] && isPreviewable(activeTabPath()!)}>
-          <div class="flex-none flex items-center gap-1 px-3 py-1.5 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
-            <span class="text-[10px] text-gray-400 mr-1">View:</span>
-            {(['source', 'split', 'preview'] as ViewMode[]).map((m) => (
-              <button
-                onClick={() => setViewMode(m)}
-                class="px-2.5 py-0.5 rounded text-xs font-medium transition-colors"
-                classList={{
-                  'bg-sky-500 text-white': viewMode() === m,
-                  'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800': viewMode() !== m,
-                }}
-              >
-                {m === 'source' ? '✏️ Source' : m === 'split' ? '⬛ Split' : '👁 Preview'}
-              </button>
-            ))}
+        {/* View-mode toggle bar + AI button — only when a file with content is active */}
+        <Show when={activeTabPath() && !!fileCache[activeTabPath()!]}>
+          <div class="flex-none flex items-center justify-between px-3 py-1.5 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
+            {/* View mode buttons — only for previewable files */}
+            <div class="flex items-center gap-1">
+              <Show when={isPreviewable(activeTabPath()!)}>
+                <span class="text-[10px] text-gray-400 mr-1">View:</span>
+                {(['source', 'split', 'preview'] as ViewMode[]).map((m) => (
+                  <button
+                    onClick={() => setViewMode(m)}
+                    class="px-2.5 py-0.5 rounded text-xs font-medium transition-colors"
+                    classList={{
+                      'bg-sky-500 text-white': viewMode() === m,
+                      'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800': viewMode() !== m,
+                    }}
+                  >
+                    {m === 'source' ? '✏️ Source' : m === 'split' ? '⬛ Split' : '👁 Preview'}
+                  </button>
+                ))}
+              </Show>
+            </div>
+
+            {/* AI Fix button — only for MD files */}
+            <Show when={activeTabPath() && !!fileCache[activeTabPath()!] && (fileExt(activeTabPath()!) === 'md' || fileExt(activeTabPath()!) === 'markdown' || fileExt(activeTabPath()!) === 'mdx')}>
+              <div class="flex items-center gap-1">
+                <Show when={aiOriginals[activeTabPath()!]}>
+                  <button
+                    onClick={() => {
+                      const p = activeTabPath()!;
+                      const orig = aiOriginals[p];
+                      if (orig) {
+                        const cur = fileCache[p];
+                        if (cur) setFileCache(p, { ...cur, text: orig });
+                        setAiOriginals(produce(d => { delete d[p]; }));
+                      }
+                    }}
+                    class="px-2 py-0.5 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
+                  >↩ Revert</button>
+                </Show>
+                <button
+                  disabled={aiWorking()}
+                  onClick={async () => {
+                    const p = activeTabPath();
+                    if (!p) return;
+                    const cur = fileCache[p];
+                    if (!cur || cur.is_binary) return;
+                    setAiWorking(true);
+                    try {
+                      const fixed = await invoke<string>('fv_format_md', { markdown: cur.text });
+                      if (!aiOriginals[p]) setAiOriginals(p, cur.text);
+                      const lines = fixed.split('\n').length;
+                      setFileCache(p, { ...cur, text: fixed, line_count: lines });
+                      if (previewCache[p]) setPreviewCache(produce(d => { delete d[p]; }));
+                    } catch (e) {
+                      alert(`AI fix failed: ${e}`);
+                    } finally {
+                      setAiWorking(false);
+                    }
+                  }}
+                  class="flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-800 disabled:opacity-50 transition-colors"
+                >
+                  <Show when={aiWorking()} fallback={<span>✨ AI Fix</span>}>
+                    <span class="animate-pulse">⏳ Fixing…</span>
+                  </Show>
+                </button>
+              </div>
+            </Show>
           </div>
         </Show>
 
