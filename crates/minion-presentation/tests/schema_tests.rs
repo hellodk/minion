@@ -1,4 +1,5 @@
 use minion_presentation::schema::types::*;
+use minion_presentation::schema::quaternion::*;
 use uuid::Uuid;
 
 #[test]
@@ -49,4 +50,30 @@ fn element_animation_trigger_by_id() {
         AnimTrigger::AfterElement { element_id: got } => assert_eq!(got, id),
         _ => panic!("wrong variant"),
     }
+}
+
+#[test]
+fn identity_quaternion_gives_zero_euler() {
+    let q = [1.0f64, 0.0, 0.0, 0.0];
+    let (rx, ry, rz) = quaternion_to_euler_deg(&q);
+    assert!((rx).abs() < 0.001, "rx={rx}");
+    assert!((ry).abs() < 0.001, "ry={ry}");
+    assert!((rz).abs() < 0.001, "rz={rz}");
+}
+
+#[test]
+fn euler_roundtrip_simple_rotation() {
+    let original_deg = (30.0f64, 0.0f64, 45.0f64);
+    let q = euler_deg_to_quaternion(original_deg.0, original_deg.1, original_deg.2);
+    let (rx, ry, rz) = quaternion_to_euler_deg(&q);
+    assert!((rx - original_deg.0).abs() < 0.1, "rx expected {} got {}", original_deg.0, rx);
+    assert!((ry - original_deg.1).abs() < 0.1, "ry expected {} got {}", original_deg.1, ry);
+    assert!((rz - original_deg.2).abs() < 0.1, "rz expected {} got {}", original_deg.2, rz);
+}
+
+#[test]
+fn quaternion_to_css_transform_identity() {
+    let q = [1.0f64, 0.0, 0.0, 0.0];
+    let css = quaternion_to_css_rotate3d(&q);
+    assert!(css.contains("0deg") || css.contains("rotate3d(0,0,1,0"), "got: {css}");
 }
