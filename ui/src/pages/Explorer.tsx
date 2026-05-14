@@ -279,21 +279,32 @@ const Explorer: Component = () => {
 
   async function openFile(entry: FvEntry) {
     dbg(`click: ${entry.name} is_dir=${entry.is_dir}`);
-    if (entry.is_dir) { toggleDir(entry.path); return; }
+    try {
+      if (entry.is_dir) { toggleDir(entry.path); return; }
 
-    if (tabs().some(t => t.path === entry.path)) {
-      dbg(`already open: ${entry.name}`);
+      dbg(`A: path=${entry.path}`);
+      const alreadyOpen = tabs().some(t => t.path === entry.path);
+      dbg(`B: alreadyOpen=${alreadyOpen}`);
+      if (alreadyOpen) {
+        dbg(`already open: ${entry.name}`);
+        setActiveTabPath(entry.path);
+        return;
+      }
+
+      const newTab: ExplorerTab = { path: entry.path, name: entry.name };
+      dbg('C: calling setTabs');
+      setTabs(prev => {
+        const without = prev.filter(t => t.path !== entry.path);
+        const trimmed = without.length >= MAX_TABS ? without.slice(1) : without;
+        return [...trimmed, newTab];
+      });
+      dbg(`D: tabs.length=${tabs().length}`);
       setActiveTabPath(entry.path);
+      dbg(`E: active=${activeTabPath()}`);
+    } catch (err) {
+      dbg(`EXCEPTION in openFile: ${err}`);
       return;
     }
-
-    const newTab: ExplorerTab = { path: entry.path, name: entry.name };
-    setTabs(prev => {
-      const without = prev.filter(t => t.path !== entry.path);
-      const trimmed = without.length >= MAX_TABS ? without.slice(1) : without;
-      return [...trimmed, newTab];
-    });
-    setActiveTabPath(entry.path);
     dbg(`tab added: ${entry.name}`);
 
     if (isImage(entry.extension)) { dbg('image — no IPC needed'); return; }
