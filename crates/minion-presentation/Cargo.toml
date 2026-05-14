@@ -19,6 +19,9 @@ tracing = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
 
+# URL parsing (SSRF guard)
+url = "2.5"
+
 # SQLite (needed for migrations)
 rusqlite = { workspace = true }
 
