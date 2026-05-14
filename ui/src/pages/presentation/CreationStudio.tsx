@@ -1,6 +1,7 @@
 import { createSignal, Show, Switch, Match, For } from "solid-js";
 import { startGeneration, type InputSource } from "../../lib/presentation-api";
 import type { GenerationConfig } from "../../lib/deck-schema";
+import { THEMES } from "../../lib/themes";
 
 type Tab = "text" | "files" | "url" | "git";
 type Audience = "Engineering" | "Executive" | "Investor" | "General";
@@ -26,6 +27,7 @@ export default function CreationStudio(props: Props) {
   const [audience, setAudience] = createSignal<Audience>("General");
   const [tone, setTone] = createSignal<Tone>("Conversational");
   const [lang, setLang] = createSignal("en-US");
+  const [theme, setTheme] = createSignal<string>("Dark Indigo");
   const [busy, setBusy] = createSignal(false);
   const [err, setErr] = createSignal<string | null>(null);
 
@@ -53,6 +55,7 @@ export default function CreationStudio(props: Props) {
     try {
       const config: GenerationConfig = {
         audience: audience(), tone: tone(), language: lang(),
+        theme_name: theme(),
         presentation_context: "live_talk",
       };
       props.onGenerated(await startGeneration(buildInputs(), config));
@@ -153,6 +156,38 @@ export default function CreationStudio(props: Props) {
           value={lang()} onChange={e => setLang(e.currentTarget.value)}>
           <For each={LANGS}>{l => <option value={l.code}>{l.label}</option>}</For>
         </select>
+      </div>
+
+      {/* Theme */}
+      <div class="mb-6">
+        <p class="text-xs text-gray-500 uppercase tracking-wider mb-3">Theme</p>
+        <div class="grid grid-cols-3 gap-3">
+          <For each={THEMES}>{(t) => (
+            <button
+              onClick={() => setTheme(t.name)}
+              class={`flex flex-col items-center gap-1.5 rounded-lg p-1 border-2 transition-colors ${
+                theme() === t.name
+                  ? "border-indigo-500"
+                  : "border-transparent hover:border-[#3a3a48]"
+              }`}
+            >
+              <div
+                class="w-20 h-[50px] rounded-md flex-shrink-0 relative overflow-hidden"
+                style={{ "background-color": t.preview.bg }}
+              >
+                <div class="absolute bottom-0 left-0 right-0 h-[6px]"
+                  style={{ "background-color": t.preview.accent }} />
+                <div class="absolute top-2 left-2 flex flex-col gap-1">
+                  <div class="h-1.5 w-10 rounded-full opacity-70"
+                    style={{ "background-color": t.preview.text }} />
+                  <div class="h-1 w-7 rounded-full opacity-40"
+                    style={{ "background-color": t.preview.text }} />
+                </div>
+              </div>
+              <span class="text-[10px] text-gray-400 leading-none text-center">{t.name}</span>
+            </button>
+          )}</For>
+        </div>
       </div>
 
       <Show when={err()}><p class="text-red-400 text-sm mb-3">{err()}</p></Show>
