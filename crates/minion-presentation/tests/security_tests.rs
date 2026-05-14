@@ -68,3 +68,28 @@ fn rejects_empty_string() {
 fn max_redirect_constant_is_three() {
     assert_eq!(minion_presentation::security::ssrf_guard::MAX_REDIRECTS, 3);
 }
+
+use minion_presentation::security::git_sandbox::summarize_git_repo;
+
+#[tokio::test]
+async fn rejects_private_git_url() {
+    let result = summarize_git_repo("http://192.168.1.1/repo.git").await;
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("SSRF") || msg.contains("private") || msg.contains("blocked"),
+        "expected SSRF error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn rejects_file_scheme_git_url() {
+    let result = summarize_git_repo("file:///tmp/myrepo").await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn rejects_localhost_git_url() {
+    let result = summarize_git_repo("http://localhost:8080/repo.git").await;
+    assert!(result.is_err());
+}

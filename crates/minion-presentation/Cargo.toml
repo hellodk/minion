@@ -48,6 +48,9 @@ tempfile = "3.8"
 # Git operations (git sandbox)
 git2 = { version = "0.19", default-features = false }
 
+# Directory traversal (git sandbox size check)
+walkdir = { workspace = true }
+
 # Document parsing
 lopdf = "0.34"
 pulldown-cmark = "0.11"
