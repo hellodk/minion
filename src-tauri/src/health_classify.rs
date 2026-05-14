@@ -465,9 +465,9 @@ struct StoredEndpoint {
     extra_headers: Option<String>,
 }
 
-/// Resolve the endpoint to use for the `health_extract` feature:
-/// 1. Prefer the binding in `llm_feature_bindings`.
-/// 2. Otherwise, fall back to the first enabled row in `llm_endpoints`.
+/// Resolve the endpoint to use for the `health_extract` feature.
+/// Delegates to `llm_router` — kept here for backwards compatibility with
+/// callers inside this module that still use the internal `StoredEndpoint`.
 fn get_extract_endpoint(conn: &rusqlite::Connection, feature: &str) -> Option<StoredEndpoint> {
     // Try feature binding first.
     let bound: Option<String> = conn
@@ -551,23 +551,24 @@ fn build_config(stored: &StoredEndpoint) -> Result<EndpointConfig, String> {
 /// Stable handle that other modules (e.g. `health_timeline`) hold onto.
 pub type EndpointHandle = EndpointConfig;
 
-/// Look up the endpoint bound to `feature` (or any enabled fallback) and
-/// return an [`EndpointConfig`] ready for `create_provider`. Returns `None`
-/// when no endpoint exists, which lets callers decide whether to error or
-/// degrade silently.
+/// Look up the endpoint bound to `feature` — delegates to `llm_router::resolve`.
+/// Kept for backwards compatibility with existing callers in this crate.
 pub async fn classify_endpoint_for_feature(
     state: &AppStateHandle,
     feature: &str,
 ) -> Result<Option<EndpointConfig>, String> {
-    let stored = {
-        let st = state.read().await;
-        let conn = st.db.get().map_err(|e| e.to_string())?;
-        get_extract_endpoint(&conn, feature)
-    };
-    match stored {
-        Some(s) => build_config(&s).map(Some),
-        None => Ok(None),
-    }
+    crate::llm_router::resolve(state, feature).await
+}
+
+/// One-shot LLM call — delegates to `llm_router::call`.
+/// Kept for backwards compatibility; prefer `llm_router::call` in new code.
+pub async fn llm_call_for_feature(
+    state: &AppStateHandle,
+    feature: &str,
+    system: &str,
+    user: &str,
+) -> Result<String, String> {
+    crate::llm_router::call(state, feature, system, user).await
 }
 
 /// True if a default extraction endpoint exists and passes a health check.

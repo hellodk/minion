@@ -4693,55 +4693,21 @@ pub async fn ai_analyze_health(
     state: State<'_, AppStateHandle>,
     metrics_json: String,
 ) -> Result<String, String> {
-    let st = state.read().await;
-    let conn = st.db.get().map_err(|e| e.to_string())?;
-
-    let endpoint: Option<(String, Option<String>, String)> = conn.query_row(
-        "SELECT base_url, api_key_encrypted, COALESCE(default_model, 'llama3') FROM llm_endpoints LIMIT 1",
-        [],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?)),
-    ).ok();
-
-    drop(conn);
-    drop(st);
-
-    let (ollama_url, _api_key, model) = endpoint.ok_or_else(|| {
-        "No LLM endpoint configured. Add one in Settings → LLM Endpoints.".to_string()
-    })?;
-
-    let prompt = format!(
-        "You are a health and fitness AI assistant. Analyze the following health metrics \
-         and provide personalized insights, recommendations, and areas of concern. \
-         Be concise but thorough. Format your response with clear sections.\n\n\
-         Health Metrics:\n{}\n\n\
-         Please provide:\n\
-         1. Overall health assessment\n\
-         2. Key observations\n\
-         3. Actionable recommendations\n\
-         4. Areas that need attention",
-        metrics_json
-    );
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{}/api/generate", ollama_url))
-        .json(&serde_json::json!({
-            "model": model,
-            "prompt": prompt,
-            "stream": false,
-        }))
-        .timeout(std::time::Duration::from_secs(120))
-        .send()
-        .await
-        .map_err(|e| format!("Failed to reach Ollama: {}", e))?;
-
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    let response = body
-        .get("response")
-        .and_then(|v| v.as_str())
-        .unwrap_or("No response from model")
-        .to_string();
-
+    let response = crate::llm_router::call_with(
+        &state,
+        "health_analyze",
+        "You are a health and fitness AI assistant. Analyze health metrics and provide \
+         personalized insights, recommendations, and areas of concern.",
+        &format!(
+            "Analyze these health metrics and provide:\n1. Overall health assessment\n\
+              2. Key observations\n3. Actionable recommendations\n4. Areas that need attention\n\n\
+              Health Metrics:\n{metrics_json}"
+        ),
+        0.3,
+        2048,
+    )
+    .await
+    .map_err(|e| e)?;
     Ok(response)
 }
 

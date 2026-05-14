@@ -23,6 +23,7 @@ mod health_ingestion;
 mod health_intelligence;
 mod health_timeline;
 mod llm_commands;
+pub(crate) mod llm_router;
 mod state;
 mod sysmon_analysis;
 mod sysmon_collect;
@@ -65,7 +66,7 @@ pub fn run() {
             // scheduled → published when their scheduled_at fires.
             blog_publish::spawn_scheduled_publisher(state_arc.clone(), db_handle);
 
-            sysmon_commands::spawn_sysmon_poller(app.handle().clone(), sysmon_db);
+            sysmon_commands::spawn_sysmon_poller(app.handle().clone(), sysmon_db, state_arc.clone());
 
             // Background worker: auto-sync Google Fit every 15 minutes
             let gfit_state = state_arc.clone();

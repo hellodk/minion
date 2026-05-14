@@ -10,7 +10,6 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 type AppStateHandle = Arc<RwLock<AppState>>;
-type Conn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 
 // ── Serde types ──────────────────────────────────────────────────────────────
 
@@ -125,63 +124,6 @@ pub enum ExtractionPreview {
 
 // ── LLM helpers ──────────────────────────────────────────────────────────────
 
-fn get_endpoint(conn: &Conn) -> Option<(String, Option<String>, String)> {
-    conn.query_row(
-        "SELECT base_url, api_key_encrypted, COALESCE(default_model, 'llama3')
-         FROM llm_endpoints LIMIT 1",
-        [],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        },
-    )
-    .ok()
-}
-
-async fn call_llm(
-    base_url: &str,
-    api_key: Option<&str>,
-    model: &str,
-    system: &str,
-    user: &str,
-) -> Option<String> {
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user",   "content": user}
-        ],
-        "stream": false
-    });
-    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(90))
-        .build()
-        .ok()?;
-    let mut req = client.post(&url).json(&body);
-    if let Some(key) = api_key {
-        if !key.is_empty() {
-            req = req.bearer_auth(key);
-        }
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| tracing::warn!("LLM call failed: {e}"))
-        .ok()?;
-    if !resp.status().is_success() {
-        tracing::warn!("LLM returned {}", resp.status());
-        return None;
-    }
-    let json: serde_json::Value = resp.json().await.ok()?;
-    json["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-}
-
 /// Strip markdown code fences if the LLM wrapped the JSON in ```json ... ```
 fn extract_json_block(raw: &str) -> &str {
     let trimmed = raw.trim();
@@ -237,15 +179,6 @@ pub async fn health_extract_document(
         return Err("File has no extracted text. Run ingestion first.".to_string());
     }
 
-    // Get LLM endpoint — drop conn before async
-    let endpoint = {
-        let conn = db.get().map_err(|e| e.to_string())?;
-        get_endpoint(&conn)
-    };
-    let Some((base_url, api_key, model)) = endpoint else {
-        return Ok(None);
-    };
-
     // patient_id is part of the public API; used by caller to associate confirmed records
     let _patient_id = patient_id;
 
@@ -269,9 +202,9 @@ pub async fn health_extract_document(
                  \"instructions\":\"string or null\"}}]}}\n\nPrescription text:\n{}",
                 excerpt
             );
-            let Some(raw) = call_llm(&base_url, api_key.as_deref(), &model, system, &user).await
-            else {
-                return Ok(None);
+            let raw = match crate::llm_router::call_with(&state, "health_extract", system, &user, 0.0, 2048).await {
+                Ok(r) => r,
+                Err(_) => return Ok(None),
             };
             let json_str = extract_json_block(&raw);
             let mut parsed: PrescriptionExtraction = serde_json::from_str(json_str)
@@ -293,9 +226,9 @@ pub async fn health_extract_document(
                  \"reference_low\":N or null,\"reference_high\":N or null}}]}}\n\nLab report text:\n{}",
                 excerpt
             );
-            let Some(raw) = call_llm(&base_url, api_key.as_deref(), &model, system, &user).await
-            else {
-                return Ok(None);
+            let raw = match crate::llm_router::call_with(&state, "health_extract", system, &user, 0.0, 2048).await {
+                Ok(r) => r,
+                Err(_) => return Ok(None),
             };
             let json_str = extract_json_block(&raw);
             let mut parsed: LabResultExtraction = serde_json::from_str(json_str)

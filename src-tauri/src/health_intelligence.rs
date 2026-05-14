@@ -10,7 +10,6 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 type AppStateHandle = Arc<RwLock<AppState>>;
-type Conn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 
 // ── Serde types ──────────────────────────────────────────────────────────────
 
@@ -57,65 +56,6 @@ pub struct LocationVisit {
     pub country: Option<String>,
     pub source: String,
     pub notes: Option<String>,
-}
-
-// ── LLM helpers (same pattern as health_extract.rs) ──────────────────────────
-
-fn get_endpoint(conn: &Conn) -> Option<(String, Option<String>, String)> {
-    conn.query_row(
-        "SELECT base_url, api_key_encrypted, COALESCE(default_model, 'llama3')
-         FROM llm_endpoints LIMIT 1",
-        [],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        },
-    )
-    .ok()
-}
-
-async fn call_llm(
-    base_url: &str,
-    api_key: Option<&str>,
-    model: &str,
-    system: &str,
-    user: &str,
-) -> Option<String> {
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user",   "content": user}
-        ],
-        "stream": false
-    });
-    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(90))
-        .build()
-        .ok()?;
-    let mut req = client.post(&url).json(&body);
-    if let Some(key) = api_key {
-        if !key.is_empty() {
-            req = req.bearer_auth(key);
-        }
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| tracing::warn!("LLM call failed: {e}"))
-        .ok()?;
-    if !resp.status().is_success() {
-        tracing::warn!("LLM returned {}", resp.status());
-        return None;
-    }
-    let json: serde_json::Value = resp.json().await.ok()?;
-    json["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
 }
 
 // ── Anomaly ID ────────────────────────────────────────────────────────────────
@@ -731,13 +671,6 @@ pub async fn health_generate_report(
         collected
     };
 
-    // Get LLM endpoint — drop conn before async
-    let (base_url, api_key, model) = {
-        let conn = db.get().map_err(|e| e.to_string())?;
-        get_endpoint(&conn)
-            .ok_or("No AI endpoint configured. Add one in Settings → AI Endpoints.")?
-    };
-
     // Build summary prompt
     let mut summary = String::new();
     for ev in &events {
@@ -759,19 +692,20 @@ pub async fn health_generate_report(
                   Focus on trends, anomalies, and what has changed. Do not diagnose. Be concise.";
     let user = format!("Health timeline for the last 6 months:\n\n{summary}");
 
-    let report_text = call_llm(&base_url, api_key.as_deref(), &model, system, &user)
+    let report_text = crate::llm_router::call_with(&state, "health_intelligence", system, &user, 0.3, 4096)
         .await
-        .ok_or("AI did not return a response. Check your AI endpoint in Settings.")?;
+        .map_err(|_| "AI did not return a response. Check your AI endpoint in Settings.".to_string())?;
 
     let report_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
+    let model_used = "health_intelligence".to_string();
     {
         let conn = db.get().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO health_intelligence_reports
              (id, patient_id, generated_at, model_used, report_text, created_at)
              VALUES (?1,?2,?3,?4,?5,?6)",
-            params![report_id, patient_id, now, model, report_text, now],
+            params![report_id, patient_id, now, model_used, report_text, now],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -780,7 +714,7 @@ pub async fn health_generate_report(
         id: report_id,
         patient_id,
         generated_at: now,
-        model_used: model,
+        model_used: model_used,
         report_text,
         anomalies_json: None,
     })

@@ -331,90 +331,27 @@ pub async fn fv_git_status(workspace_path: String) -> Result<std::collections::H
     .and_then(|r| r)
 }
 
-/// Format / fix a Markdown document using the first enabled LLM endpoint.
+/// Format / fix a Markdown document.
+/// Routes through the smart router: checks `llm_feature_bindings` for
+/// `"explorer_format_md"` first, then falls back to the first enabled endpoint.
+/// Users can pin a specific model for this task in Settings → LLM Endpoints.
 #[tauri::command]
 pub async fn fv_format_md(
     state: State<'_, AppStateHandle>,
     markdown: String,
 ) -> Result<String, String> {
-    use minion_llm::{create_provider, EndpointConfig, ProviderType};
-    use minion_llm::types::{ChatMessage, ChatRequest};
-
-    let (pt_str, base_url, api_key, model_opt): (String, String, Option<String>, Option<String>) = {
-        let st = state.read().await;
-        let conn = st.db.get().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT provider_type, base_url, api_key_encrypted, default_model \
-             FROM llm_endpoints WHERE enabled = 1 ORDER BY created_at DESC LIMIT 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .map_err(|_| "No enabled LLM endpoint. Add one in Settings → LLM Endpoints.".to_string())?
-    };
-
-    // If no default model is configured, auto-detect the first available one.
-    let model = match model_opt.filter(|m| !m.trim().is_empty()) {
-        Some(m) => m,
-        None => {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .map_err(|e| e.to_string())?;
-            let base = base_url.trim_end_matches('/');
-            let first = match pt_str.as_str() {
-                "ollama" => {
-                    let r = client.get(format!("{base}/api/tags")).send().await
-                        .map_err(|e| format!("Cannot reach endpoint: {e}"))?;
-                    let j: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
-                    j["models"].as_array().and_then(|a| a.first())
-                        .and_then(|m| m["name"].as_str()).map(|s| s.to_string())
-                }
-                _ => {
-                    let mut req = client.get(format!("{base}/v1/models"));
-                    if let Some(k) = &api_key { if !k.is_empty() { req = req.bearer_auth(k); } }
-                    let r = req.send().await.map_err(|e| format!("Cannot reach endpoint: {e}"))?;
-                    let j: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
-                    j["data"].as_array().and_then(|a| a.first())
-                        .and_then(|m| m["id"].as_str()).map(|s| s.to_string())
-                }
-            };
-            first.ok_or_else(|| {
-                "Could not detect a model automatically. \
-                 Set a default model in Settings → LLM Endpoints.".to_string()
-            })?
-        }
-    };
-
-    let pt = match pt_str.as_str() {
-        "ollama"        => ProviderType::Ollama,
-        "anthropic"     => ProviderType::Anthropic,
-        "google_gemini" => ProviderType::GoogleGemini,
-        _               => ProviderType::OpenaiCompatible,
-    };
-    let cfg = EndpointConfig {
-        provider_type: pt, base_url, api_key,
-        default_model: model,
-        extra_headers: Default::default(),
-    };
-
-    let provider = create_provider(cfg);
-    let req = ChatRequest {
-        messages: vec![
-            ChatMessage::user(format!("Fix and improve this Markdown:\n\n{markdown}")),
-        ],
-        system: Some(
-            "You are a Markdown expert. Fix and improve the formatting of the \
-             provided Markdown document. Return ONLY the corrected Markdown — \
-             no explanations, no surrounding code fences.".to_string(),
-        ),
-        model: None,
-        temperature: Some(0.2),
-        max_tokens: Some(8192),
-        json_mode: false,
-    };
-
-    let resp = provider.chat(req).await.map_err(|e| e.to_string())?;
-    Ok(resp.content)
+    let result = crate::llm_router::call_with(
+        &state,
+        "explorer_format_md",
+        "You are a Markdown expert. Fix and improve the formatting of the \
+         provided Markdown document. Return ONLY the corrected Markdown — \
+         no explanations, no surrounding code fences.",
+        &format!("Fix and improve this Markdown:\n\n{markdown}"),
+        0.2,
+        8192,
+    )
+    .await?;
+    Ok(result)
 }
 
 /// Read a text file and return its content with metadata.

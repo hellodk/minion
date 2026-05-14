@@ -1,0 +1,65 @@
+[package]
+name = "minion-presentation"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Workspace deps
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+
+# SQLite (needed for migrations)
+rusqlite = { workspace = true }
+
+# Local crates
+minion-db = { path = "../minion-db" }
+minion-llm = { path = "../minion-llm" }
+minion-rag = { path = "../minion-rag" }
+
+# Schema validation
+jsonschema = "0.18"
+
+# SVG parsing (allowlist sanitizer)
+roxmltree = "0.20"
+
+# ZIP for .minion-deck bundle
+zip = "2.1"
+
+# Quaternion math
+glam = "0.28"
+
+# Temporary directories (git sandbox)
+tempfile = "3.8"
+
+# Git operations (git sandbox)
+git2 = { version = "0.19", default-features = false }
+
+# Document parsing
+lopdf = "0.34"
+pulldown-cmark = "0.11"
+calamine = "0.24"
+
+# OCR (optional)
+leptess = { version = "0.14", optional = true }
+
+# base64 (workspace crate)
+base64ct = { workspace = true, features = ["alloc"] }
+
+[features]
+default = []
+ocr = ["leptess"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tempfile = "3.8"

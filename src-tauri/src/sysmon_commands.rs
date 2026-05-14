@@ -606,7 +606,7 @@ pub async fn sysmon_run_analysis(
     let (snapshots, alerts, db) = db;
 
     let id =
-        sysmon_analysis::run_analysis(&db, "manual", None, snapshots, alerts, question.as_deref())
+        sysmon_analysis::run_analysis(&state, &db, "manual", None, snapshots, alerts, question.as_deref())
             .await?;
 
     let Some(analysis_id) = id else {
@@ -791,7 +791,7 @@ fn load_settings(conn: &PooledConn) -> SysmonSettings {
 
 // ── Background poller ─────────────────────────────────────────────────────────
 
-pub fn spawn_sysmon_poller(app: tauri::AppHandle, db: minion_db::Database) {
+pub fn spawn_sysmon_poller(app: tauri::AppHandle, db: minion_db::Database, state: AppStateHandle) {
     tauri::async_runtime::spawn(async move {
         let mut collector = Collector::new();
         let mut tick_count: u64 = 0;
@@ -968,10 +968,12 @@ pub fn spawn_sysmon_poller(app: tauri::AppHandle, db: minion_db::Database) {
                         let alert_id = recent_alert.clone();
                         let db_bg = db.clone();
                         let app_bg = app.clone();
+                        let state_bg = state.clone();
                         tauri::async_runtime::spawn(async move {
                             // Pass the pool — run_analysis acquires/drops connections
                             // around the async LLM call so the future stays Send.
                             let result = sysmon_analysis::run_analysis(
+                                &state_bg,
                                 &db_bg,
                                 "auto",
                                 alert_id.as_deref(),

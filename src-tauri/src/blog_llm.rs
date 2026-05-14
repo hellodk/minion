@@ -26,63 +26,6 @@ pub struct TitleSuggestion {
     pub rationale: String,
 }
 
-fn get_endpoint(conn: &Conn) -> Option<(String, Option<String>, String)> {
-    conn.query_row(
-        "SELECT base_url, api_key_encrypted, COALESCE(default_model,'llama3')
-         FROM llm_endpoints LIMIT 1",
-        [],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        },
-    )
-    .ok()
-}
-
-async fn call_llm(
-    base_url: &str,
-    api_key: Option<&str>,
-    model: &str,
-    system: &str,
-    user: &str,
-) -> Option<String> {
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role":"system","content":system},
-            {"role":"user","content":user}
-        ],
-        "stream": false
-    });
-    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(90))
-        .build()
-        .ok()?;
-    let mut req = client.post(&url).json(&body);
-    if let Some(k) = api_key {
-        if !k.is_empty() {
-            req = req.bearer_auth(k);
-        }
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| tracing::warn!("LLM call failed: {e}"))
-        .ok()?;
-    if !resp.status().is_success() {
-        tracing::warn!("LLM returned {}", resp.status());
-        return None;
-    }
-    let json: serde_json::Value = resp.json().await.ok()?;
-    json["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-}
-
 fn fetch_post(conn: &Conn, post_id: &str) -> Result<(String, String), String> {
     conn.query_row(
         "SELECT title, COALESCE(draft_content, content, '') FROM blog_posts WHERE id = ?1",
@@ -124,14 +67,6 @@ pub async fn blog_llm_titles(
         let c = db.get().map_err(|e| e.to_string())?;
         fetch_post(&c, &post_id)?
     };
-    let endpoint = {
-        let c = db.get().map_err(|e| e.to_string())?;
-        get_endpoint(&c)
-    };
-    let (base_url, api_key, model) = match endpoint {
-        Some(v) => v,
-        None => return Ok(None),
-    };
 
     let tokens = estimate_tokens(&content);
     let excerpt = if tokens > 2000 {
@@ -145,9 +80,9 @@ pub async fn blog_llm_titles(
                   Styles: seo, curiosity, direct, question, listicle";
     let user = format!("Current title: {}\n\nContent excerpt:\n{}", title, excerpt);
 
-    let raw = match call_llm(&base_url, api_key.as_deref(), &model, system, &user).await {
-        Some(r) => r,
-        None => return Ok(None),
+    let raw = match crate::llm_router::call(&state, "blog_llm", system, &user).await {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
     };
 
     let suggestions: Vec<TitleSuggestion> = raw
@@ -191,23 +126,14 @@ pub async fn blog_llm_hook(
         return Ok(None);
     }
 
-    let endpoint = {
-        let c = db.get().map_err(|e| e.to_string())?;
-        get_endpoint(&c)
-    };
-    let (base_url, api_key, model) = match endpoint {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-
     let system = "You are a blog writing coach. Rewrite the opening paragraph 3 ways to maximise reader retention. \
                   Respond with exactly 3 paragraphs separated by --- (triple dash on its own line). \
                   Styles: 1) Direct/declarative, 2) Story/anecdote, 3) Question-led.";
     let user = format!("Post title: {}\n\nCurrent opening:\n{}", title, first_para);
 
-    let raw = match call_llm(&base_url, api_key.as_deref(), &model, system, &user).await {
-        Some(r) => r,
-        None => return Ok(None),
+    let raw = match crate::llm_router::call(&state, "blog_llm", system, &user).await {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
     };
 
     let variants: Vec<String> = raw
@@ -233,14 +159,6 @@ pub async fn blog_llm_conclusion(
         let c = db.get().map_err(|e| e.to_string())?;
         fetch_post(&c, &post_id)?
     };
-    let endpoint = {
-        let c = db.get().map_err(|e| e.to_string())?;
-        get_endpoint(&c)
-    };
-    let (base_url, api_key, model) = match endpoint {
-        Some(v) => v,
-        None => return Ok(None),
-    };
 
     let system = "You are a blog writing coach. Write a strong 2-3 sentence conclusion paragraph \
                   plus a 1-sentence call to action. Be concise, specific, and direct. \
@@ -251,7 +169,7 @@ pub async fn blog_llm_conclusion(
         &content[content.len().saturating_sub(1000)..]
     );
 
-    Ok(call_llm(&base_url, api_key.as_deref(), &model, system, &user).await)
+    Ok(crate::llm_router::call(&state, "blog_llm", system, &user).await.ok())
 }
 
 #[tauri::command]
@@ -264,14 +182,6 @@ pub async fn blog_llm_grammar(
         let c = db.get().map_err(|e| e.to_string())?;
         fetch_post(&c, &post_id)?
     };
-    let endpoint = {
-        let c = db.get().map_err(|e| e.to_string())?;
-        get_endpoint(&c)
-    };
-    let (base_url, api_key, model) = match endpoint {
-        Some(v) => v,
-        None => return Ok(None),
-    };
 
     let excerpt = &content[..content.len().min(6000)];
     let system = "You are a grammar and style editor. Find issues: passive voice, weak verbs (is/was/get/got/have), \
@@ -280,9 +190,9 @@ pub async fn blog_llm_grammar(
                   Return at most 15 issues. Return only the issue lines — no preamble or summary.";
     let user = format!("Blog content:\n{}", excerpt);
 
-    let raw = match call_llm(&base_url, api_key.as_deref(), &model, system, &user).await {
-        Some(r) => r,
-        None => return Ok(None),
+    let raw = match crate::llm_router::call(&state, "blog_llm", system, &user).await {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
     };
 
     let issues: Vec<String> = raw
@@ -309,14 +219,6 @@ pub async fn blog_llm_meta_description(
         let c = db.get().map_err(|e| e.to_string())?;
         fetch_post(&c, &post_id)?
     };
-    let endpoint = {
-        let c = db.get().map_err(|e| e.to_string())?;
-        get_endpoint(&c)
-    };
-    let (base_url, api_key, model) = match endpoint {
-        Some(v) => v,
-        None => return Ok(None),
-    };
 
     let excerpt = &content[..content.len().min(3000)];
     let system =
@@ -325,9 +227,9 @@ pub async fn blog_llm_meta_description(
                   Return only the description text — no quotes, no preamble.";
     let user = format!("Post title: {}\n\nContent:\n{}", title, excerpt);
 
-    let desc = match call_llm(&base_url, api_key.as_deref(), &model, system, &user).await {
-        Some(d) => d.trim().to_string(),
-        None => return Ok(None),
+    let desc = match crate::llm_router::call(&state, "blog_llm", system, &user).await {
+        Ok(d) => d.trim().to_string(),
+        Err(_) => return Ok(None),
     };
 
     if save_to_excerpt && !desc.is_empty() {
@@ -366,15 +268,6 @@ pub async fn blog_llm_tags(
         tags
     };
 
-    let endpoint = {
-        let c = db.get().map_err(|e| e.to_string())?;
-        get_endpoint(&c)
-    };
-    let (base_url, api_key, model) = match endpoint {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-
     let excerpt = &content[..content.len().min(3000)];
     let system = "You are a content tagging expert. Return a comma-separated list of 5-8 tags. \
                   Prefer tags from the existing list when relevant. Add new ones only when the post \
@@ -386,9 +279,9 @@ pub async fn blog_llm_tags(
         excerpt
     );
 
-    let raw = match call_llm(&base_url, api_key.as_deref(), &model, system, &user).await {
-        Some(r) => r,
-        None => return Ok(None),
+    let raw = match crate::llm_router::call(&state, "blog_llm", system, &user).await {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
     };
 
     let tags: Vec<String> = raw
@@ -410,14 +303,6 @@ pub async fn blog_llm_snippets(
         let c = db.get().map_err(|e| e.to_string())?;
         fetch_post(&c, &post_id)?
     };
-    let endpoint = {
-        let c = db.get().map_err(|e| e.to_string())?;
-        get_endpoint(&c)
-    };
-    let (base_url, api_key, model) = match endpoint {
-        Some(v) => v,
-        None => return Ok(None),
-    };
 
     let excerpt = &content[..content.len().min(3000)];
     let system =
@@ -430,9 +315,9 @@ pub async fn blog_llm_snippets(
                   Do not include any other text.";
     let user = format!("Post title: {}\n\nContent:\n{}", title, excerpt);
 
-    let raw = match call_llm(&base_url, api_key.as_deref(), &model, system, &user).await {
-        Some(r) => r,
-        None => return Ok(None),
+    let raw = match crate::llm_router::call(&state, "blog_llm", system, &user).await {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
     };
 
     let mut snippets = serde_json::json!({});
@@ -470,14 +355,6 @@ pub async fn blog_llm_adapt(
     let (title, content) = {
         let c = db.get().map_err(|e| e.to_string())?;
         fetch_post(&c, &post_id)?
-    };
-    let endpoint = {
-        let c = db.get().map_err(|e| e.to_string())?;
-        get_endpoint(&c)
-    };
-    let (base_url, api_key, model) = match endpoint {
-        Some(v) => v,
-        None => return Ok(None),
     };
 
     let platform_instructions = match platform.as_str() {
@@ -520,9 +397,9 @@ pub async fn blog_llm_adapt(
     );
     let user = format!("Title: {}\n\n{}", title, input);
 
-    let adapted = match call_llm(&base_url, api_key.as_deref(), &model, &system, &user).await {
-        Some(a) => a,
-        None => return Ok(None),
+    let adapted = match crate::llm_router::call(&state, "blog_llm", &system, &user).await {
+        Ok(a) => a,
+        Err(_) => return Ok(None),
     };
 
     let label = format!("{} adaptation", platform);
@@ -552,14 +429,6 @@ pub async fn blog_llm_tone(
         let c = db.get().map_err(|e| e.to_string())?;
         fetch_post(&c, &post_id)?
     };
-    let endpoint = {
-        let c = db.get().map_err(|e| e.to_string())?;
-        get_endpoint(&c)
-    };
-    let (base_url, api_key, model) = match endpoint {
-        Some(v) => v,
-        None => return Ok(None),
-    };
 
     let instruction = match target.as_str() {
         "technical" => "formal, precise, use technical terminology, no contractions",
@@ -588,9 +457,9 @@ pub async fn blog_llm_tone(
     );
     let user = format!("Title: {}\n\n{}", title, input);
 
-    let rewritten = match call_llm(&base_url, api_key.as_deref(), &model, &system, &user).await {
-        Some(r) => r,
-        None => return Ok(None),
+    let rewritten = match crate::llm_router::call(&state, "blog_llm", &system, &user).await {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
     };
 
     let label = format!("{} tone", target);
