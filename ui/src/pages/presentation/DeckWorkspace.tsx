@@ -1,0 +1,74 @@
+import { createSignal, onMount, Show } from "solid-js";
+import { getDeck, saveDeckPatch } from "../../lib/presentation-api";
+import type { DeckPatch } from "../../lib/deck-patch";
+import { createDeckStore } from "../../store/deck-store";
+import SpatialCanvas from "./SpatialCanvas";
+import AgentSidebar from "./AgentSidebar";
+import PresentationPlayer from "./PresentationPlayer";
+
+interface Props { deckId: string; onBack: () => void; initialSessionId?: string }
+
+export default function DeckWorkspace(props: Props) {
+  const [store, actions] = createDeckStore();
+  const [selected, setSelected] = createSignal<string | null>(null);
+  const [playerOpen, setPlayerOpen] = createSignal(false);
+  const [loadErr, setLoadErr] = createSignal<string | null>(null);
+  const [sessionId] = createSignal<string | null>(props.initialSessionId ?? null);
+
+  onMount(async () => {
+    if (!props.deckId) return;
+    try { actions.setDeck(await getDeck(props.deckId)); }
+    catch (e) { setLoadErr(String(e)); }
+  });
+
+  const handlePatch = (p: DeckPatch) => {
+    actions.applyPatch(p);
+    saveDeckPatch(props.deckId, [p]).catch(e => console.error("[DeckWorkspace]", e));
+  };
+
+  return (
+    <div class="flex flex-col h-full w-full bg-[#090910] text-white">
+      {/* Toolbar */}
+      <div class="flex items-center gap-3 px-4 py-2 border-b border-[#2a2a36] bg-[#0f0f14] flex-shrink-0">
+        <button onClick={props.onBack} class="text-gray-400 hover:text-white text-sm">&#8592; Back</button>
+        <div class="w-px h-4 bg-[#2a2a36]" />
+        <h1 class="text-sm font-medium flex-1 truncate">{store.deck?.meta.title ?? "Loading…"}</h1>
+        <button onClick={actions.undo} disabled={!actions.canUndo()}
+          class="px-2 py-1 text-xs text-gray-400 hover:text-white disabled:opacity-30" title="Undo">&#8617;</button>
+        <button onClick={actions.redo} disabled={!actions.canRedo()}
+          class="px-2 py-1 text-xs text-gray-400 hover:text-white disabled:opacity-30" title="Redo">&#8618;</button>
+        <button onClick={() => console.log("export stub")}
+          class="px-3 py-1.5 text-xs text-gray-400 border border-[#2a2a36] hover:border-gray-500 rounded-lg">Export</button>
+        <button onClick={() => setPlayerOpen(true)} disabled={!store.deck}
+          class="px-3 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 rounded-lg font-medium">
+          &#9654; Present
+        </button>
+      </div>
+
+      {/* Body */}
+      <div class="flex flex-1 overflow-hidden relative">
+        <Show when={loadErr()}>
+          <div class="flex-1 flex items-center justify-center text-red-400 text-sm">{loadErr()}</div>
+        </Show>
+        <Show when={!loadErr() && !store.deck}>
+          <div class="flex-1 flex items-center justify-center text-gray-500 text-sm">Loading deck…</div>
+        </Show>
+        <Show when={store.deck}>
+          {(deck) => (
+            <>
+              <div class="flex-1 overflow-hidden">
+                <SpatialCanvas deck={deck()} selectedSlideId={selected()} onSelectSlide={setSelected} />
+              </div>
+              <AgentSidebar sessionId={sessionId()} onPatch={handlePatch} />
+            </>
+          )}
+        </Show>
+      </div>
+
+      {/* Player overlay */}
+      <Show when={playerOpen() && store.deck}>
+        <PresentationPlayer deck={store.deck!} onClose={() => setPlayerOpen(false)} />
+      </Show>
+    </div>
+  );
+}
