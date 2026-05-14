@@ -132,7 +132,7 @@ const Explorer: Component = () => {
   const [previewInFlight, setPreviewInFlight] = createSignal<Set<string>>(new Set());
   const [addingFolder, setAddingFolder] = createSignal(false);
   const [dbgLog, setDbgLog] = createSignal<string[]>([]);
-  const dbg = (msg: string) => setDbgLog(l => [...l.slice(-6), `${new Date().toLocaleTimeString()}: ${msg}`]);
+  const dbg = (msg: string) => setDbgLog(l => [...l.slice(-11), `${new Date().toLocaleTimeString()}: ${msg}`]);
 
   onMount(async () => {
     dbg('onMount: invoking fv_list_workspaces');
@@ -809,12 +809,13 @@ const Explorer: Component = () => {
         </div>
       </div>
 
-      {/* ── Debug log overlay — remove once bug is found ── */}
-      <Show when={dbgLog().length > 0}>
-        <div class="fixed bottom-2 right-2 z-50 max-w-sm bg-gray-900 text-green-400 text-[10px] font-mono rounded shadow-lg p-2 space-y-0.5 opacity-90">
-          <For each={dbgLog()}>{(line) => <div>{line}</div>}</For>
+      {/* ── Debug overlay — remove once bug is found ── */}
+      <div class="fixed bottom-2 right-2 z-50 max-w-sm bg-gray-900 text-green-400 text-[10px] font-mono rounded shadow-lg p-2 space-y-0.5 opacity-95">
+        <div class="text-yellow-300 border-b border-gray-700 pb-1 mb-1">
+          tabs={tabs().length} | active="{activeTabPath() ?? 'NULL'}" | cache={activeTabPath() ? (fileCache[activeTabPath()!] === null ? 'loading' : fileCache[activeTabPath()!] === undefined ? 'undef' : 'ok') : '-'}
         </div>
-      </Show>
+        <For each={dbgLog()}>{(line) => <div>{line}</div>}</For>
+      </div>
 
     </div>
   );
