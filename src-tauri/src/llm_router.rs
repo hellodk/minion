@@ -255,7 +255,12 @@ pub async fn probe_model_capabilities(
                 }
             }
         }
-        "openai_compatible" | "openai" => {
+        "openai_compatible" | "openai" | "airllm" => {
+            // Covers: OpenAI, llama.cpp, LM Studio, vLLM, exo, AirLLM, DeepSeek-R1 hosted locally.
+            // OpenAI o1/o3 do reasoning internally — their API does NOT expose thinking tokens
+            // in the standard completion response, so they probe as is_thinking=false (correct:
+            // we never see their reasoning, so no special handling is needed on our side).
+            // DeepSeek-R1 via OpenAI-compat DOES expose reasoning in `reasoning_content`.
             let mut req_builder = client.post(format!("{base}/v1/chat/completions"));
             if let Some(k) = api_key { if !k.is_empty() { req_builder = req_builder.bearer_auth(k); } }
             let body = serde_json::json!({
@@ -268,10 +273,74 @@ pub async fn probe_model_capabilities(
                 if resp.status().is_success() {
                     probe_success = true;
                     if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        // Some providers put reasoning in reasoning_content
+                        // DeepSeek-R1 and similar expose reasoning in reasoning_content
                         let rc = json["choices"][0]["message"]["reasoning_content"]
                             .as_str().unwrap_or("");
                         is_thinking = !rc.is_empty();
+                    }
+                }
+            }
+        }
+        "anthropic" => {
+            // Anthropic's extended thinking is opt-in (requires thinking: {type:"enabled"}).
+            // Standard Claude models (claude-3-opus, claude-3-5-sonnet, claude-3-haiku)
+            // do NOT produce thinking tokens unless explicitly requested.
+            // Claude 3.7 Sonnet introduced opt-in extended thinking — probe without it.
+            // Result: is_thinking=false for all Anthropic models (correct: we don't request
+            // extended thinking, so we never see thinking tokens in our streaming flow).
+            if let Some(k) = api_key {
+                if !k.is_empty() {
+                    let body = serde_json::json!({
+                        "model": model_name,
+                        "max_tokens": 10,
+                        "messages": [{"role": "user", "content": "1+1="}]
+                    });
+                    let resp = client.post(format!("{base}/v1/messages"))
+                        .header("x-api-key", k)
+                        .header("anthropic-version", "2023-06-01")
+                        .json(&body)
+                        .send().await;
+                    if let Ok(r) = resp {
+                        if r.status().is_success() {
+                            probe_success = true;
+                            if let Ok(json) = r.json::<serde_json::Value>().await {
+                                // If any content block has type "thinking", extended thinking
+                                // was returned even without requesting it (future models might).
+                                is_thinking = json["content"].as_array()
+                                    .map_or(false, |blocks| {
+                                        blocks.iter().any(|b| b["type"].as_str() == Some("thinking"))
+                                    });
+                            }
+                        } else {
+                            // API auth error counts as "reached successfully, not a thinking model"
+                            // so we don't endlessly retry. Set success=false to retry in 7 days.
+                            probe_success = false;
+                        }
+                    }
+                }
+            }
+        }
+        "google_gemini" => {
+            // Gemini: thinking tokens are available in Gemini 2.0 Flash Thinking Experimental
+            // but not in standard Gemini Pro/Flash. We probe by checking for `thoughtsTokenCount`
+            // in the usage metadata, which appears when the model uses thinking mode.
+            if let Some(k) = api_key {
+                if !k.is_empty() {
+                    let url = format!("{base}/v1beta/models/{model_name}:generateContent?key={k}");
+                    let body = serde_json::json!({
+                        "contents": [{"parts": [{"text": "1+1="}], "role": "user"}],
+                        "generationConfig": {"maxOutputTokens": 10}
+                    });
+                    if let Ok(resp) = client.post(&url).json(&body).send().await {
+                        if resp.status().is_success() {
+                            probe_success = true;
+                            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                // Thinking models populate thoughtsTokenCount > 0
+                                let thoughts = json["usageMetadata"]["thoughtsTokenCount"]
+                                    .as_i64().unwrap_or(0);
+                                is_thinking = thoughts > 0;
+                            }
+                        }
                     }
                 }
             }
