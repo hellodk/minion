@@ -35,12 +35,13 @@ impl Orchestrator {
 
     pub async fn generate(
         &self,
-        _session_id: &str,
+        session_id: &str,
         inputs: Vec<InputSource>,
         config: GenerationConfig,
         event_tx: EventTx,
         cancel_rx: watch::Receiver<bool>,
     ) -> Result<DeckId> {
+        tracing::debug!(session_id = session_id, "generation started");
         let seq = AtomicU32::new(0);
         let provider: Arc<dyn minion_llm::LlmProvider> =
             Arc::from(self.router.provider_for(RoutingTask::ResearchExtraction));

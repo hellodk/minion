@@ -48,12 +48,21 @@ export default function DeckWorkspace(props: Props) {
     const canvasX = lastSlide ? lastSlide.canvas_x + 2100 : 100;
     const canvasY = lastSlide ? lastSlide.canvas_y : 100;
 
-    const newSlide = createBlankSlide(sectionId, canvasX, canvasY);
+    const newSlide = createBlankSlide(deck, sectionId, canvasX, canvasY);
     const newOrder = [...deck.play_order, newSlide.id];
 
-    handlePatch({ op: "upsert_slide", section_id: sectionId, slide: newSlide });
-    handlePatch({ op: "set_play_order", order: newOrder });
+    // Batch both patches into one backend call for atomicity.
+    actions.applyPatch({ op: "upsert_slide", section_id: sectionId, slide: newSlide });
+    actions.applyPatch({ op: "set_play_order", order: newOrder });
+    saveDeckPatch(props.deckId, [
+      { op: "upsert_slide", section_id: sectionId, slide: newSlide },
+      { op: "set_play_order", order: newOrder },
+    ]).catch(e => console.error("[DeckWorkspace] add slide:", e));
+
     setSelected(newSlide.id);
+
+    // Pan so the new slide's left edge is visible at screen x ≈ 200px.
+    setPan({ x: -canvasX * zoom() + 200, y: -canvasY * zoom() + 120 });
   };
 
   return (

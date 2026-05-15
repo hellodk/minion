@@ -5,18 +5,15 @@ use std::sync::{atomic::AtomicU32, Arc};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-pub struct VisualAgent {
-    #[allow(dead_code)]
-    provider: Option<Arc<dyn minion_llm::LlmProvider>>,
-}
+pub struct VisualAgent;
 
 impl VisualAgent {
-    pub fn new_with_provider(p: Arc<dyn minion_llm::LlmProvider>) -> Self {
-        Self { provider: Some(p) }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn new_without_provider() -> Self {
-        Self { provider: None }
+        Self::new()
     }
 
     pub async fn run(

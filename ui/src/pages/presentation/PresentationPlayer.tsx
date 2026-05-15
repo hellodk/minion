@@ -15,8 +15,7 @@ function bgStyle(s: Slide): string {
 }
 
 function isAutoEnter(el: DeckElement): boolean {
-  const k = el.animation.trigger.kind;
-  return k === "on_slide_enter" || k === "after_element" || k === "with_element";
+  return el.animation.trigger.kind === "on_slide_enter";
 }
 
 function TypewriterText(props: { text: string; duration_ms: number; delay_ms: number }) {
@@ -74,7 +73,6 @@ export default function PresentationPlayer(props: Props) {
   const order = () => props.deck.play_order;
   const total = () => order().length;
   const [idx, setIdx] = createSignal(0);
-  const [displayIdx, setDisplayIdx] = createSignal(0);
   const [prevIdx, setPrevIdx] = createSignal<number | null>(null);
   const [transitioning, setTransitioning] = createSignal(false);
   // Timer handle for the transition clearance — managed manually so it can be
@@ -86,12 +84,12 @@ export default function PresentationPlayer(props: Props) {
     return sid ? allSlides(props.deck).find(s => s.id === sid) : undefined;
   }
 
-  const slide     = createMemo<Slide | undefined>(() => slideAt(displayIdx()));
+  const slide     = createMemo<Slide | undefined>(() => slideAt(idx()));
   const prevSlide = createMemo<Slide | undefined>(() =>
     prevIdx() !== null ? slideAt(prevIdx()!) : undefined
   );
   const txStyles = createMemo(() => {
-    const s = slideAt(prevIdx() ?? displayIdx());
+    const s = slideAt(prevIdx() ?? idx());
     if (!s) return { exiting: "", entering: "" };
     return transitionStyles(s.transition.kind, s.transition.direction, s.transition.duration_ms);
   });
@@ -141,11 +139,10 @@ export default function PresentationPlayer(props: Props) {
     }
     const next = Math.max(0, Math.min(total() - 1, idx() + d));
     if (next === idx()) return;
-    const cur = displayIdx();
+    const cur = idx();
     setPrevIdx(cur);
     setTransitioning(true);
     setIdx(next);
-    setDisplayIdx(next);
     const dur = slideAt(cur)?.transition.duration_ms ?? 300;
     // Cancel any in-flight transition before starting a new one.
     clearTimeout(transitionTimer);

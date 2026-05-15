@@ -295,11 +295,20 @@ async fn stream_ollama(
                 let line = line.trim();
                 if line.is_empty() { continue; }
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-                    let token = json["message"]["content"].as_str().unwrap_or("").to_string();
-                    if !token.is_empty() {
-                        full_content.push_str(&token);
-                        emit("chunk", Some(token), None, None, elapsed());
+                    let content_token = json["message"]["content"].as_str().unwrap_or("");
+                    let thinking_token = json["message"]["thinking"].as_str().unwrap_or("");
+
+                    if !content_token.is_empty() {
+                        // Actual response content — stream to editor
+                        full_content.push_str(content_token);
+                        emit("chunk", Some(content_token.to_string()), None, None, elapsed());
+                    } else if !thinking_token.is_empty() {
+                        // Reasoning model (e.g. qwen3) is in thinking phase.
+                        // Emit a "thinking" stage event so the UI shows progress
+                        // without updating editor content.
+                        emit("thinking", None, None, None, elapsed());
                     }
+
                     if json["done"].as_bool().unwrap_or(false) {
                         return Ok(full_content);
                     }

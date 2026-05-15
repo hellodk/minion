@@ -1,4 +1,4 @@
-import { createSignal, Show } from "solid-js";
+import { createSignal, For, Show } from "solid-js";
 import type { Deck } from "../../lib/deck-schema";
 import { allSlides, colorToCss } from "../../lib/deck-schema";
 import { exportToPptx } from "../../lib/export-pptx";
@@ -110,7 +110,7 @@ ${slideDivs}
           <button onClick={props.onClose} class="text-gray-500 hover:text-white text-xl leading-none">&times;</button>
         </div>
         <div class="flex flex-col gap-2">
-          {FORMATS.map(f => (
+          <For each={FORMATS}>{(f) => (
             <button disabled={busy() !== null} onClick={() => run(f.id)}
               class="flex items-center gap-3 px-4 py-3 rounded-lg border border-[#2a2a36] hover:border-indigo-500 hover:bg-indigo-500/10 transition-colors text-left disabled:opacity-50">
               <Show when={busy() === f.id} fallback={
@@ -123,7 +123,7 @@ ${slideDivs}
                 <div class="text-gray-500 text-xs">{f.desc}</div>
               </div>
             </button>
-          ))}
+          )}</For>
         </div>
         <Show when={status()}>
           {s => <div class={`text-xs rounded-lg px-3 py-2 ${s().ok ? "bg-green-900/40 text-green-400 border border-green-700/50" : "bg-red-900/40 text-red-400 border border-red-700/50"}`}>{s().msg}</div>}

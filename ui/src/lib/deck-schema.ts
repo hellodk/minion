@@ -131,7 +131,7 @@ export interface ElementStyle {
 }
 
 export interface Element {
-  id: ElementId; kind: string; content: ElementContent;
+  id: ElementId; content: ElementContent;
   x: number; y: number; width: number; height: number; z_index: number;
   style: ElementStyle; animation: ElementAnimation;
   user_asset_id?: AssetId; locked: boolean;
@@ -189,7 +189,7 @@ export function slideCount(deck: Deck): number {
   return deck.sections.reduce((n, s) => n + s.slides.length, 0);
 }
 
-export function createBlankSlide(sectionId: SectionId, canvasX: number, canvasY: number): Slide {
+export function createBlankSlide(deck: Deck, sectionId: SectionId, canvasX: number, canvasY: number): Slide {
   return {
     id: crypto.randomUUID(),
     section_id: sectionId,
@@ -200,7 +200,7 @@ export function createBlankSlide(sectionId: SectionId, canvasX: number, canvasY:
     z_layer: 0,
     rotation: [0, 0, 0, 1],
     layout: "blank",
-    background: { kind: "solid", color: { r: 17, g: 17, b: 26, a: 255 } },
+    background: { kind: "solid", color: deck.theme.color_roles.background },
     transition: { kind: "fade", duration_ms: 400, easing: "ease" },
     elements: [],
     speaker_notes: { talking_points: [], presenter_cues: [], anticipated_questions: [] },

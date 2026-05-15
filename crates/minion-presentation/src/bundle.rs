@@ -55,6 +55,13 @@ pub fn apply_patch(deck: &mut Deck, patch: DeckPatch) {
                     Some(s) => *s = slide,
                     None => sec.slides.push(slide),
                 }
+            } else {
+                // Section not found — create it on the fly so the slide isn't silently dropped.
+                deck.sections.push(crate::schema::types::Section {
+                    id: section_id,
+                    title: String::new(),
+                    slides: vec![slide],
+                });
             }
         }
         DeckPatch::DeleteSlide { slide_id } => {

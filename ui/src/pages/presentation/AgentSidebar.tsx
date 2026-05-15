@@ -1,4 +1,4 @@
-import { createSignal, createEffect, onCleanup, For, Show } from "solid-js";
+import { createSignal, createEffect, onCleanup, For, Show, on } from "solid-js";
 import { createStore } from "solid-js/store";
 import { listenToAgentEvents, type AgentEvent, type AgentName } from "../../lib/presentation-api";
 import type { DeckPatch } from "../../lib/deck-patch";
@@ -21,6 +21,9 @@ export default function AgentSidebar(props: Props) {
   const [agents, setAgents] = createStore<Record<string, AgentState>>({});
   const [complete, setComplete] = createSignal(false);
   const [streamErr, setStreamErr] = createSignal<string | null>(null);
+
+  // Auto-expand when a session becomes active.
+  createEffect(on(() => props.sessionId, (sid) => { if (sid) setCollapsed(false); }));
 
   createEffect(() => {
     const sid = props.sessionId;

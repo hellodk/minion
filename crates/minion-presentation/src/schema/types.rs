@@ -465,18 +465,6 @@ pub struct ElementAnimation {
 
 // ── Element ──────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ElementKind {
-    Text,
-    Image,
-    SvgGraphic,
-    ChartSpec,
-    DiagramDsl,
-    Icon,
-    Video,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ElementContent {
@@ -513,8 +501,6 @@ impl Default for ElementStyle {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Element {
     pub id: ElementId,
-    // `kind` is intentionally absent — derive it from `content` via `.kind()` to
-    // prevent the two fields diverging.
     pub content: ElementContent,
     pub x: f64,
     pub y: f64,
@@ -525,20 +511,6 @@ pub struct Element {
     pub animation: ElementAnimation,
     pub user_asset_id: Option<AssetId>,
     pub locked: bool,
-}
-
-impl Element {
-    pub fn kind(&self) -> ElementKind {
-        match &self.content {
-            ElementContent::Text { .. }      => ElementKind::Text,
-            ElementContent::Image { .. }     => ElementKind::Image,
-            ElementContent::SvgGraphic { .. }=> ElementKind::SvgGraphic,
-            ElementContent::ChartSpec { .. } => ElementKind::ChartSpec,
-            ElementContent::DiagramDsl { .. }=> ElementKind::DiagramDsl,
-            ElementContent::Icon { .. }      => ElementKind::Icon,
-            ElementContent::Video { .. }     => ElementKind::Video,
-        }
-    }
 }
 
 // ── Speaker notes ─────────────────────────────────────────────────────────────

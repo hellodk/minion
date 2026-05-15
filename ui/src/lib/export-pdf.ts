@@ -48,7 +48,12 @@ function printWindow(html: string): void {
   win.document.open();
   win.document.write(html);
   win.document.close();
-  win.addEventListener("load", () => { win.focus(); win.print(); });
+  // document.write finishes synchronously; the load event may have already fired.
+  if (win.document.readyState === "complete") {
+    win.focus(); win.print();
+  } else {
+    win.addEventListener("load", () => { win.focus(); win.print(); }, { once: true });
+  }
 }
 
 export function exportToPdf(deck: Deck, speakerNotesOnly = false): void {

@@ -29,7 +29,7 @@ type ViewMode = 'source' | 'split' | 'preview' | 'diff';
 
 interface LlmStreamEvent {
   call_id: string;
-  stage: 'connecting' | 'generating' | 'chunk' | 'done' | 'error' | 'warning';
+  stage: 'connecting' | 'generating' | 'thinking' | 'chunk' | 'done' | 'error' | 'warning';
   chunk?: string;
   content?: string;
   model?: string;
@@ -664,6 +664,9 @@ const Explorer: Component = () => {
         setAiStage(ev.error ?? 'Processing large document…');
       } else if (ev.stage === 'connecting') {
         setAiStage('Connecting…');
+      } else if (ev.stage === 'thinking') {
+        // Reasoning model (e.g. qwen3) thinking phase — show elapsed so user knows it's alive
+        setAiStage(`Thinking${ev.model ? ` (${ev.model})` : ''}…`);
       } else if (ev.stage === 'generating') {
         setAiStage(`Generating${ev.model ? ` (${ev.model})` : ''}…`);
       } else if (ev.stage === 'chunk') {

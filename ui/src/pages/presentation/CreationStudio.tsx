@@ -1,4 +1,5 @@
 import { createSignal, Show, Switch, Match, For } from "solid-js";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { startGeneration, type InputSource } from "../../lib/presentation-api";
 import type { GenerationConfig } from "../../lib/deck-schema";
 import { THEMES } from "../../lib/themes";
@@ -99,11 +100,21 @@ export default function CreationStudio(props: Props) {
             />
           </Match>
           <Match when={tab() === "files"}>
-            <input type="file" multiple accept=".pdf,.docx,.md,.xlsx,.png,.jpg,.jpeg"
-              class="text-sm text-gray-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-indigo-600 file:text-white file:text-xs"
-              onChange={e => setPaths(Array.from(e.currentTarget.files ?? [])
-                .map(f => (f as (File & { path?: string })).path ?? f.name))}
-            />
+            <button
+              class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium"
+              onClick={async () => {
+                const selected = await openFileDialog({
+                  multiple: true,
+                  filters: [{ name: "Supported files", extensions: ["pdf","docx","md","xlsx","png","jpg","jpeg"] }],
+                });
+                if (selected) {
+                  const files = Array.isArray(selected) ? selected : [selected];
+                  setPaths(files);
+                }
+              }}
+            >
+              Choose Files…
+            </button>
             <Show when={paths().length > 0}>
               <ul class="mt-2 text-xs text-gray-400 list-disc list-inside space-y-0.5">
                 <For each={paths()}>{p => <li class="truncate">{p}</li>}</For>

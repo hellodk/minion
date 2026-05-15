@@ -107,10 +107,6 @@ pub struct SlidePlannerAgent {
 }
 
 impl SlidePlannerAgent {
-    pub fn new(provider: Arc<dyn LlmProvider>) -> Self {
-        Self { provider }
-    }
-
     pub fn new_with_provider(provider: Arc<dyn LlmProvider>) -> Self {
         Self { provider }
     }
@@ -248,7 +244,7 @@ impl SlidePlannerAgent {
 async fn plan_section(
     provider: &dyn LlmProvider,
     section: &StorySection,
-    section_idx: usize,
+    _section_idx: usize,
     section_y: f64,
 ) -> anyhow::Result<LlmSectionResponse> {
     let req = JsonExtractRequest {
@@ -267,6 +263,5 @@ async fn plan_section(
         .context("plan_section: extract_json failed")?;
     let result: LlmSectionResponse =
         serde_json::from_value(resp.parsed).context("plan_section: deserialize failed")?;
-    let _ = section_idx; // used for spawning, not needed here
     Ok(result)
 }

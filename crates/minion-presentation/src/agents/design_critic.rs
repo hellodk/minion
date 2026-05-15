@@ -11,11 +11,6 @@ impl DesignCriticAgent {
         let mut patches = Vec::new();
         for section in &deck.sections {
             for slide in &section.slides {
-                if word_count(slide) > 80 {
-                    patches.push(DeckPatch::DeleteSlide {
-                        slide_id: slide.id.clone(),
-                    });
-                }
                 let enter_elems: Vec<&Element> = slide
                     .elements
                     .iter()
@@ -48,13 +43,3 @@ impl Default for DesignCriticAgent {
     }
 }
 
-fn word_count(slide: &Slide) -> usize {
-    slide
-        .elements
-        .iter()
-        .map(|e| match &e.content {
-            ElementContent::Text { markdown } => markdown.split_whitespace().count(),
-            _ => 0,
-        })
-        .sum()
-}

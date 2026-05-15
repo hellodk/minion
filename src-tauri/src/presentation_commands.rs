@@ -5,7 +5,7 @@ use minion_presentation::{
     schema::types::{DeckId, DeckPatch, DeckSummary, GenerationConfig},
 };
 use std::sync::Arc;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::RwLock;
 
 use crate::state::AppState;
@@ -19,24 +19,36 @@ pub async fn start_presentation_generation(
     inputs: serde_json::Value,
     config: GenerationConfig,
     state: AppStateHandle<'_>,
-    _app: AppHandle,
+    app: AppHandle,
 ) -> Result<String, String> {
     let session_id = uuid::Uuid::new_v4().to_string();
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-    let (event_tx, _) = tokio::sync::broadcast::channel(256);
+    let (event_tx, event_rx) = tokio::sync::broadcast::channel(256);
 
     let sources: Vec<InputSource> =
         serde_json::from_value(inputs).map_err(|e| e.to_string())?;
 
-    let guard = state.read().await;
-    guard
-        .cancel_senders
-        .lock()
-        .await
-        .insert(session_id.clone(), cancel_tx);
-    let orchestrator = Arc::clone(&guard.orchestrator);
-    let sid = session_id.clone();
+    let state_arc = Arc::clone(&*state);
+    let orchestrator = {
+        let guard = state.read().await;
+        guard.cancel_senders.lock().await.insert(session_id.clone(), cancel_tx);
+        Arc::clone(&guard.orchestrator)
+    };
 
+    // Relay broadcast events → Tauri frontend events
+    let relay_sid = session_id.clone();
+    let relay_app = app.clone();
+    let mut relay_rx = event_rx;
+    tokio::spawn(async move {
+        while let Ok(event) = relay_rx.recv().await {
+            let _ = relay_app.emit(
+                &format!("presentation://agent-event/{relay_sid}"),
+                &event,
+            );
+        }
+    });
+
+    let sid = session_id.clone();
     tokio::spawn(async move {
         if let Err(e) = orchestrator
             .generate(&sid, sources, config, event_tx, cancel_rx)
@@ -44,6 +56,8 @@ pub async fn start_presentation_generation(
         {
             tracing::error!("generation failed session={sid}: {e:#}");
         }
+        // Clean up cancel sender regardless of success/failure
+        state_arc.read().await.cancel_senders.lock().await.remove(&sid);
     });
 
     Ok(session_id)

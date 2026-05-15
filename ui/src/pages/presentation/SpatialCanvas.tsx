@@ -1,4 +1,4 @@
-import { createSignal, For } from "solid-js";
+import { createSignal, createMemo, For } from "solid-js";
 import type { Deck, Slide } from "../../lib/deck-schema";
 import { allSlides, colorToCss } from "../../lib/deck-schema";
 
@@ -29,6 +29,8 @@ export default function SpatialCanvas(props: Props) {
   const [drag, setDrag] = createSignal(false);
   let ref: HTMLDivElement | undefined;
   let last = {x:0,y:0};
+  // Track whether the pointer moved enough to count as a drag (not a click).
+  let dragMoved = false;
 
   const vp = () => ({w: ref?.clientWidth??800, h: ref?.clientHeight??600});
 
@@ -36,18 +38,20 @@ export default function SpatialCanvas(props: Props) {
     e.preventDefault();
     props.onZoomChange(Math.min(20, Math.max(0.05, props.zoom*(1-e.deltaY*0.001))));
   };
-  const onDown = (e: MouseEvent) => { setDrag(true); last={x:e.clientX,y:e.clientY}; };
+  const onDown = (e: MouseEvent) => { setDrag(true); dragMoved = false; last={x:e.clientX,y:e.clientY}; };
   const onMove = (e: MouseEvent) => {
     if (!drag()) return;
     const dx=e.clientX-last.x, dy=e.clientY-last.y; last={x:e.clientX,y:e.clientY};
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragMoved = true;
     props.onPanChange({x:props.pan.x+dx,y:props.pan.y+dy});
   };
-  const onUp = () => setDrag(false);
+  const onUp = () => { setDrag(false); };
 
-  const slides = () => {
+  // Memoize filtered slide list so it doesn't recalculate on every mousemove.
+  const slides = createMemo(() => {
     const {w,h}=vp();
     return allSlides(props.deck).filter(s=>visible(s,props.pan,props.zoom,w,h));
-  };
+  });
 
   return (
     <div ref={ref} class="relative overflow-hidden w-full h-full select-none"
@@ -70,7 +74,7 @@ export default function SpatialCanvas(props: Props) {
                 background:slideBg(slide),
                 "box-shadow":props.selectedSlideId===slide.id?"0 0 0 3px #6366f1":"0 2px 8px rgba(0,0,0,0.5)",
                 "border-color":props.selectedSlideId===slide.id?"#6366f1":"rgba(255,255,255,0.06)"}}
-              onClick={e=>{e.stopPropagation();props.onSelectSlide(slide.id);}}>
+              onClick={e=>{e.stopPropagation(); if(!dragMoved) props.onSelectSlide(slide.id);}}>
               <span class="absolute top-2 left-2 px-1.5 py-0.5 bg-black/40 text-white/60 text-[10px] rounded font-mono">
                 {slide.layout}
               </span>
