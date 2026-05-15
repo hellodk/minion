@@ -148,6 +148,196 @@ fn to_config(ep: StoredEndpoint, model_override: Option<String>) -> Result<Endpo
 }
 
 // -------------------------------------------------------------------------
+// Tier 1: Runtime capability probe
+// -------------------------------------------------------------------------
+
+/// Stored capability record for one (endpoint, model) pair.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModelCapability {
+    pub endpoint_id: String,
+    pub model_name: String,
+    pub is_thinking: bool,
+    pub supports_nothink: bool,
+    pub context_window: Option<i64>,
+    pub probed_at: String,
+    pub probe_success: bool,
+}
+
+/// Probe a single model: send a minimal test message and observe whether
+/// the response includes a non-empty `thinking` field (Ollama format) or
+/// `reasoning_content` (OpenAI-compatible reasoning models).
+///
+/// If `is_thinking`, also test the `/nothink` directive to see if the model
+/// supports suppressing chain-of-thought.
+///
+/// Returns the capability record. Does NOT write to DB — caller persists.
+pub async fn probe_model_capabilities(
+    endpoint_id: &str,
+    provider_type: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    model_name: &str,
+) -> ModelCapability {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return ModelCapability {
+            endpoint_id: endpoint_id.to_string(),
+            model_name: model_name.to_string(),
+            is_thinking: false,
+            supports_nothink: false,
+            context_window: None,
+            probed_at: chrono::Utc::now().to_rfc3339(),
+            probe_success: false,
+        },
+    };
+
+    let mut is_thinking = false;
+    let mut supports_nothink = false;
+    let mut context_window: Option<i64> = None;
+    let mut probe_success = false;
+    let base = base_url.trim_end_matches('/');
+
+    match provider_type {
+        "ollama" => {
+            // Probe 1: simple chat — does it produce thinking tokens?
+            let body = serde_json::json!({
+                "model": model_name,
+                "messages": [{"role": "user", "content": "1+1="}],
+                "stream": false,
+                "options": {"num_predict": 32}
+            });
+            if let Ok(resp) = client.post(format!("{base}/api/chat")).json(&body).send().await {
+                if resp.status().is_success() {
+                    probe_success = true;
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        let thinking = json["message"]["thinking"].as_str().unwrap_or("");
+                        is_thinking = !thinking.is_empty();
+                    }
+                }
+            }
+
+            // Probe 2: if thinking, test /nothink suppression
+            if is_thinking {
+                let body2 = serde_json::json!({
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": "/nothink"},
+                        {"role": "user", "content": "1+1="}
+                    ],
+                    "stream": false,
+                    "options": {"num_predict": 32}
+                });
+                if let Ok(resp2) = client.post(format!("{base}/api/chat")).json(&body2).send().await {
+                    if resp2.status().is_success() {
+                        if let Ok(json2) = resp2.json::<serde_json::Value>().await {
+                            let thinking2 = json2["message"]["thinking"].as_str().unwrap_or("");
+                            supports_nothink = thinking2.is_empty();
+                        }
+                    }
+                }
+            }
+
+            // Probe 3: fetch context window from /api/show
+            let show_body = serde_json::json!({"name": model_name});
+            if let Ok(resp3) = client.post(format!("{base}/api/show")).json(&show_body).send().await {
+                if let Ok(json3) = resp3.json::<serde_json::Value>().await {
+                    context_window = json3["model_info"]["llama.context_length"]
+                        .as_i64()
+                        .or_else(|| json3["parameters"].as_str()
+                            .and_then(|p| {
+                                p.lines().find(|l| l.starts_with("num_ctx"))
+                                    .and_then(|l| l.split_whitespace().nth(1))
+                                    .and_then(|v| v.parse::<i64>().ok())
+                            }));
+                }
+            }
+        }
+        "openai_compatible" | "openai" => {
+            let mut req_builder = client.post(format!("{base}/v1/chat/completions"));
+            if let Some(k) = api_key { if !k.is_empty() { req_builder = req_builder.bearer_auth(k); } }
+            let body = serde_json::json!({
+                "model": model_name,
+                "messages": [{"role": "user", "content": "1+1="}],
+                "stream": false,
+                "max_tokens": 32
+            });
+            if let Ok(resp) = req_builder.json(&body).send().await {
+                if resp.status().is_success() {
+                    probe_success = true;
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        // Some providers put reasoning in reasoning_content
+                        let rc = json["choices"][0]["message"]["reasoning_content"]
+                            .as_str().unwrap_or("");
+                        is_thinking = !rc.is_empty();
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    ModelCapability {
+        endpoint_id: endpoint_id.to_string(),
+        model_name: model_name.to_string(),
+        is_thinking,
+        supports_nothink,
+        context_window,
+        probed_at: chrono::Utc::now().to_rfc3339(),
+        probe_success,
+    }
+}
+
+/// Read cached capabilities for a model from the DB.
+/// Returns None if not yet probed or if the probe is stale (>7 days).
+fn read_cached_capability(
+    conn: &rusqlite::Connection,
+    endpoint_id: &str,
+    model_name: &str,
+) -> Option<ModelCapability> {
+    const STALE_DAYS: i64 = 7;
+    conn.query_row(
+        "SELECT endpoint_id, model_name, is_thinking, supports_nothink,
+                context_window, probed_at, probe_success
+         FROM llm_model_capabilities
+         WHERE endpoint_id = ?1 AND model_name = ?2
+           AND julianday('now') - julianday(probed_at) < ?3",
+        rusqlite::params![endpoint_id, model_name, STALE_DAYS],
+        |r| Ok(ModelCapability {
+            endpoint_id: r.get(0)?,
+            model_name: r.get(1)?,
+            is_thinking: r.get::<_, i64>(2)? != 0,
+            supports_nothink: r.get::<_, i64>(3)? != 0,
+            context_window: r.get(4)?,
+            probed_at: r.get(5)?,
+            probe_success: r.get::<_, i64>(6)? != 0,
+        }),
+    ).ok()
+}
+
+/// Write a probe result into the DB.
+fn write_capability(
+    conn: &rusqlite::Connection,
+    cap: &ModelCapability,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO llm_model_capabilities
+             (endpoint_id, model_name, is_thinking, supports_nothink,
+              context_window, probed_at, probe_success)
+         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        rusqlite::params![
+            cap.endpoint_id, cap.model_name,
+            cap.is_thinking as i64, cap.supports_nothink as i64,
+            cap.context_window, cap.probed_at,
+            cap.probe_success as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
 // Task classification + model intelligence
 // -------------------------------------------------------------------------
 
@@ -248,28 +438,26 @@ async fn fetch_available_models(
     let base = base_url.trim_end_matches('/');
     let models: Vec<String> = match provider_type {
         "ollama" => {
-            client.get(format!("{base}/api/tags")).send().await
-                .ok()
-                .and_then(|r| r.json::<serde_json::Value>().ok().map(|j| {
-                    j["models"].as_array().unwrap_or(&vec![])
+            if let Ok(resp) = client.get(format!("{base}/api/tags")).send().await {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    json["models"].as_array().unwrap_or(&vec![])
                         .iter()
                         .filter_map(|m| m["name"].as_str().map(str::to_string))
                         .collect()
-                }))
-                .unwrap_or_default()
+                } else { vec![] }
+            } else { vec![] }
         }
         "openai_compatible" | "openai" => {
             let mut req = client.get(format!("{base}/v1/models"));
             if let Some(k) = api_key { if !k.is_empty() { req = req.bearer_auth(k); } }
-            req.send().await
-                .ok()
-                .and_then(|r| r.json::<serde_json::Value>().ok().map(|j| {
-                    j["data"].as_array().unwrap_or(&vec![])
+            if let Ok(resp) = req.send().await {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    json["data"].as_array().unwrap_or(&vec![])
                         .iter()
                         .filter_map(|m| m["id"].as_str().map(str::to_string))
                         .collect()
-                }))
-                .unwrap_or_default()
+                } else { vec![] }
+            } else { vec![] }
         }
         _ => vec![],
     };
@@ -282,53 +470,123 @@ async fn fetch_available_models(
     models
 }
 
+/// Look up whether a model is a thinking model.
+/// Tier 1: DB probe result (ground truth, refreshed every 7 days).
+/// Tier 2: name-pattern heuristic (fallback, triggers background probe).
+/// Returns (is_thinking, supports_nothink).
+async fn model_thinking_status(
+    state: &AppStateHandle,
+    endpoint_id: &str,
+    provider_type: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    model_name: &str,
+) -> (bool, bool) {
+    // Tier 1: check DB
+    {
+        let st = state.read().await;
+        if let Ok(conn) = st.db.get() {
+            if let Some(cap) = read_cached_capability(&conn, endpoint_id, model_name) {
+                if cap.probe_success {
+                    return (cap.is_thinking, cap.supports_nothink);
+                }
+            }
+        }
+    }
+    // DB miss — spawn a background probe so next call gets ground truth
+    {
+        let state_clone = state.clone();
+        let eid = endpoint_id.to_string();
+        let pt = provider_type.to_string();
+        let url = base_url.to_string();
+        let key = api_key.map(str::to_string);
+        let model = model_name.to_string();
+        tauri::async_runtime::spawn(async move {
+            let cap = probe_model_capabilities(&eid, &pt, &url, key.as_deref(), &model).await;
+            if let Ok(st) = state_clone.read().await.db.get() {
+                let _ = write_capability(&st, &cap);
+            }
+            tracing::debug!(
+                "llm_router: probed '{}' — thinking={} nothink={}",
+                cap.model_name, cap.is_thinking, cap.supports_nothink
+            );
+        });
+    }
+    // Tier 2: name-pattern heuristic while probe runs in background
+    let thinking = is_thinking_model(model_name);
+    let nothink = supports_nothink_directive(model_name);
+    (thinking, nothink)
+}
+
 /// For simple tasks on an endpoint whose default model is a reasoning model,
 /// prefer a non-thinking alternative if available.
 ///
-/// G4 fix: if `user_override` is true the user explicitly chose this model;
-/// we respect that and skip auto-selection.
-/// C4 fix: for Qwen3, /nothink injection (handled at call site) is preferred
-/// over model-switching — so we only switch for non-Qwen3 thinking models.
+/// G4 fix: if `user_override` is true the user explicitly chose this model.
+/// C4 fix: Qwen3 → inject /nothink rather than switch models.
+/// Tier 1: uses DB probe results for model classification.
 async fn pick_best_model(
     feature: &str,
     cfg: EndpointConfig,
     user_override: bool,
+    state: &AppStateHandle,
 ) -> EndpointConfig {
-    // Respect explicit user model choice (G4 fix)
     if user_override { return cfg; }
+    if !SIMPLE_FEATURES.contains(&feature) { return cfg; }
 
-    let is_simple = SIMPLE_FEATURES.contains(&feature);
-    if !is_simple || !is_thinking_model(&cfg.default_model) {
+    // Need the endpoint_id to query the capabilities DB.
+    // Resolve it from the DB using base_url as a lookup key.
+    let endpoint_id = {
+        let st = state.read().await;
+        st.db.get().ok()
+            .and_then(|conn| conn.query_row(
+                "SELECT id FROM llm_endpoints WHERE base_url = ?1 LIMIT 1",
+                rusqlite::params![cfg.base_url],
+                |r| r.get::<_, String>(0),
+            ).ok())
+            .unwrap_or_default()
+    };
+
+    let pt_str = match cfg.provider_type {
+        ProviderType::Ollama           => "ollama",
+        ProviderType::OpenaiCompatible | ProviderType::Openai | ProviderType::Airllm => "openai_compatible",
+        _                              => "other",
+    };
+
+    let (is_thinking, nothink_ok) = model_thinking_status(
+        state, &endpoint_id, pt_str, &cfg.base_url, cfg.api_key.as_deref(), &cfg.default_model,
+    ).await;
+
+    if !is_thinking { return cfg; }
+
+    // Qwen3 and models supporting /nothink: keep model, inject directive at call site
+    if nothink_ok {
         return cfg;
     }
 
-    // Qwen3: /nothink is better than model-switching (C4 fix).
-    // The system-prompt injection happens at call time via maybe_inject_nothink.
-    if supports_nothink_directive(&cfg.default_model) {
-        return cfg; // keep the model; nothink will be injected
+    // Other thinking models: look for a capable non-thinking alternative
+    let models = fetch_available_models(pt_str, &cfg.base_url, cfg.api_key.as_deref()).await;
+
+    // Filter using Tier 1 probe results where available, name patterns as fallback
+    let mut candidates: Vec<(i32, String)> = vec![];
+    for m in &models {
+        if m == &cfg.default_model { continue; }
+        let (m_thinking, _) = model_thinking_status(
+            state, &endpoint_id, pt_str, &cfg.base_url, cfg.api_key.as_deref(), m,
+        ).await;
+        if m_thinking { continue; }
+        if let Some(score) = simple_task_score(m) {
+            candidates.push((score, m.clone()));
+        }
     }
+    candidates.sort_by_key(|(s, _)| *s);
 
-    // For other thinking models (deepseek-r1, etc.), find a capable non-thinking
-    // alternative on the same endpoint (C1 fix: uses cached model list).
-    let models = fetch_available_models(
-        &format!("{:?}", cfg.provider_type).to_lowercase(),
-        &cfg.base_url,
-        cfg.api_key.as_deref(),
-    ).await;
-
-    let best = models.iter()
-        .filter(|m| !is_thinking_model(m))
-        .filter_map(|m| simple_task_score(m).map(|s| (s, m)))
-        .min_by_key(|(s, _)| *s)
-        .map(|(_, m)| m.clone());
-
-    match best {
-        Some(model) => {
+    match candidates.first() {
+        Some((_, model)) => {
             tracing::info!(
                 "llm_router: auto-selected '{}' over '{}' for simple task '{}'",
                 model, cfg.default_model, feature
             );
-            EndpointConfig { default_model: model, ..cfg }
+            EndpointConfig { default_model: model.clone(), ..cfg }
         }
         None => cfg,
     }
@@ -354,11 +612,12 @@ pub async fn resolve(
         query_endpoint(&conn, feature)
     };
     let (ep, model_override) = match stored { Some(s) => s, None => return Ok(None) };
-    // Track whether the user explicitly chose this model via feature binding (G4 fix)
     let user_override = model_override.as_ref().map_or(false, |m| !m.trim().is_empty());
     let cfg = to_config(ep, model_override)?;
+
     // Auto-select a better model for simple tasks when no explicit override is set.
-    Ok(Some(pick_best_model(feature, cfg, user_override).await))
+    // Passes state so pick_best_model can read/write the capabilities DB.
+    Ok(Some(pick_best_model(feature, cfg, user_override, state).await))
 }
 
 // -------------------------------------------------------------------------
@@ -413,7 +672,7 @@ pub async fn get_feature_status(
         },
         None,
     )?;
-    let resolved = pick_best_model(feature, initial_cfg, user_override).await;
+    let resolved = pick_best_model(feature, initial_cfg, user_override, state).await;
     let model = resolved.default_model.clone();
     let ep_base_url = ep.base_url.clone();
     let ep_provider_type = ep.provider_type.clone();
@@ -445,6 +704,78 @@ pub struct LlmStreamEvent {
     pub model: Option<String>,
     pub elapsed_ms: u64,
     pub error: Option<String>,
+}
+
+// -------------------------------------------------------------------------
+// Public capability management commands (called from Settings UI)
+// -------------------------------------------------------------------------
+
+/// Probe all models on a specific endpoint and store the results.
+/// Returns the list of capability records. Safe to call repeatedly.
+pub async fn probe_endpoint_capabilities(
+    state: &AppStateHandle,
+    endpoint_id: &str,
+) -> Result<Vec<ModelCapability>, String> {
+    let (pt, base_url, api_key) = {
+        let st = state.read().await;
+        let conn = st.db.get().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT provider_type, base_url, api_key_encrypted FROM llm_endpoints WHERE id = ?1",
+            rusqlite::params![endpoint_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)),
+        ).map_err(|e| format!("Endpoint not found: {e}"))?
+    };
+
+    let models = fetch_available_models(&pt, &base_url, api_key.as_deref()).await;
+    if models.is_empty() {
+        return Err("No models found on endpoint — is it reachable?".to_string());
+    }
+
+    let mut results = Vec::new();
+    for model in &models {
+        let cap = probe_model_capabilities(endpoint_id, &pt, &base_url, api_key.as_deref(), model).await;
+        {
+            let st = state.read().await;
+            if let Ok(conn) = st.db.get() {
+                let _ = write_capability(&conn, &cap);
+            }
+        }
+        tracing::info!(
+            "llm_router: probed '{}' on '{}' — thinking={} nothink={}",
+            cap.model_name, endpoint_id, cap.is_thinking, cap.supports_nothink
+        );
+        results.push(cap);
+    }
+    Ok(results)
+}
+
+/// Read all stored capability records for an endpoint.
+pub async fn get_endpoint_capabilities(
+    state: &AppStateHandle,
+    endpoint_id: &str,
+) -> Result<Vec<ModelCapability>, String> {
+    let st = state.read().await;
+    let conn = st.db.get().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT endpoint_id, model_name, is_thinking, supports_nothink,
+                context_window, probed_at, probe_success
+         FROM llm_model_capabilities WHERE endpoint_id = ?1
+         ORDER BY model_name ASC",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(rusqlite::params![endpoint_id], |r| {
+        Ok(ModelCapability {
+            endpoint_id: r.get(0)?,
+            model_name: r.get(1)?,
+            is_thinking: r.get::<_, i64>(2)? != 0,
+            supports_nothink: r.get::<_, i64>(3)? != 0,
+            context_window: r.get(4)?,
+            probed_at: r.get(5)?,
+            probe_success: r.get::<_, i64>(6)? != 0,
+        })
+    }).map_err(|e| e.to_string())?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| e.to_string())?;
+    Ok(rows)
 }
 
 // -------------------------------------------------------------------------

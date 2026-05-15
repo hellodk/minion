@@ -362,6 +362,25 @@ pub async fn fv_format_md(
     Ok(result)
 }
 
+/// Probe all models on an endpoint and store their capabilities in the DB.
+/// Safe to call repeatedly — results are stored with a 7-day TTL.
+#[tauri::command]
+pub async fn llm_probe_endpoint(
+    state: State<'_, crate::llm_router::AppStateHandle>,
+    endpoint_id: String,
+) -> Result<Vec<crate::llm_router::ModelCapability>, String> {
+    crate::llm_router::probe_endpoint_capabilities(&state, &endpoint_id).await
+}
+
+/// Read stored capability records for an endpoint (from the last probe run).
+#[tauri::command]
+pub async fn llm_get_capabilities(
+    state: State<'_, crate::llm_router::AppStateHandle>,
+    endpoint_id: String,
+) -> Result<Vec<crate::llm_router::ModelCapability>, String> {
+    crate::llm_router::get_endpoint_capabilities(&state, &endpoint_id).await
+}
+
 /// Returns info about which LLM endpoint/model would handle a given feature.
 /// Used by the frontend to show "Will use: llama3 on Ollama" before clicking AI.
 #[tauri::command]

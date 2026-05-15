@@ -64,6 +64,10 @@ pub fn run(conn: &Connection) -> Result<()> {
             "025_file_viewer_workspaces",
             migrate_025_file_viewer_workspaces,
         ),
+        (
+            "026_llm_model_capabilities",
+            migrate_026_llm_model_capabilities,
+        ),
     ];
 
     for (name, migrate_fn) in migrations {
@@ -1362,6 +1366,22 @@ fn migrate_025_file_viewer_workspaces(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_026_llm_model_capabilities(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS llm_model_capabilities (
+            endpoint_id      TEXT NOT NULL REFERENCES llm_endpoints(id) ON DELETE CASCADE,
+            model_name       TEXT NOT NULL,
+            is_thinking      INTEGER NOT NULL DEFAULT 0,
+            supports_nothink INTEGER NOT NULL DEFAULT 0,
+            context_window   INTEGER,
+            probed_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            probe_success    INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (endpoint_id, model_name)
+        );",
+    )?;
+    Ok(())
+}
+
 fn migrate_024_blog_fts5(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         // FTS5 virtual table — tokenises title, tags, author, excerpt, and the
@@ -1536,7 +1556,7 @@ mod tests {
                 row.get(0)
             })
             .expect("Failed to count migrations");
-        assert_eq!(count, 25);
+        assert_eq!(count, 26);
 
         // Verify applied_at is set
         let has_timestamp: bool = conn
