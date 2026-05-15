@@ -35,11 +35,24 @@
 use crate::state::AppState;
 use minion_llm::{create_provider, EndpointConfig, ProviderType};
 use serde::Serialize;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 use tauri::AppHandle;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 pub type AppStateHandle = Arc<RwLock<AppState>>;
+
+// -------------------------------------------------------------------------
+// Model-list cache  (C1/C2 fix)
+// -------------------------------------------------------------------------
+// Avoids an extra HTTP round-trip on every LLM call for simple features.
+// TTL = 60s — model list changes only when the user installs/removes a model.
+
+const CACHE_TTL: Duration = Duration::from_secs(60);
+
+static MODEL_LIST_CACHE: LazyLock<Mutex<HashMap<String, (Instant, Vec<String>)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // -------------------------------------------------------------------------
 // Internal helpers
@@ -100,16 +113,22 @@ fn query_endpoint(
     .map(|ep| (ep, None))
 }
 
+/// Parse a provider_type string to the enum. Centralised so that Debug-format
+/// matching (fragile, C5 fix) is never used — callers call this instead.
+fn parse_provider_type(s: &str) -> Result<ProviderType, String> {
+    match s {
+        "ollama"            => Ok(ProviderType::Ollama),
+        "openai_compatible" => Ok(ProviderType::OpenaiCompatible),
+        "openai"            => Ok(ProviderType::Openai),
+        "anthropic"         => Ok(ProviderType::Anthropic),
+        "google_gemini"     => Ok(ProviderType::GoogleGemini),
+        "airllm"            => Ok(ProviderType::Airllm),
+        other               => Err(format!("Unknown provider type: {other}")),
+    }
+}
+
 fn to_config(ep: StoredEndpoint, model_override: Option<String>) -> Result<EndpointConfig, String> {
-    let pt = match ep.provider_type.as_str() {
-        "ollama"           => ProviderType::Ollama,
-        "openai_compatible" => ProviderType::OpenaiCompatible,
-        "openai"           => ProviderType::Openai,
-        "anthropic"        => ProviderType::Anthropic,
-        "google_gemini"    => ProviderType::GoogleGemini,
-        "airllm"           => ProviderType::Airllm,
-        other => return Err(format!("Unknown provider type: {other}")),
-    };
+    let pt = parse_provider_type(&ep.provider_type)?;
     let extra_headers = ep.extra_headers
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
@@ -129,11 +148,202 @@ fn to_config(ep: StoredEndpoint, model_override: Option<String>) -> Result<Endpo
 }
 
 // -------------------------------------------------------------------------
+// Task classification + model intelligence
+// -------------------------------------------------------------------------
+
+/// Tasks that benefit from a fast, direct response model rather than a
+/// slow reasoning/thinking model. The router auto-downgrades for these.
+const SIMPLE_FEATURES: &[&str] = &[
+    "explorer_format_md",
+    "blog_llm_grammar",
+    "blog_llm_meta",
+    "blog_llm_tags",
+    "blog_llm_hook",
+    "blog_llm_conclusion",
+    "blog_llm_snippets",
+    "blog_llm_tone",
+];
+
+/// Returns true if the model name pattern suggests it is a chain-of-thought
+/// reasoning model that produces "thinking" tokens before content.
+///
+/// IMPORTANT: deepseek-v3 is NOT a reasoning model (only deepseek-r1 is).
+/// qwen3 IS a reasoning model by default but supports /nothink suppression.
+fn is_thinking_model(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("qwen3")
+        || n.contains("deepseek-r1")   // NOT deepseek-v3 (C3 fix)
+        || n.starts_with("r1-")
+        || n.contains("-r1:")
+        || n.contains("-r1-")
+        || n.contains(":r1")
+        || n.contains("thinking")
+        || n.starts_with("o1-")
+        || n.starts_with("o3-")
+        || n.contains("qwq")
+        || n.contains("marco-o1")
+}
+
+/// Returns true if this thinking model supports the `/nothink` system-prompt
+/// directive to disable chain-of-thought for simple tasks (C4 fix).
+fn supports_nothink_directive(name: &str) -> bool {
+    name.to_lowercase().contains("qwen3")
+}
+
+/// Prepend `/nothink` to the system prompt to disable Qwen3's reasoning mode.
+/// This is faster than model-switching: same model, no thinking overhead.
+pub(crate) fn maybe_inject_nothink(model: &str, system: &str) -> String {
+    if supports_nothink_directive(model) && !system.starts_with("/nothink") {
+        format!("/nothink\n\n{system}")
+    } else {
+        system.to_string()
+    }
+}
+
+/// Score a model for quality-vs-speed on simple text tasks (H1/H2 fix).
+/// Lower score = preferred. Models below a quality floor are excluded.
+/// Returns None if the model should not be used for chat (embedding models etc.)
+fn simple_task_score(name: &str) -> Option<i32> {
+    let n = name.to_lowercase();
+    // Never use embedding or multimodal-only models for text chat
+    if n.contains("embed") || n.contains("nomic") || n.contains("clip") { return None; }
+    // Code-specialised models are fine for markdown with code blocks (H2 fix — no penalty)
+    // Minimum quality floor: avoid tiny models (<7B) for formatting tasks (H1 fix)
+    if n.contains("1b") || n.contains("1.5b") || n.contains("2b") || n.contains("3b") {
+        return None; // too small for reliable markdown formatting
+    }
+    // Score by parameter count — prefer mid-size for simple tasks
+    let size_score = if n.contains("7b") || n.contains("8b")  { 10 }
+        else if n.contains("13b") || n.contains("14b") { 15 }
+        else if n.contains("30b") || n.contains("32b") { 25 }
+        else if n.contains("70b") || n.contains("72b") { 40 }
+        else { 10 }; // unknown — treat as 7B class
+    Some(size_score)
+}
+
+/// Fetch the list of models available on an Ollama or OpenAI-compatible endpoint.
+/// Results are cached for CACHE_TTL to avoid a round-trip on every call (C1 fix).
+async fn fetch_available_models(
+    provider_type: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Vec<String> {
+    // Check cache first
+    {
+        let cache = MODEL_LIST_CACHE.lock().await;
+        if let Some((ts, models)) = cache.get(base_url) {
+            if ts.elapsed() < CACHE_TTL {
+                return models.clone();
+            }
+        }
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return vec![], // M3 fix: don't fall back to a client with no timeout
+    };
+    let base = base_url.trim_end_matches('/');
+    let models: Vec<String> = match provider_type {
+        "ollama" => {
+            client.get(format!("{base}/api/tags")).send().await
+                .ok()
+                .and_then(|r| r.json::<serde_json::Value>().ok().map(|j| {
+                    j["models"].as_array().unwrap_or(&vec![])
+                        .iter()
+                        .filter_map(|m| m["name"].as_str().map(str::to_string))
+                        .collect()
+                }))
+                .unwrap_or_default()
+        }
+        "openai_compatible" | "openai" => {
+            let mut req = client.get(format!("{base}/v1/models"));
+            if let Some(k) = api_key { if !k.is_empty() { req = req.bearer_auth(k); } }
+            req.send().await
+                .ok()
+                .and_then(|r| r.json::<serde_json::Value>().ok().map(|j| {
+                    j["data"].as_array().unwrap_or(&vec![])
+                        .iter()
+                        .filter_map(|m| m["id"].as_str().map(str::to_string))
+                        .collect()
+                }))
+                .unwrap_or_default()
+        }
+        _ => vec![],
+    };
+
+    // Store in cache
+    if !models.is_empty() {
+        let mut cache = MODEL_LIST_CACHE.lock().await;
+        cache.insert(base_url.to_string(), (Instant::now(), models.clone()));
+    }
+    models
+}
+
+/// For simple tasks on an endpoint whose default model is a reasoning model,
+/// prefer a non-thinking alternative if available.
+///
+/// G4 fix: if `user_override` is true the user explicitly chose this model;
+/// we respect that and skip auto-selection.
+/// C4 fix: for Qwen3, /nothink injection (handled at call site) is preferred
+/// over model-switching — so we only switch for non-Qwen3 thinking models.
+async fn pick_best_model(
+    feature: &str,
+    cfg: EndpointConfig,
+    user_override: bool,
+) -> EndpointConfig {
+    // Respect explicit user model choice (G4 fix)
+    if user_override { return cfg; }
+
+    let is_simple = SIMPLE_FEATURES.contains(&feature);
+    if !is_simple || !is_thinking_model(&cfg.default_model) {
+        return cfg;
+    }
+
+    // Qwen3: /nothink is better than model-switching (C4 fix).
+    // The system-prompt injection happens at call time via maybe_inject_nothink.
+    if supports_nothink_directive(&cfg.default_model) {
+        return cfg; // keep the model; nothink will be injected
+    }
+
+    // For other thinking models (deepseek-r1, etc.), find a capable non-thinking
+    // alternative on the same endpoint (C1 fix: uses cached model list).
+    let models = fetch_available_models(
+        &format!("{:?}", cfg.provider_type).to_lowercase(),
+        &cfg.base_url,
+        cfg.api_key.as_deref(),
+    ).await;
+
+    let best = models.iter()
+        .filter(|m| !is_thinking_model(m))
+        .filter_map(|m| simple_task_score(m).map(|s| (s, m)))
+        .min_by_key(|(s, _)| *s)
+        .map(|(_, m)| m.clone());
+
+    match best {
+        Some(model) => {
+            tracing::info!(
+                "llm_router: auto-selected '{}' over '{}' for simple task '{}'",
+                model, cfg.default_model, feature
+            );
+            EndpointConfig { default_model: model, ..cfg }
+        }
+        None => cfg,
+    }
+}
+
+// -------------------------------------------------------------------------
 // Public API
 // -------------------------------------------------------------------------
 
 /// Resolve the `EndpointConfig` for `feature`. Returns `None` when no
 /// enabled endpoint exists at all (callers decide how to surface this).
+///
+/// For simple features (formatting, grammar, etc.) the router automatically
+/// prefers a fast non-thinking model over a reasoning model if both are
+/// available on the endpoint.
 pub async fn resolve(
     state: &AppStateHandle,
     feature: &str,
@@ -143,7 +353,12 @@ pub async fn resolve(
         let conn = st.db.get().map_err(|e| e.to_string())?;
         query_endpoint(&conn, feature)
     };
-    stored.map(|(ep, model_override)| to_config(ep, model_override)).transpose()
+    let (ep, model_override) = match stored { Some(s) => s, None => return Ok(None) };
+    // Track whether the user explicitly chose this model via feature binding (G4 fix)
+    let user_override = model_override.as_ref().map_or(false, |m| !m.trim().is_empty());
+    let cfg = to_config(ep, model_override)?;
+    // Auto-select a better model for simple tasks when no explicit override is set.
+    Ok(Some(pick_best_model(feature, cfg, user_override).await))
 }
 
 // -------------------------------------------------------------------------
@@ -179,21 +394,40 @@ pub async fn get_feature_status(
         |r| r.get(0),
     ).unwrap_or_else(|_| ep.provider_type.clone());
 
-    let model = model_override
+    // Build the initial config to run it through pick_best_model so the
+    // pre-click indicator shows the actual model that will be used.
+    let raw_model = model_override
         .filter(|m| !m.trim().is_empty())
         .or_else(|| ep.default_model.as_ref().filter(|m| !m.trim().is_empty()).cloned())
-        .unwrap_or_else(|| "default".to_string());
+        .unwrap_or_default();
+    drop(conn); // release DB lock before async model fetch
+    drop(st);
+    let user_override = !raw_model.is_empty() && ep.default_model.as_deref().map_or(true, |d| d != raw_model);
+    let initial_cfg = to_config(
+        StoredEndpoint {
+            provider_type: ep.provider_type.clone(),
+            base_url: ep.base_url.clone(),
+            api_key: ep.api_key.clone(),
+            default_model: Some(raw_model),
+            extra_headers: ep.extra_headers.clone(),
+        },
+        None,
+    )?;
+    let resolved = pick_best_model(feature, initial_cfg, user_override).await;
+    let model = resolved.default_model.clone();
+    let ep_base_url = ep.base_url.clone();
+    let ep_provider_type = ep.provider_type.clone();
 
     let is_cloud = matches!(
-        ep.provider_type.as_str(),
+        ep_provider_type.as_str(),
         "openai" | "anthropic" | "google_gemini"
-    ) || (!ep.base_url.contains("localhost") && !ep.base_url.contains("127.0.0.1") && !ep.base_url.contains("::1"));
+    ) || (!ep_base_url.contains("localhost") && !ep_base_url.contains("127.0.0.1") && !ep_base_url.contains("::1"));
 
     Ok(Some(LlmFeatureStatus {
         feature: feature.to_string(),
         endpoint_name: name,
         model,
-        provider_type: ep.provider_type,
+        provider_type: ep_provider_type,
         is_cloud,
     }))
 }
@@ -368,13 +602,17 @@ async fn stream_openai(
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(|e| e.to_string())?;
         buf.push_str(&String::from_utf8_lossy(&bytes));
-        // Process SSE lines
-        while let Some(pos) = buf.find('\n') {
-            let line = buf[..pos].trim().to_string();
-            buf = buf[pos + 1..].to_string();
+        // M1 fix: process lines using cursor to avoid reallocating the buffer tail
+        let mut start = 0;
+        while let Some(rel) = buf[start..].find('\n') {
+            let end = start + rel;
+            let line = buf[start..end].trim();
+            start = end + 1;
             if line.starts_with("data: ") {
                 let data = &line[6..];
-                if data == "[DONE]" { return Ok(full_content); }
+                if data == "[DONE]" {
+                    return Ok(full_content);
+                }
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                     let token = json["choices"][0]["delta"]["content"]
                         .as_str().unwrap_or("").to_string();
@@ -385,6 +623,7 @@ async fn stream_openai(
                 }
             }
         }
+        buf.drain(..start);
     }
     Ok(full_content)
 }
@@ -422,7 +661,16 @@ pub async fn stream_call(
     let model_name = cfg.default_model.clone();
     let base_url = cfg.base_url.clone();
     let api_key = cfg.api_key.clone();
-    let pt = format!("{:?}", cfg.provider_type);
+    // C5 fix: store the string from DB (not Debug format) for reliable matching
+    // We need to extract provider_type before converting to the enum.
+    // Use a helper that maps the enum back to its canonical string.
+    let pt_str = match cfg.provider_type {
+        ProviderType::Ollama           => "ollama",
+        ProviderType::OpenaiCompatible | ProviderType::Openai | ProviderType::Airllm => "openai_compatible",
+        ProviderType::Anthropic        => "anthropic",
+        ProviderType::GoogleGemini     => "google_gemini",
+    };
+    let pt = pt_str.to_string();
     let cfg_clone = cfg.clone();
 
     let call_id_clone = call_id.clone();
@@ -460,42 +708,51 @@ pub async fn stream_call(
             });
         };
 
-        let result = match pt.as_str() {
-            "Ollama" => {
-                stream_ollama(
-                    &base_url, &system, &user, &model_name,
-                    temperature, max_tokens, &emit, &elapsed,
-                ).await
-            }
-            "OpenaiCompatible" | "Openai" => {
-                stream_openai(
-                    &base_url, api_key.as_deref(), &system, &user, &model_name,
-                    temperature, max_tokens, &emit, &elapsed,
-                ).await
-            }
-            _ => {
-                // Non-streaming fallback for Anthropic/Gemini
-                emit("generating", None, None, None, elapsed());
-                use minion_llm::types::{ChatMessage, ChatRequest};
-                let provider = create_provider(cfg_clone);
-                let req = ChatRequest {
-                    messages: vec![ChatMessage::user(user.clone())],
-                    system: Some(system.clone()),
-                    model: None,
-                    temperature,
-                    max_tokens,
-                    json_mode: false,
-                };
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(120),
-                    provider.chat(req),
-                ).await {
-                    Ok(Ok(resp)) => Ok(resp.content),
-                    Ok(Err(e))   => Err(e.to_string()),
-                    Err(_)       => Err("LLM request timed out after 120 seconds".to_string()),
+        // C4 fix: inject /nothink for Qwen3 to suppress chain-of-thought on simple tasks
+        let effective_system = maybe_inject_nothink(&model_name, &system);
+
+        // H3 fix: hard cap on total streaming time (300s) so leaked tasks don't run forever
+        let work = async {
+            match pt.as_str() {
+                "ollama" => {
+                    stream_ollama(
+                        &base_url, &effective_system, &user, &model_name,
+                        temperature, max_tokens, &emit, &elapsed,
+                    ).await
+                }
+                "openai_compatible" => {
+                    stream_openai(
+                        &base_url, api_key.as_deref(), &effective_system, &user, &model_name,
+                        temperature, max_tokens, &emit, &elapsed,
+                    ).await
+                }
+                _ => {
+                    emit("generating", None, None, None, elapsed());
+                    use minion_llm::types::{ChatMessage, ChatRequest};
+                    let provider = create_provider(cfg_clone);
+                    let req = ChatRequest {
+                        messages: vec![ChatMessage::user(user.clone())],
+                        system: Some(effective_system.clone()),
+                        model: None,
+                        temperature,
+                        max_tokens,
+                        json_mode: false,
+                    };
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(120),
+                        provider.chat(req),
+                    ).await {
+                        Ok(Ok(resp)) => Ok(resp.content),
+                        Ok(Err(e))   => Err(e.to_string()),
+                        Err(_)       => Err("LLM request timed out after 120 seconds".to_string()),
+                    }
                 }
             }
         };
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(300), work)
+            .await
+            .unwrap_or(Err("Streaming timed out after 5 minutes".to_string()));
 
         match result {
             Ok(content) => emit("done", None, Some(content), None, elapsed()),
