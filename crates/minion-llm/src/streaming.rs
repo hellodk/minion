@@ -80,7 +80,7 @@ where
         // Process every complete newline-terminated SSE line
         while let Some(pos) = line_buf.find('\n') {
             let line = line_buf[..pos].to_string();
-            line_buf.drain(..=pos as usize);
+            line_buf.drain(..=pos);
 
             if let Some(event) = parse_sse_line(&line) {
                 match event {

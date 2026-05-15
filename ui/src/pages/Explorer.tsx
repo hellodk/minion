@@ -284,8 +284,10 @@ const Explorer: Component = () => {
     }
   });
 
-  // Pre-click: load which LLM model will be used when an MD file is active
-  createEffect(async () => {
+  // Pre-click: load which LLM model will be used when an MD file is active.
+  // Uses a plain function (not createEffect async) to avoid SolidJS anti-pattern.
+  // Called once on mount and whenever activeTabPath changes via createEffect → refreshAiStatus().
+  async function refreshAiStatus() {
     const p = activeTabPath();
     const ext = p ? fileExt(p) : '';
     if (!p || !['md', 'markdown', 'mdx'].includes(ext)) {
@@ -296,12 +298,16 @@ const Explorer: Component = () => {
       const status = await invoke<{ endpoint_name: string; model: string } | null>(
         'fv_llm_status', { feature: 'explorer_format_md' }
       );
-      if (status) {
-        setAiStatus({ label: status.endpoint_name, model: status.model });
-      } else {
-        setAiStatus(null);
-      }
-    } catch { setAiStatus(null); }
+      setAiStatus(status ? { label: status.endpoint_name, model: status.model } : null);
+    } catch {
+      setAiStatus(null);
+    }
+  }
+  // Trigger status refresh whenever activeTabPath changes (synchronous createEffect)
+  createEffect(() => {
+    const p = activeTabPath(); // track signal
+    void refreshAiStatus();
+    return p; // suppress lint warning
   });
 
   // ---------------------------------------------------------------------------
@@ -625,6 +631,13 @@ const Explorer: Component = () => {
     const cur = fileCache[p] as FvFileContent | null;
     if (!cur || cur.is_binary) return;
 
+    // Refresh status and check — if still null after trying, surface a clear error
+    await refreshAiStatus();
+    if (!aiStatus()) {
+      setAiError('No LLM endpoint configured. Add one in Settings → LLM Endpoints.');
+      return;
+    }
+
     // Save original for revert
     if (!aiOriginals[p]) setAiOriginals(p, cur.text);
 
@@ -680,7 +693,8 @@ const Explorer: Component = () => {
     });
 
     try {
-      await invoke('fv_stream_format_md', { callId, markdown: cur.text });
+      // Tauri 2 uses snake_case: callId → call_id
+      await invoke('fv_stream_format_md', { callId: callId, markdown: cur.text });
     } catch (e) {
       clearInterval(aiElapsedTimer);
       setAiError(`Failed to start: ${e}`);
@@ -1485,9 +1499,8 @@ const Explorer: Component = () => {
                     </Show>
                     <button
                       onClick={startAiFix}
-                      disabled={!aiStatus()}
-                      title={aiStatus() ? `Fix with AI (${aiStatus()!.model})` : 'No LLM configured — go to Settings'}
-                      class="flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-800 disabled:opacity-40 transition-colors"
+                      title={aiStatus() ? `Fix with AI (${aiStatus()!.model})` : 'Fix with AI'}
+                      class="flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-800 transition-colors"
                     >
                       ✨ AI Fix
                     </button>

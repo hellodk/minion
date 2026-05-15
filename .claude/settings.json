@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build --workspace *)",
+      "Bash(cargo build -p *)",
+      "Bash(cargo build --manifest-path *)",
+      "Bash(cargo test --workspace *)",
+      "Bash(cargo test -p *)",
+      "Bash(cargo check *)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo fmt *)",
+      "Bash(cargo tauri dev *)",
+      "Bash(cd ui && pnpm typecheck *)",
+      "Bash(cd ui && pnpm lint *)",
+      "Bash(cd /home/dk/Documents/git/minion/ui && pnpm typecheck *)",
+      "Bash(kubectl get *)",
+      "Bash(kubectl describe *)",
+      "Bash(kubectl logs *)",
+      "Bash(kubectl top *)"
+    ],
+    "deny": []
+  }
+}

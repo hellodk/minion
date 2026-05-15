@@ -189,6 +189,25 @@ export function slideCount(deck: Deck): number {
   return deck.sections.reduce((n, s) => n + s.slides.length, 0);
 }
 
+export function createBlankSlide(sectionId: SectionId, canvasX: number, canvasY: number): Slide {
+  return {
+    id: crypto.randomUUID(),
+    section_id: sectionId,
+    canvas_x: canvasX,
+    canvas_y: canvasY,
+    width: 1920,
+    height: 1080,
+    z_layer: 0,
+    rotation: [0, 0, 0, 1],
+    layout: "blank",
+    background: { kind: "solid", color: { r: 17, g: 17, b: 26, a: 255 } },
+    transition: { kind: "fade", duration_ms: 400, easing: "ease" },
+    elements: [],
+    speaker_notes: { talking_points: [], presenter_cues: [], anticipated_questions: [] },
+    user_locked: false,
+  };
+}
+
 export interface GenerationConfig {
   theme_name?: string; audience: string; tone: string;
   language: string; target_duration_mins?: number;

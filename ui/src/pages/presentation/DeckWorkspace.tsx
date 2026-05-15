@@ -2,7 +2,7 @@ import { createSignal, onMount, Show } from "solid-js";
 import { getDeck, saveDeckPatch } from "../../lib/presentation-api";
 import type { DeckPatch } from "../../lib/deck-patch";
 import { createDeckStore } from "../../store/deck-store";
-import { slideById } from "../../lib/deck-schema";
+import { slideById, createBlankSlide } from "../../lib/deck-schema";
 import type { Element as DeckElement } from "../../lib/deck-schema";
 import SpatialCanvas from "./SpatialCanvas";
 import SlideEditor from "./SlideEditor";
@@ -37,7 +37,23 @@ export default function DeckWorkspace(props: Props) {
   };
 
   const handleAddSlide = () => {
-    console.log("[DeckWorkspace] onAddSlide — not yet implemented");
+    const deck = store.deck;
+    if (!deck) return;
+
+    const section = deck.sections[0];
+    const sectionId = section?.id ?? crypto.randomUUID();
+
+    const lastSlideId = deck.play_order[deck.play_order.length - 1];
+    const lastSlide = lastSlideId ? slideById(deck, lastSlideId) : undefined;
+    const canvasX = lastSlide ? lastSlide.canvas_x + 2100 : 100;
+    const canvasY = lastSlide ? lastSlide.canvas_y : 100;
+
+    const newSlide = createBlankSlide(sectionId, canvasX, canvasY);
+    const newOrder = [...deck.play_order, newSlide.id];
+
+    handlePatch({ op: "upsert_slide", section_id: sectionId, slide: newSlide });
+    handlePatch({ op: "set_play_order", order: newOrder });
+    setSelected(newSlide.id);
   };
 
   return (
