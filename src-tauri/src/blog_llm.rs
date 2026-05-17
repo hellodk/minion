@@ -584,7 +584,7 @@ pub async fn blog_llm_generate(
         "technical"      => "formal, precise, third-person, technical terminology, no contractions",
         "balanced"       => "clear and professional but approachable, occasional contractions",
         "conversational" => "casual, friendly, first-person, contractions, relatable analogies",
-        _                => "clear and professional but approachable, occasional contractions",
+        other            => return Err(format!("Unknown tone: {other}. Use: technical | balanced | conversational")),
     };
 
     let outline_section = outline
@@ -633,7 +633,13 @@ pub async fn blog_llm_improve(
         fetch_post(&c, &post_id)?
     };
 
-    let excerpt = if content.len() > 16_000 { &content[..16_000] } else { &content };
+    let excerpt = if content.len() > 16_000 {
+        let mut end = 16_000;
+        while !content.is_char_boundary(end) { end -= 1; }
+        &content[..end]
+    } else {
+        &content
+    };
 
     let system = "You are an expert editor. Improve the following blog post:\n\
                   - Sharpen the opening to hook the reader immediately\n\
