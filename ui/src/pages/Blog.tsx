@@ -284,6 +284,7 @@ const Blog: Component = () => {
         setEdContent(aiDraftOriginal);
         setAiDraftStreaming(false);
         setAiDraftStage('');
+        setAiDraftWords(0);
         if (aiDraftUnlisten) { aiDraftUnlisten(); aiDraftUnlisten = undefined; }
       }
     });
@@ -304,6 +305,7 @@ const Blog: Component = () => {
       setEdContent(aiDraftOriginal);
       setAiDraftStreaming(false);
       setAiDraftStage('');
+      setAiDraftWords(0);
       if (aiDraftUnlisten) { aiDraftUnlisten(); aiDraftUnlisten = undefined; }
     }
   };
@@ -314,6 +316,7 @@ const Blog: Component = () => {
     setAiDraftStreaming(false);
     setAiDraftStage('');
     setAiDraftOpen(false);
+    setAiDraftError(null);
   };
 
   const edSlug = createMemo(() => {
