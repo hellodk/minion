@@ -1,6 +1,6 @@
 [package]
 name = "minion-tauri"
-version = "1.11.133"
+version = "1.11.134"
 edition = "2021"
 description = "MINION - Unified Personal Intelligence Platform"
 license = "MIT"

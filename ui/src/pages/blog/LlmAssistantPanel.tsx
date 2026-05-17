@@ -222,6 +222,16 @@ const LlmAssistantPanel: Component<{
   const [snippetsError, setSnippetsError] = createSignal('');
   const [snippetsTried, setSnippetsTried] = createSignal(false);
 
+  // ── LinkedIn Post ─────────────────────────────────────────────────────────
+  const [linkedinPost, setLinkedinPost] = createSignal('');
+  const [linkedinLoading, setLinkedinLoading] = createSignal(false);
+  const [linkedinError, setLinkedinError] = createSignal('');
+
+  // ── Medium Article ────────────────────────────────────────────────────────
+  const [mediumArticle, setMediumArticle] = createSignal('');
+  const [mediumLoading, setMediumLoading] = createSignal(false);
+  const [mediumError, setMediumError] = createSignal('');
+
   const [variants, setVariants] = createSignal<BlogVariant[]>([]);
   const [adaptLoading, setAdaptLoading] = createSignal(false);
   const [adaptError, setAdaptError] = createSignal('');
@@ -255,6 +265,42 @@ const LlmAssistantPanel: Component<{
       await loadVariants();
     } catch (e) { setAdaptError(String(e)); }
     finally { setAdaptLoading(false); }
+  };
+
+  const runLinkedinPost = async () => {
+    if (!props.postId) return;
+    setLinkedinLoading(true);
+    setLinkedinError('');
+    try {
+      const v = await invoke<{ content: string } | null>('blog_llm_adapt', {
+        postId: props.postId,
+        platform: 'linkedin_post',
+      });
+      setLinkedinPost(v?.content ?? '');
+      if (!v) setLinkedinError('No output from AI.');
+    } catch (e) {
+      setLinkedinError(String(e));
+    } finally {
+      setLinkedinLoading(false);
+    }
+  };
+
+  const runMediumArticle = async () => {
+    if (!props.postId) return;
+    setMediumLoading(true);
+    setMediumError('');
+    try {
+      const v = await invoke<{ content: string } | null>('blog_llm_adapt', {
+        postId: props.postId,
+        platform: 'medium',
+      });
+      setMediumArticle(v?.content ?? '');
+      if (!v) setMediumError('No output from AI.');
+    } catch (e) {
+      setMediumError(String(e));
+    } finally {
+      setMediumLoading(false);
+    }
   };
 
   const runTone = async () => {
@@ -609,6 +655,76 @@ const LlmAssistantPanel: Component<{
             <Show when={toneError()}><ErrorNote msg={toneError()} /></Show>
             <Show when={toneLoading()}>
               <p class="text-[10px] text-gray-400 mt-1 italic">Rewriting post… this may take up to 90 seconds.</p>
+            </Show>
+          </div>
+
+          {/* LinkedIn Post */}
+          <div class="border-t border-gray-100 dark:border-gray-700 pt-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs font-semibold text-gray-600 dark:text-gray-300">LinkedIn Post</span>
+              <ActionBtn label="Generate" loading={linkedinLoading()} onClick={runLinkedinPost} />
+            </div>
+            <Show when={linkedinError()}><ErrorNote msg={linkedinError()} /></Show>
+            <Show when={linkedinLoading()}>
+              <p class="text-[10px] text-gray-400 italic">Formatting for LinkedIn feed… ~30s</p>
+            </Show>
+            <Show when={linkedinPost()}>
+              <div class="relative">
+                <textarea
+                  readOnly
+                  value={linkedinPost()}
+                  rows={8}
+                  class="w-full text-xs font-mono p-2 border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-900 text-gray-700 dark:text-gray-300 resize-none"
+                />
+                <div class="flex items-center justify-between mt-1">
+                  <span
+                    class="text-[10px]"
+                    classList={{
+                      'text-emerald-600': linkedinPost().length <= 1300,
+                      'text-amber-500': linkedinPost().length > 1300 && linkedinPost().length <= 2000,
+                      'text-red-500': linkedinPost().length > 2000,
+                    }}
+                  >
+                    {linkedinPost().length} chars {linkedinPost().length > 1300 ? '(over recommended 1,300)' : ''}
+                  </span>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(linkedinPost())}
+                    class="text-[10px] text-sky-600 hover:text-sky-800 font-medium"
+                  >
+                    Copy
+                  </button>
+                </div>
+              </div>
+            </Show>
+          </div>
+
+          {/* Medium Article */}
+          <div class="border-t border-gray-100 dark:border-gray-700 pt-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs font-semibold text-gray-600 dark:text-gray-300">Medium Article</span>
+              <ActionBtn label="Generate" loading={mediumLoading()} onClick={runMediumArticle} />
+            </div>
+            <Show when={mediumError()}><ErrorNote msg={mediumError()} /></Show>
+            <Show when={mediumLoading()}>
+              <p class="text-[10px] text-gray-400 italic">Formatting for Medium… ~30s</p>
+            </Show>
+            <Show when={mediumArticle()}>
+              <div class="relative">
+                <textarea
+                  readOnly
+                  value={mediumArticle()}
+                  rows={10}
+                  class="w-full text-xs font-mono p-2 border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-900 text-gray-700 dark:text-gray-300 resize-none"
+                />
+                <div class="flex justify-end mt-1 gap-2">
+                  <button
+                    onClick={() => navigator.clipboard.writeText(mediumArticle())}
+                    class="text-[10px] text-sky-600 hover:text-sky-800 font-medium"
+                  >
+                    Copy Markdown
+                  </button>
+                </div>
+              </div>
             </Show>
           </div>
 
