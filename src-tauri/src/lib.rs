@@ -305,6 +305,8 @@ pub fn run() {
             blog_llm::blog_get_variants,
             blog_llm::blog_delete_variant,
             blog_llm::blog_get_snippets,
+            blog_llm::blog_llm_generate,
+            blog_llm::blog_llm_improve,
             // Health Vault commands (week 1)
             health_commands::health_get_consent,
             health_commands::health_accept_consent,

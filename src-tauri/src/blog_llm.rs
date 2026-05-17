@@ -373,17 +373,35 @@ pub async fn blog_llm_adapt(
              include a 'Key takeaways' section at the end"
         }
         "medium" => {
-            "Medium style: narrative-driven, add scene-setting opening, \
-             break up code-heavy sections with more prose explanation"
+            "Medium Article style:\n\
+             1. Keep the # Title as the first line\n\
+             2. Second line: an italic subtitle paragraph starting with * (e.g. *A deep dive into…*)\n\
+             3. Use ## for all section headings (H2 only — no H3)\n\
+             4. Extract one key insight as a > blockquote pull quote\n\
+             5. All code blocks must have language fences (```js, ```rust, etc.)\n\
+             6. End the post with a line: **Tags:** tag1, tag2, tag3, tag4, tag5 (max 5 relevant tags)\n\
+             7. Final line: *Originally published at [your blog]*\n\
+             Return only the Markdown — no preamble."
         }
         "substack" => {
             "Substack newsletter style: personal opener (e.g. 'Hey friends,'), \
              casual conversational tone, end with a personal sign-off and newsletter CTA"
         }
         "linkedin" => {
-            "LinkedIn article style: compress to key points, \
+            "LinkedIn Article style: compress to key points, \
              add bold headers for each major point, \
              end with a question to drive comments"
+        }
+        "linkedin_post" => {
+            "LinkedIn Post style (NOT an article — this is a short post for the feed):\n\
+             1. First 1-2 lines are the HOOK — they must grab attention before the 'see more' fold\n\
+             2. Use a blank line between every 2-3 sentences (LinkedIn renders line breaks)\n\
+             3. Use • for bullet points — NOT hyphens or asterisks\n\
+             4. NO markdown: no #headers, no **bold**, no *italic*\n\
+             5. End with a 3-5 hashtag block on its own line (e.g. #pnpm #nodejs #devtools)\n\
+             6. Final line: a question to invite comments (e.g. 'Have you made the switch yet?')\n\
+             7. Target: 900–1,300 characters total\n\
+             Return ONLY the plain text post — no markdown, no preamble."
         }
         _ => return Err(format!("Unknown platform: {}", platform)),
     };
@@ -545,4 +563,99 @@ pub async fn blog_get_snippets(
         .ok()
         .flatten();
     Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+}
+
+#[tauri::command]
+pub async fn blog_llm_generate(
+    app: tauri::AppHandle,
+    state: State<'_, AppStateHandle>,
+    post_id: String,
+    outline: Option<String>,
+    tone: String,
+    call_id: String,
+) -> Result<(), String> {
+    let db = { state.read().await.db.clone() };
+    let (title, _) = {
+        let c = db.get().map_err(|e| e.to_string())?;
+        fetch_post(&c, &post_id)?
+    };
+
+    let tone_instruction = match tone.as_str() {
+        "technical"      => "formal, precise, third-person, technical terminology, no contractions",
+        "balanced"       => "clear and professional but approachable, occasional contractions",
+        "conversational" => "casual, friendly, first-person, contractions, relatable analogies",
+        _                => "clear and professional but approachable, occasional contractions",
+    };
+
+    let outline_section = outline
+        .as_deref()
+        .filter(|o| !o.trim().is_empty())
+        .map(|o| format!("\n\nKey points / outline to cover:\n{}", o))
+        .unwrap_or_default();
+
+    let system = format!(
+        "You are an expert technical writer. Write a complete, publication-ready blog post in Markdown.\n\
+         Tone: {tone_instruction}.\n\
+         Structure:\n\
+         - # Title (reuse or improve the given title)\n\
+         - Opening paragraph that hooks the reader\n\
+         - 3-5 ## section headings with substantive content (200-400 words each)\n\
+         - Code blocks with language fences where relevant\n\
+         - Closing section with a concrete call-to-action\n\
+         Return ONLY the Markdown content — no explanations, no surrounding fences."
+    );
+    let user = format!("Post title: {title}{outline_section}");
+
+    crate::llm_router::stream_call(
+        app,
+        &state,
+        "blog_llm_generate".to_string(),
+        call_id,
+        system,
+        user,
+        Some(0.7),
+        Some(4096),
+        String::new(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn blog_llm_improve(
+    app: tauri::AppHandle,
+    state: State<'_, AppStateHandle>,
+    post_id: String,
+    call_id: String,
+) -> Result<(), String> {
+    let db = { state.read().await.db.clone() };
+    let (title, content) = {
+        let c = db.get().map_err(|e| e.to_string())?;
+        fetch_post(&c, &post_id)?
+    };
+
+    let excerpt = if content.len() > 16_000 { &content[..16_000] } else { &content };
+
+    let system = "You are an expert editor. Improve the following blog post:\n\
+                  - Sharpen the opening to hook the reader immediately\n\
+                  - Replace passive voice with active verbs\n\
+                  - Remove filler words (very, just, really, quite)\n\
+                  - Strengthen weak verbs (is/are/was/were → precise verbs)\n\
+                  - Ensure all ## sections have a strong topic sentence\n\
+                  - Improve flow between paragraphs\n\
+                  - Preserve all code blocks, headings, and factual content exactly\n\
+                  Return ONLY the improved Markdown — no explanations.";
+    let user = format!("Post title: {title}\n\n{excerpt}");
+
+    crate::llm_router::stream_call(
+        app,
+        &state,
+        "blog_llm_improve".to_string(),
+        call_id,
+        system.to_string(),
+        user,
+        Some(0.4),
+        Some(4096),
+        String::new(),
+    )
+    .await
 }
