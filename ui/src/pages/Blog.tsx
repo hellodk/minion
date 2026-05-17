@@ -1,5 +1,6 @@
 import { Component, createSignal, createMemo, For, Show, Switch, Match, onMount, onCleanup } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import ImportTab from './blog/ImportTab';
 import AssetsTab from './blog/AssetsTab';
 import PublishTab from './blog/PublishTab';
@@ -144,6 +145,17 @@ const Blog: Component = () => {
   // LLM assistant panel
   const [showLlmPanel, setShowLlmPanel] = createSignal(false);
 
+  // AI Draft Bar state
+  const [aiDraftOpen, setAiDraftOpen] = createSignal(false);
+  const [aiDraftOutline, setAiDraftOutline] = createSignal('');
+  const [aiDraftTone, setAiDraftTone] = createSignal<'conversational' | 'balanced' | 'technical'>('conversational');
+  const [aiDraftStreaming, setAiDraftStreaming] = createSignal(false);
+  const [aiDraftStage, setAiDraftStage] = createSignal('');
+  const [aiDraftWords, setAiDraftWords] = createSignal(0);
+  const [aiDraftError, setAiDraftError] = createSignal<string | null>(null);
+  let aiDraftUnlisten: (() => void) | undefined;
+  let aiDraftOriginal = '';
+
   // Split-view state
   type ViewMode = 'editor' | 'split' | 'preview';
   const [viewMode, setViewMode] = createSignal<ViewMode>('split');
@@ -190,6 +202,7 @@ const Blog: Component = () => {
   };
 
   onCleanup(() => { if (autoSaveDebounce) clearTimeout(autoSaveDebounce); });
+  onCleanup(() => { if (aiDraftUnlisten) aiDraftUnlisten(); });
 
   // Derived
   const edWordCount = createMemo(() => wordCount(edContent()));
@@ -224,6 +237,83 @@ const Blog: Component = () => {
         tagsInputRef?.focus();
         break;
     }
+  };
+
+  type LlmStreamEvent = {
+    call_id: string; stage: string; chunk?: string;
+    content?: string; model?: string; elapsed_ms: number; error?: string;
+  };
+
+  const startAiDraft = async (mode: 'write' | 'improve') => {
+    const id = editingId();
+    if (!id) return;
+
+    aiDraftOriginal = edContent();
+    setAiDraftStreaming(true);
+    setAiDraftStage('Connecting…');
+    setAiDraftError(null);
+    setAiDraftWords(0);
+
+    const callId = `blog-draft-${Date.now()}`;
+    let accumulated = '';
+
+    if (aiDraftUnlisten) aiDraftUnlisten();
+    aiDraftUnlisten = await listen<LlmStreamEvent>('llm-stream', (event) => {
+      const ev = event.payload;
+      if (ev.call_id !== callId) return;
+      if (ev.stage === 'connecting') {
+        setAiDraftStage('Connecting…');
+      } else if (ev.stage === 'thinking' || ev.stage === 'generating') {
+        setAiDraftStage('Generating…');
+      } else if (ev.stage === 'chunk') {
+        accumulated += ev.chunk ?? '';
+        setEdContent(accumulated);
+        setAiDraftWords(wordCount(accumulated));
+        setAiDraftStage('Writing…');
+      } else if (ev.stage === 'done') {
+        const final = ev.content ?? accumulated;
+        setEdContent(final);
+        setAiDraftWords(wordCount(final));
+        setAiDraftStreaming(false);
+        setAiDraftStage('');
+        setAiDraftOpen(false);
+        if (aiDraftUnlisten) { aiDraftUnlisten(); aiDraftUnlisten = undefined; }
+        invoke('blog_update_draft', { postId: id, draftContent: final }).catch(() => {});
+      } else if (ev.stage === 'error') {
+        setAiDraftError(ev.error ?? 'Generation failed');
+        setEdContent(aiDraftOriginal);
+        setAiDraftStreaming(false);
+        setAiDraftStage('');
+        if (aiDraftUnlisten) { aiDraftUnlisten(); aiDraftUnlisten = undefined; }
+      }
+    });
+
+    try {
+      if (mode === 'write') {
+        await invoke('blog_llm_generate', {
+          postId: id,
+          outline: aiDraftOutline().trim() || null,
+          tone: aiDraftTone(),
+          callId,
+        });
+      } else {
+        await invoke('blog_llm_improve', { postId: id, callId });
+      }
+    } catch (e) {
+      setAiDraftError(`Failed to start: ${e}`);
+      setEdContent(aiDraftOriginal);
+      setAiDraftStreaming(false);
+      setAiDraftStage('');
+      if (aiDraftUnlisten) { aiDraftUnlisten(); aiDraftUnlisten = undefined; }
+    }
+  };
+
+  const cancelAiDraft = () => {
+    if (aiDraftUnlisten) { aiDraftUnlisten(); aiDraftUnlisten = undefined; }
+    setEdContent(aiDraftOriginal);
+    setAiDraftStreaming(false);
+    setAiDraftStage('');
+    setAiDraftOpen(false);
   };
 
   const edSlug = createMemo(() => {
@@ -752,6 +842,96 @@ const Blog: Component = () => {
                   onInput={(e) => setEdTitle(e.currentTarget.value)}
                   class="w-full text-2xl font-bold bg-transparent border-none outline-none placeholder-gray-300 dark:placeholder-gray-600 text-gray-900 dark:text-white mb-4"
                 />
+
+                {/* AI Draft Bar */}
+                <Show when={editingId()}>
+                  <div class="mb-3">
+                    <div class="flex items-center gap-2 p-2 bg-gray-50 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-700 rounded-lg">
+                      <Show when={!aiDraftStreaming()} fallback={
+                        <>
+                          <span class="text-xs text-gray-500 animate-pulse flex-1">{aiDraftStage()} {aiDraftWords() > 0 ? `· ${aiDraftWords()} words` : ''}</span>
+                          <button
+                            onClick={cancelAiDraft}
+                            class="px-2 py-1 text-xs bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 rounded hover:bg-red-100 transition-colors"
+                          >
+                            ✕ Cancel
+                          </button>
+                        </>
+                      }>
+                        <button
+                          onClick={() => { setAiDraftOpen(v => !v); setAiDraftError(null); }}
+                          class="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-md hover:border-sky-300 hover:text-sky-600 transition-colors text-gray-600 dark:text-gray-300"
+                        >
+                          ✨ Write
+                        </button>
+                        <button
+                          onClick={() => startAiDraft('improve')}
+                          disabled={!edContent().trim()}
+                          class="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-md hover:border-sky-300 hover:text-sky-600 transition-colors text-gray-600 dark:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          ✨ Improve
+                        </button>
+                        <span class="text-[10px] text-gray-400 ml-auto">AI drafting</span>
+                      </Show>
+                    </div>
+
+                    <Show when={aiDraftError()}>
+                      <p class="mt-1 text-xs text-red-500 dark:text-red-400">⚠ {aiDraftError()}</p>
+                    </Show>
+
+                    <Show when={aiDraftOpen() && !aiDraftStreaming()}>
+                      <div class="mt-2 p-3 bg-white dark:bg-gray-900 border border-sky-200 dark:border-sky-800 rounded-lg space-y-2">
+                        <div>
+                          <label class="block text-[11px] font-medium text-gray-500 dark:text-gray-400 mb-1">
+                            Key points / outline (optional)
+                          </label>
+                          <textarea
+                            placeholder="e.g.&#10;- What is pnpm&#10;- Content-addressable store&#10;- Hard links explained"
+                            value={aiDraftOutline()}
+                            onInput={(e) => setAiDraftOutline(e.currentTarget.value)}
+                            rows={4}
+                            class="w-full px-2 py-1.5 text-xs border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-800 dark:text-gray-200 resize-none outline-none focus:border-sky-300"
+                          />
+                        </div>
+                        <div>
+                          <label class="block text-[11px] font-medium text-gray-500 dark:text-gray-400 mb-1">Tone</label>
+                          <div class="flex gap-3">
+                            <For each={(['conversational', 'balanced', 'technical'] as const)}>
+                              {(t) => (
+                                <label class="flex items-center gap-1 text-xs text-gray-600 dark:text-gray-300 cursor-pointer">
+                                  <input
+                                    type="radio"
+                                    name="ai-draft-tone"
+                                    value={t}
+                                    checked={aiDraftTone() === t}
+                                    onChange={() => setAiDraftTone(t)}
+                                    class="accent-sky-500"
+                                  />
+                                  {t.charAt(0).toUpperCase() + t.slice(1)}
+                                </label>
+                              )}
+                            </For>
+                          </div>
+                        </div>
+                        <div class="flex justify-end gap-2 pt-1">
+                          <button
+                            onClick={() => setAiDraftOpen(false)}
+                            class="px-3 py-1 text-xs text-gray-500 border border-gray-200 dark:border-gray-700 rounded hover:bg-gray-50 dark:hover:bg-gray-800"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={() => startAiDraft('write')}
+                            disabled={!edTitle().trim()}
+                            class="px-3 py-1 text-xs font-medium bg-sky-500 text-white rounded hover:bg-sky-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            ✨ Generate
+                          </button>
+                        </div>
+                      </div>
+                    </Show>
+                  </div>
+                </Show>
 
                 {/* Content */}
                 <textarea
